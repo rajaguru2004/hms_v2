@@ -1,5 +1,12 @@
-import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  OnModuleInit,
+  OnModuleDestroy,
+  Logger,
+} from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 
 /**
  * PrismaService — enterprise-grade Prisma client wrapper.
@@ -15,22 +22,28 @@ import { PrismaClient } from '@prisma/client';
  * without adding an extra wrapper layer. Services receive this class directly.
  */
 @Injectable()
-export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+export class PrismaService
+  extends PrismaClient
+  implements OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(PrismaService.name);
 
   constructor() {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      throw new Error('DATABASE_URL environment variable is missing');
+    }
+    const pool = new Pool({ connectionString });
+    const adapter = new PrismaPg(pool);
+
     super({
-      // Prisma 7: datasource URL passed here to override schema datasource
-      // Falls back to DATABASE_URL env var if not set
-      ...(process.env.DATABASE_URL && {
-        datasources: { db: { url: process.env.DATABASE_URL } },
-      }),
+      adapter,
       log: [
         { level: 'query', emit: 'event' },
         { level: 'error', emit: 'stdout' },
         { level: 'warn', emit: 'stdout' },
       ],
-    } as ConstructorParameters<typeof import('@prisma/client').PrismaClient>[0]);
+    });
 
     // Log slow queries in development
     if (process.env.NODE_ENV === 'development') {
@@ -60,7 +73,9 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
    * NestJS calls onModuleDestroy automatically, but this is available
    * for manual invocation from main.ts shutdown hooks.
    */
-  async enableShutdownHooks(app: { close: () => Promise<void> }): Promise<void> {
+  async enableShutdownHooks(app: {
+    close: () => Promise<void>;
+  }): Promise<void> {
     process.on('beforeExit', async () => {
       await app.close();
     });

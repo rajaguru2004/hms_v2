@@ -25,7 +25,8 @@ export class LoggingInterceptor implements NestInterceptor {
     const { method, url, ip } = request;
     const correlationId = request.headers[CORRELATION_ID_HEADER] as string;
     const userId = (request as unknown as Record<string, unknown>).user
-      ? ((request as unknown as Record<string, unknown>).user as { id: string }).id
+      ? ((request as unknown as Record<string, unknown>).user as { id: string })
+          .id
       : 'anonymous';
 
     const startTime = Date.now();

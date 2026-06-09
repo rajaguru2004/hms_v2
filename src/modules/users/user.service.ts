@@ -4,6 +4,7 @@ import { UserRepository } from './user.repository';
 import { AuditService } from '../../audit/audit.service';
 import { AppCacheService } from '../../cache/cache.service';
 import { CreateUserDto, UpdateUserDto } from './dto/user.dto';
+import { PrismaService } from '../../prisma/prisma.service';
 import {
   NotFoundException,
   ConflictException,
@@ -33,6 +34,7 @@ export class UserService {
     private readonly userRepository: UserRepository,
     private readonly auditService: AuditService,
     private readonly cacheService: AppCacheService,
+    private readonly prisma: PrismaService,
   ) {}
 
   private readonly CACHE_PREFIX = 'user';
@@ -43,7 +45,10 @@ export class UserService {
    * - Hashes password
    * - Logs audit
    */
-  async create(dto: CreateUserDto, createdBy?: string): Promise<Omit<User, 'password'>> {
+  async create(
+    dto: CreateUserDto,
+    createdBy?: string,
+  ): Promise<Omit<User, 'password'>> {
     // Check email uniqueness
     const existing = await this.userRepository.findByEmail(dto.email);
     if (existing) {
@@ -55,12 +60,36 @@ export class UserService {
 
     const hashedPassword = await hashPassword(dto.password);
 
+    // Resolve organizationId
+    let organizationId = dto.organizationId;
+    if (!organizationId) {
+      const defaultOrg = await this.prisma.organization.findFirst({
+        orderBy: { createdAt: 'asc' },
+      });
+      if (!defaultOrg) {
+        // Create default organization
+        const newOrg = await this.prisma.organization.create({
+          data: {
+            name: 'Default Hospital',
+            slug: 'default-hospital',
+          },
+        });
+        organizationId = newOrg.id;
+      } else {
+        organizationId = defaultOrg.id;
+      }
+    }
+
+    const fullName = `${dto.firstName} ${dto.lastName}`.trim();
+
     const user = await this.userRepository.create({
       email: dto.email,
       password: hashedPassword,
       firstName: dto.firstName,
       lastName: dto.lastName,
+      fullName,
       phone: dto.phone,
+      organization: { connect: { id: organizationId } },
       createdBy,
     });
 
@@ -70,7 +99,12 @@ export class UserService {
       action: AuditAction.CREATE,
       entityName: 'User',
       entityId: user.id,
-      newValues: { email: user.email, firstName: user.firstName, lastName: user.lastName },
+      newValues: {
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        fullName,
+      },
     });
 
     return this.sanitize(user);
@@ -83,7 +117,8 @@ export class UserService {
     const cacheKey = AppCacheService.buildKey(this.CACHE_PREFIX, id);
 
     // Cache read-through
-    const cached = await this.cacheService.get<Omit<User, 'password'>>(cacheKey);
+    const cached =
+      await this.cacheService.get<Omit<User, 'password'>>(cacheKey);
     if (cached) return cached;
 
     const user = await this.userRepository.findById(id);
@@ -100,13 +135,17 @@ export class UserService {
   /**
    * List users with pagination.
    */
-  async findAll(pagination: PaginationDto): Promise<PaginatedResult<Omit<User, 'password'>>> {
+  async findAll(
+    pagination: PaginationDto,
+  ): Promise<PaginatedResult<Omit<User, 'password'>>> {
     const result = await this.userRepository.paginate(
       {},
       {
         page: pagination.page,
         limit: pagination.take,
-        orderBy: { [pagination.orderBy ?? 'createdAt']: pagination.orderDir ?? 'desc' },
+        orderBy: {
+          [pagination.orderBy ?? 'createdAt']: pagination.orderDir ?? 'desc',
+        },
       },
     );
 
@@ -129,10 +168,21 @@ export class UserService {
       throw new NotFoundException('User not found', ErrorCodes.USER_NOT_FOUND);
     }
 
-    const updated = await this.userRepository.update(id, { ...dto, updatedBy });
+    const updateData: any = { ...dto, updatedBy };
+    if (dto.firstName !== undefined || dto.lastName !== undefined) {
+      const newFirstName =
+        dto.firstName !== undefined ? dto.firstName : existing.firstName;
+      const newLastName =
+        dto.lastName !== undefined ? dto.lastName : existing.lastName;
+      updateData.fullName = `${newFirstName || ''} ${newLastName || ''}`.trim();
+    }
+
+    const updated = await this.userRepository.update(id, updateData);
 
     // Invalidate cache
-    await this.cacheService.del(AppCacheService.buildKey(this.CACHE_PREFIX, id));
+    await this.cacheService.del(
+      AppCacheService.buildKey(this.CACHE_PREFIX, id),
+    );
 
     // Audit: record changes
     void this.auditService.log({
@@ -140,8 +190,16 @@ export class UserService {
       action: AuditAction.UPDATE,
       entityName: 'User',
       entityId: id,
-      oldValues: { firstName: existing.firstName, lastName: existing.lastName, phone: existing.phone },
-      newValues: { firstName: updated.firstName, lastName: updated.lastName, phone: updated.phone },
+      oldValues: {
+        firstName: existing.firstName,
+        lastName: existing.lastName,
+        phone: existing.phone,
+      },
+      newValues: {
+        firstName: updated.firstName,
+        lastName: updated.lastName,
+        phone: updated.phone,
+      },
     });
 
     return this.sanitize(updated);
@@ -159,7 +217,9 @@ export class UserService {
     await this.userRepository.softDelete(id, deletedBy);
 
     // Invalidate cache
-    await this.cacheService.del(AppCacheService.buildKey(this.CACHE_PREFIX, id));
+    await this.cacheService.del(
+      AppCacheService.buildKey(this.CACHE_PREFIX, id),
+    );
 
     // Audit
     void this.auditService.log({

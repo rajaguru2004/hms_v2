@@ -7,7 +7,10 @@ import appConfig from './config/app.config';
 import databaseConfig from './config/database.config';
 import jwtConfig from './config/jwt.config';
 import redisConfig from './config/redis.config';
-import { validationSchema, validationOptions } from './config/validation.schema';
+import {
+  validationSchema,
+  validationOptions,
+} from './config/validation.schema';
 
 import { PrismaModule } from './prisma/prisma.module';
 import { AuditModule } from './audit/audit.module';
@@ -58,7 +61,10 @@ import { GlobalExceptionFilter } from './common/filters/global-exception.filter'
       pinoHttp: {
         transport:
           process.env.NODE_ENV !== 'production'
-            ? { target: 'pino-pretty', options: { colorize: true, singleLine: true } }
+            ? {
+                target: 'pino-pretty',
+                options: { colorize: true, singleLine: true },
+              }
             : undefined,
         level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
         autoLogging: false, // We log manually via LoggingInterceptor

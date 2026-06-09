@@ -91,7 +91,9 @@ export class AppCacheService {
       const keys = await this.redis.keys(`${prefix}*`);
       if (keys.length > 0) {
         await this.redis.del(...keys);
-        this.logger.debug(`Invalidated ${keys.length} cache keys with prefix: ${prefix}`);
+        this.logger.debug(
+          `Invalidated ${keys.length} cache keys with prefix: ${prefix}`,
+        );
       }
     } catch (err) {
       this.logger.error(`Cache invalidation error for prefix ${prefix}`, err);

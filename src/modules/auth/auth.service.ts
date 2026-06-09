@@ -6,9 +6,7 @@ import { UserRepository } from '../users/user.repository';
 import { LoginDto, TokenResponseDto } from './dto/auth.dto';
 import { AuditService } from '../../audit/audit.service';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  UnauthorizedException,
-} from '../../common/exceptions/app.exception';
+import { UnauthorizedException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/exceptions/error-codes';
 import { comparePassword, hashPassword } from '../../common/utils/hash.util';
 import { JwtPayload } from '../../common/types/jwt-payload.type';
@@ -36,7 +34,10 @@ export class AuthService {
     private readonly prisma: PrismaService,
   ) {
     this.accessExpiresIn = this.config.get<string>('jwt.expiresIn', '15m');
-    this.refreshExpiresIn = this.config.get<string>('jwt.refreshExpiresIn', '7d');
+    this.refreshExpiresIn = this.config.get<string>(
+      'jwt.refreshExpiresIn',
+      '7d',
+    );
   }
 
   /**
@@ -52,7 +53,25 @@ export class AuthService {
         ipAddress,
         metadata: { email: dto.email },
       });
-      throw new UnauthorizedException('Invalid credentials', ErrorCodes.INVALID_CREDENTIALS);
+      throw new UnauthorizedException(
+        'Invalid credentials',
+        ErrorCodes.INVALID_CREDENTIALS,
+      );
+    }
+
+    if (!user.password) {
+      await this.auditService.log({
+        userId: user.id,
+        action: AuditAction.LOGIN_FAILED,
+        entityName: 'User',
+        entityId: user.id,
+        ipAddress,
+        metadata: { reason: 'Password not set' },
+      });
+      throw new UnauthorizedException(
+        'Password not set. Please accept your invitation first.',
+        ErrorCodes.INVALID_CREDENTIALS,
+      );
     }
 
     const passwordValid = await comparePassword(dto.password, user.password);
@@ -64,11 +83,16 @@ export class AuthService {
         entityId: user.id,
         ipAddress,
       });
-      throw new UnauthorizedException('Invalid credentials', ErrorCodes.INVALID_CREDENTIALS);
+      throw new UnauthorizedException(
+        'Invalid credentials',
+        ErrorCodes.INVALID_CREDENTIALS,
+      );
     }
 
     // Load roles + permissions for token payload
-    const fullUser = await this.userRepository.findByIdWithRolesAndPermissions(user.id);
+    const fullUser = await this.userRepository.findByIdWithRolesAndPermissions(
+      user.id,
+    );
     const roles = fullUser!.userRoles.map((ur) => ur.role.name);
     const permissions = [
       ...new Set(
@@ -78,7 +102,12 @@ export class AuthService {
       ),
     ];
 
-    const tokenPair = await this.generateTokenPair(user.id, user.email, roles, permissions);
+    const tokenPair = await this.generateTokenPair(
+      user.id,
+      user.email,
+      roles,
+      permissions,
+    );
 
     // Update last login timestamp
     await this.prisma.user.update({
@@ -102,14 +131,24 @@ export class AuthService {
    * Refresh — rotate token pair.
    * Revokes old refresh token, issues new access + refresh.
    */
-  async refreshTokens(refreshToken: string, ipAddress?: string): Promise<TokenResponseDto> {
+  async refreshTokens(
+    refreshToken: string,
+    ipAddress?: string,
+  ): Promise<TokenResponseDto> {
     const tokenRecord = await this.prisma.refreshToken.findUnique({
       where: { token: await hashPassword(refreshToken) },
       include: { user: true },
     });
 
-    if (!tokenRecord || tokenRecord.isRevoked || tokenRecord.expiresAt < new Date()) {
-      throw new UnauthorizedException('Invalid or expired refresh token', ErrorCodes.TOKEN_INVALID);
+    if (
+      !tokenRecord ||
+      tokenRecord.isRevoked ||
+      tokenRecord.expiresAt < new Date()
+    ) {
+      throw new UnauthorizedException(
+        'Invalid or expired refresh token',
+        ErrorCodes.TOKEN_INVALID,
+      );
     }
 
     // Revoke old token (rotation)
@@ -119,7 +158,9 @@ export class AuthService {
     });
 
     const user = tokenRecord.user;
-    const fullUser = await this.userRepository.findByIdWithRolesAndPermissions(user.id);
+    const fullUser = await this.userRepository.findByIdWithRolesAndPermissions(
+      user.id,
+    );
     const roles = fullUser!.userRoles.map((ur) => ur.role.name);
     const permissions = [
       ...new Set(
@@ -129,7 +170,13 @@ export class AuthService {
       ),
     ];
 
-    return this.generateTokenPair(user.id, user.email, roles, permissions, ipAddress);
+    return this.generateTokenPair(
+      user.id,
+      user.email,
+      roles,
+      permissions,
+      ipAddress,
+    );
   }
 
   /**

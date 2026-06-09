@@ -33,9 +33,26 @@ export class AuditService {
    */
   async log(dto: CreateAuditLogDto): Promise<void> {
     try {
+      let orgId: string | undefined = dto.metadata?.organizationId as
+        | string
+        | undefined;
+      if (dto.userId && !orgId) {
+        const user = await this.prisma.user.findUnique({
+          where: { id: dto.userId },
+          select: { organizationId: true },
+        });
+        orgId = user?.organizationId;
+      }
+
+      if (!orgId) {
+        const defaultOrg = await this.prisma.organization.findFirst({
+          select: { id: true },
+        });
+        orgId = defaultOrg?.id;
+      }
+
       await this.prisma.auditLog.create({
         data: {
-          userId: dto.userId,
           action: dto.action,
           entityName: dto.entityName,
           entityId: dto.entityId,
@@ -44,6 +61,8 @@ export class AuditService {
           ipAddress: dto.ipAddress,
           userAgent: dto.userAgent,
           metadata: dto.metadata as object,
+          user: dto.userId ? { connect: { id: dto.userId } } : undefined,
+          organization: orgId ? { connect: { id: orgId } } : undefined,
         },
       });
     } catch (error) {

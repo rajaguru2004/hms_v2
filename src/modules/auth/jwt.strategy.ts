@@ -3,7 +3,10 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { UserRepository } from '../users/user.repository';
-import { JwtPayload, AuthenticatedUser } from '../../common/types/jwt-payload.type';
+import {
+  JwtPayload,
+  AuthenticatedUser,
+} from '../../common/types/jwt-payload.type';
 import { UnauthorizedException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/exceptions/error-codes';
 
@@ -33,10 +36,15 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
   async validate(payload: JwtPayload): Promise<AuthenticatedUser> {
     if (payload.type !== 'access') {
-      throw new UnauthorizedException('Invalid token type', ErrorCodes.TOKEN_INVALID);
+      throw new UnauthorizedException(
+        'Invalid token type',
+        ErrorCodes.TOKEN_INVALID,
+      );
     }
 
-    const user = await this.userRepository.findByIdWithRolesAndPermissions(payload.sub);
+    const user = await this.userRepository.findByIdWithRolesAndPermissions(
+      payload.sub,
+    );
 
     if (!user || !user.isActive) {
       throw new UnauthorizedException(

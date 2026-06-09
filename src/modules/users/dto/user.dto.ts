@@ -6,7 +6,12 @@ import {
   IsOptional,
   IsPhoneNumber,
 } from 'class-validator';
-import { ApiProperty, ApiPropertyOptional, PartialType, OmitType } from '@nestjs/swagger';
+import {
+  ApiProperty,
+  ApiPropertyOptional,
+  PartialType,
+  OmitType,
+} from '@nestjs/swagger';
 
 export class CreateUserDto {
   @ApiProperty({ example: 'john.doe@hospital.com' })
@@ -35,9 +40,16 @@ export class CreateUserDto {
   @IsOptional()
   @IsString()
   phone?: string;
+
+  @ApiPropertyOptional({ example: 'org_cuid_here' })
+  @IsOptional()
+  @IsString()
+  organizationId?: string;
 }
 
-export class UpdateUserDto extends PartialType(OmitType(CreateUserDto, ['password', 'email'])) {}
+export class UpdateUserDto extends PartialType(
+  OmitType(CreateUserDto, ['password', 'email']),
+) {}
 
 export class ChangePasswordDto {
   @ApiProperty()
@@ -54,9 +66,11 @@ export class ChangePasswordDto {
 
 export class UserResponseDto {
   @ApiProperty() id: string;
+  @ApiProperty() organizationId: string;
   @ApiProperty() email: string;
-  @ApiProperty() firstName: string;
-  @ApiProperty() lastName: string;
+  @ApiProperty() fullName: string;
+  @ApiPropertyOptional() firstName?: string;
+  @ApiPropertyOptional() lastName?: string;
   @ApiPropertyOptional() phone?: string;
   @ApiProperty() isActive: boolean;
   @ApiPropertyOptional() lastLoginAt?: Date;

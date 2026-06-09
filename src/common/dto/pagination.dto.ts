@@ -1,7 +1,18 @@
-import { IsOptional, IsPositive, IsInt, IsString, IsIn, Min } from 'class-validator';
+import {
+  IsOptional,
+  IsPositive,
+  IsInt,
+  IsString,
+  IsIn,
+  Min,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { DEFAULT_LIMIT, DEFAULT_PAGE, MAX_LIMIT } from '../constants/app.constants';
+import {
+  DEFAULT_LIMIT,
+  DEFAULT_PAGE,
+  MAX_LIMIT,
+} from '../constants/app.constants';
 
 /**
  * PaginationDto — base DTO for all list endpoints.
@@ -13,14 +24,20 @@ import { DEFAULT_LIMIT, DEFAULT_PAGE, MAX_LIMIT } from '../constants/app.constan
  *   }
  */
 export class PaginationDto {
-  @ApiPropertyOptional({ default: DEFAULT_PAGE, description: 'Page number (1-indexed)' })
+  @ApiPropertyOptional({
+    default: DEFAULT_PAGE,
+    description: 'Page number (1-indexed)',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @IsPositive()
   page?: number = DEFAULT_PAGE;
 
-  @ApiPropertyOptional({ default: DEFAULT_LIMIT, description: 'Items per page (max 100)' })
+  @ApiPropertyOptional({
+    default: DEFAULT_LIMIT,
+    description: 'Items per page (max 100)',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsInt()

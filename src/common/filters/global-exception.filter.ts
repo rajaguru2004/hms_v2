@@ -50,10 +50,12 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     if (exception instanceof AppException) {
       // Our domain exceptions — already structured
       status = exception.getStatus();
-      const body = exception.getResponse() as { message: string; errorCode: string };
+      const body = exception.getResponse() as {
+        message: string;
+        errorCode: string;
+      };
       message = body.message;
       errorCode = body.errorCode as string;
-
     } else if (exception instanceof HttpException) {
       // NestJS built-in exceptions (ValidationPipe, etc.)
       status = exception.getStatus();
@@ -75,14 +77,12 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       }
 
       errorCode = this.httpStatusToErrorCode(status);
-
     } else if (exception instanceof Prisma.PrismaClientKnownRequestError) {
       // Prisma known errors — map to meaningful HTTP responses
       const result = this.handlePrismaError(exception);
       status = result.status;
       message = result.message;
       errorCode = result.errorCode;
-
     } else if (exception instanceof Error) {
       // Unexpected errors — log full stack, return generic 500
       this.logger.error(
@@ -110,9 +110,11 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     });
   }
 
-  private handlePrismaError(
-    error: Prisma.PrismaClientKnownRequestError,
-  ): { status: HttpStatus; message: string; errorCode: string } {
+  private handlePrismaError(error: Prisma.PrismaClientKnownRequestError): {
+    status: HttpStatus;
+    message: string;
+    errorCode: string;
+  } {
     switch (error.code) {
       case 'P2002': // Unique constraint failed
         return {

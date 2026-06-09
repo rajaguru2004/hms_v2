@@ -28,9 +28,11 @@ async function bootstrap(): Promise<void> {
   app.useLogger(app.get(Logger));
 
   // ── Security ──────────────────────────────────────────────────────────────
-  app.use(helmet({
-    contentSecurityPolicy: config.get('app.isProduction'),
-  }));
+  app.use(
+    helmet({
+      contentSecurityPolicy: config.get('app.isProduction'),
+    }),
+  );
 
   app.enableCors({
     origin: config.get<string[]>('app.corsOrigins'),
@@ -68,9 +70,9 @@ async function bootstrap(): Promise<void> {
       .setTitle(config.get<string>('app.appName', 'HMS v2') + ' API')
       .setDescription(
         'Hospital Management System v2 — Enterprise REST API\n\n' +
-        '## Authentication\n' +
-        'Use `POST /api/auth/login` to obtain a Bearer token.\n' +
-        'Click **Authorize** and paste the `accessToken`.',
+          '## Authentication\n' +
+          'Use `POST /api/auth/login` to obtain a Bearer token.\n' +
+          'Click **Authorize** and paste the `accessToken`.',
       )
       .setVersion(config.get<string>('app.appVersion', '2.0.0'))
       .addBearerAuth(

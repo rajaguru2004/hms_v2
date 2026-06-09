@@ -35,14 +35,15 @@ export class UserRepository extends BaseRepository<
    * Returns the user object with nested roles → permissions.
    */
   async findByIdWithRolesAndPermissions(id: string): Promise<
-    (User & {
-      userRoles: {
-        role: {
-          name: string;
-          rolePermissions: { permission: { name: string } }[];
-        };
-      }[];
-    }) | null
+    | (User & {
+        userRoles: {
+          role: {
+            name: string;
+            rolePermissions: { permission: { name: string } }[];
+          };
+        }[];
+      })
+    | null
   > {
     return this.prisma.user.findFirst({
       where: { id, isDeleted: false },
@@ -65,11 +66,7 @@ export class UserRepository extends BaseRepository<
   /**
    * Search users by name or email — for admin user search.
    */
-  async searchUsers(
-    query: string,
-    page: number,
-    limit: number,
-  ) {
+  async searchUsers(query: string, page: number, limit: number) {
     const where: Prisma.UserWhereInput = {
       isDeleted: false,
       OR: [

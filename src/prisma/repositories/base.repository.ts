@@ -1,5 +1,8 @@
 import { PrismaService } from '../prisma.service';
-import { PaginatedResult, PaginationMeta } from '../../common/types/paginated.type';
+import {
+  PaginatedResult,
+  PaginationMeta,
+} from '../../common/types/paginated.type';
 
 // Prisma delegate interface — minimal shape needed for generic repository
 interface PrismaDelegate {
@@ -40,17 +43,16 @@ export abstract class BaseRepository<TModel, TCreateInput, TUpdateInput> {
 
   // Typed delegate accessor — gets the Prisma delegate for the model
   protected get delegate(): PrismaDelegate {
-    return (this.prisma as unknown as Record<string, PrismaDelegate>)[this.modelName];
+    return (this.prisma as unknown as Record<string, PrismaDelegate>)[
+      this.modelName
+    ];
   }
 
   /**
    * Find by primary key.
    * Excludes soft-deleted records by default.
    */
-  async findById(
-    id: string,
-    includeDeleted = false,
-  ): Promise<TModel | null> {
+  async findById(id: string, includeDeleted = false): Promise<TModel | null> {
     return this.delegate.findFirst({
       where: {
         id,
@@ -167,7 +169,9 @@ export abstract class BaseRepository<TModel, TCreateInput, TUpdateInput> {
       page?: number;
       limit?: number;
       include?: Record<string, unknown>;
-      orderBy?: Record<string, 'asc' | 'desc'> | Record<string, 'asc' | 'desc'>[];
+      orderBy?:
+        | Record<string, 'asc' | 'desc'>
+        | Record<string, 'asc' | 'desc'>[];
       includeDeleted?: boolean;
     } = {},
   ): Promise<PaginatedResult<TModel>> {
@@ -215,7 +219,10 @@ export abstract class BaseRepository<TModel, TCreateInput, TUpdateInput> {
   /**
    * Count records matching where clause.
    */
-  async count(where: Record<string, unknown> = {}, includeDeleted = false): Promise<number> {
+  async count(
+    where: Record<string, unknown> = {},
+    includeDeleted = false,
+  ): Promise<number> {
     return this.delegate.count({
       where: {
         ...where,

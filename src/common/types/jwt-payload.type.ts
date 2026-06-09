@@ -4,7 +4,7 @@
  * Keep lean — large payloads slow down requests.
  */
 export interface JwtPayload {
-  sub: string;       // User ID
+  sub: string; // User ID
   email: string;
   roles: string[];
   permissions: string[];

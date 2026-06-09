@@ -7,7 +7,12 @@ import {
   HttpStatus,
   UseGuards,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiResponse } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiBearerAuth,
+  ApiResponse,
+} from '@nestjs/swagger';
 import { Request } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto, RefreshTokenDto, TokenResponseDto } from './dto/auth.dto';
@@ -25,7 +30,10 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Authenticate with email and password' })
   @ApiResponse({ status: 200, type: TokenResponseDto })
-  async login(@Body() dto: LoginDto, @Req() req: Request): Promise<TokenResponseDto> {
+  async login(
+    @Body() dto: LoginDto,
+    @Req() req: Request,
+  ): Promise<TokenResponseDto> {
     return this.authService.login(dto, req.ip);
   }
 

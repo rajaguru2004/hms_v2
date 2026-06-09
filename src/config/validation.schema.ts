@@ -17,10 +17,15 @@ export const validationSchema = Joi.object({
   CORS_ORIGINS: Joi.string().default('http://localhost:3000'),
 
   // Database — REQUIRED
-  DATABASE_URL: Joi.string().required().description('PostgreSQL connection string'),
+  DATABASE_URL: Joi.string()
+    .required()
+    .description('PostgreSQL connection string'),
 
   // JWT — REQUIRED
-  JWT_SECRET: Joi.string().min(32).required().description('JWT signing secret (min 32 chars)'),
+  JWT_SECRET: Joi.string()
+    .min(32)
+    .required()
+    .description('JWT signing secret (min 32 chars)'),
   JWT_EXPIRES_IN: Joi.string().default('15m'),
   JWT_REFRESH_SECRET: Joi.string().min(32).optional(),
   JWT_REFRESH_EXPIRES_IN: Joi.string().default('7d'),
@@ -39,6 +44,6 @@ export const validationSchema = Joi.object({
 });
 
 export const validationOptions = {
-  allowUnknown: true,   // pass-through unknown vars (e.g., CI injected)
-  abortEarly: false,    // report ALL missing vars at once, not just first
+  allowUnknown: true, // pass-through unknown vars (e.g., CI injected)
+  abortEarly: false, // report ALL missing vars at once, not just first
 };

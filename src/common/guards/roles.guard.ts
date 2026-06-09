@@ -22,15 +22,17 @@ export class RolesGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
-    const requiredRoles = this.reflector.getAllAndOverride<string[]>(ROLES_KEY, [
-      context.getHandler(),
-      context.getClass(),
-    ]);
+    const requiredRoles = this.reflector.getAllAndOverride<string[]>(
+      ROLES_KEY,
+      [context.getHandler(), context.getClass()],
+    );
 
     // No @Roles() decorator = allow all authenticated users
     if (!requiredRoles || requiredRoles.length === 0) return true;
 
-    const request = context.switchToHttp().getRequest<{ user: AuthenticatedUser }>();
+    const request = context
+      .switchToHttp()
+      .getRequest<{ user: AuthenticatedUser }>();
     const user = request.user;
 
     if (!user) throw new ForbiddenException('Access denied');

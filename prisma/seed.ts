@@ -1,7 +1,15 @@
 import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 import * as bcrypt from 'bcrypt';
+import 'dotenv/config';
 
-const prisma = new PrismaClient();
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const adapter = new PrismaPg(pool);
+const prisma = new PrismaClient({
+  adapter,
+  log: ['info', 'warn', 'error'],
+});
 
 /**
  * Database seed — populates initial data.
@@ -16,6 +24,17 @@ const prisma = new PrismaClient();
  */
 async function main(): Promise<void> {
   console.log('🌱 Starting database seed...');
+
+  // ── 0. Organization ──────────────────────────────────────────────────────
+  const defaultOrg = await prisma.organization.upsert({
+    where: { slug: 'system' },
+    update: {},
+    create: {
+      name: 'System Hospital',
+      slug: 'system',
+    },
+  });
+  console.log(`✅ Seeded default organization: ${defaultOrg.name}`);
 
   // ── 1. Permissions ──────────────────────────────────────────────────────
   const permissions = [
@@ -118,6 +137,8 @@ async function main(): Promise<void> {
       password: hashedPassword,
       firstName: 'System',
       lastName: 'Admin',
+      fullName: 'System Admin',
+      organizationId: defaultOrg.id,
       isActive: true,
     },
   });

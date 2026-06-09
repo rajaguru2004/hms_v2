@@ -9,7 +9,6 @@ import {
   Query,
   HttpCode,
   HttpStatus,
-  ParseUUIDPipe,
   UseGuards,
 } from '@nestjs/common';
 import {
@@ -70,17 +69,17 @@ export class UserController {
   @Get(':id')
   @Permissions(Permission.USER_READ)
   @ApiOperation({ summary: 'Get user by ID' })
-  @ApiParam({ name: 'id', type: String, format: 'uuid' })
-  async findOne(@Param('id', ParseUUIDPipe) id: string) {
+  @ApiParam({ name: 'id', type: String })
+  async findOne(@Param('id') id: string) {
     return this.userService.findById(id);
   }
 
   @Put(':id')
   @Permissions(Permission.USER_UPDATE)
   @ApiOperation({ summary: 'Update user profile' })
-  @ApiParam({ name: 'id', type: String, format: 'uuid' })
+  @ApiParam({ name: 'id', type: String })
   async update(
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id') id: string,
     @Body() dto: UpdateUserDto,
     @CurrentUser() currentUser: AuthenticatedUser,
   ) {
@@ -92,9 +91,9 @@ export class UserController {
   @Permissions(Permission.USER_DELETE)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Soft delete user (Admin only)' })
-  @ApiParam({ name: 'id', type: String, format: 'uuid' })
+  @ApiParam({ name: 'id', type: String })
   async remove(
-    @Param('id', ParseUUIDPipe) id: string,
+    @Param('id') id: string,
     @CurrentUser() currentUser: AuthenticatedUser,
   ) {
     await this.userService.remove(id, currentUser.id);
