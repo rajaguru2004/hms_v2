@@ -498,6 +498,10 @@ model Appointment {
   updatedAt   DateTime @updatedAt
   createdById String?
 
+  // Soft delete
+  isDeleted   Boolean   @default(false)
+  deletedAt   DateTime?
+
   // Relations
   organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   patient       Patient        @relation(fields: [patientId], references: [id], onDelete: Cascade)
