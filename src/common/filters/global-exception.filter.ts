@@ -55,7 +55,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         errorCode: string;
       };
       message = body.message;
-      errorCode = body.errorCode as string;
+      errorCode = body.errorCode;
     } else if (exception instanceof HttpException) {
       // NestJS built-in exceptions (ValidationPipe, etc.)
       status = exception.getStatus();
