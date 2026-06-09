@@ -1,0 +1,37 @@
+/**
+ * RBAC Permission enum.
+ * Format: RESOURCE_ACTION — makes permission checks readable.
+ * Add new permissions here as modules are developed.
+ */
+export enum Permission {
+  // Users
+  USER_CREATE = 'USER_CREATE',
+  USER_READ = 'USER_READ',
+  USER_UPDATE = 'USER_UPDATE',
+  USER_DELETE = 'USER_DELETE',
+
+  // Roles
+  ROLE_CREATE = 'ROLE_CREATE',
+  ROLE_READ = 'ROLE_READ',
+  ROLE_UPDATE = 'ROLE_UPDATE',
+  ROLE_DELETE = 'ROLE_DELETE',
+
+  // Permissions
+  PERMISSION_READ = 'PERMISSION_READ',
+  PERMISSION_ASSIGN = 'PERMISSION_ASSIGN',
+
+  // Patients
+  PATIENT_CREATE = 'PATIENT_CREATE',
+  PATIENT_READ = 'PATIENT_READ',
+  PATIENT_UPDATE = 'PATIENT_UPDATE',
+  PATIENT_DELETE = 'PATIENT_DELETE',
+
+  // Appointments
+  APPOINTMENT_CREATE = 'APPOINTMENT_CREATE',
+  APPOINTMENT_READ = 'APPOINTMENT_READ',
+  APPOINTMENT_UPDATE = 'APPOINTMENT_UPDATE',
+  APPOINTMENT_DELETE = 'APPOINTMENT_DELETE',
+
+  // Audit logs
+  AUDIT_READ = 'AUDIT_READ',
+}

@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+.npm
+
+# Build output
+dist/
+build/
+
+# Environment files — NEVER commit real secrets
+.env
+.env.development
+.env.staging
+.env.production
+# .env.test is OK to commit (no real secrets)
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Coverage
+coverage/
+.nyc_output
+
+# IDE
+.vscode/*
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Prisma
+prisma/migrations/
+
+# Docker
+.docker/
+hospital-management-system/

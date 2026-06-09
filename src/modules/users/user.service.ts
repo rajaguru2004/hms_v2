@@ -1,0 +1,182 @@
+import { Injectable } from '@nestjs/common';
+import { User } from '@prisma/client';
+import { UserRepository } from './user.repository';
+import { AuditService } from '../../audit/audit.service';
+import { AppCacheService } from '../../cache/cache.service';
+import { CreateUserDto, UpdateUserDto } from './dto/user.dto';
+import {
+  NotFoundException,
+  ConflictException,
+} from '../../common/exceptions/app.exception';
+import { ErrorCodes } from '../../common/exceptions/error-codes';
+import { hashPassword } from '../../common/utils/hash.util';
+import { AuditAction } from '../../common/enums/action.enum';
+import { PaginationDto } from '../../common/dto/pagination.dto';
+import { PaginatedResult } from '../../common/types/paginated.type';
+
+/**
+ * UserService — business logic for user management.
+ *
+ * Pattern:
+ *  Controller → UserService → UserRepository → Prisma
+ *
+ * Responsibilities:
+ * - Validation (email uniqueness, password checks)
+ * - Password hashing (never in repository or controller)
+ * - Cache management (read-through cache on findById)
+ * - Audit logging (all create/update/delete operations)
+ * - Never exposes password field in responses
+ */
+@Injectable()
+export class UserService {
+  constructor(
+    private readonly userRepository: UserRepository,
+    private readonly auditService: AuditService,
+    private readonly cacheService: AppCacheService,
+  ) {}
+
+  private readonly CACHE_PREFIX = 'user';
+
+  /**
+   * Create a new user.
+   * - Checks email uniqueness
+   * - Hashes password
+   * - Logs audit
+   */
+  async create(dto: CreateUserDto, createdBy?: string): Promise<Omit<User, 'password'>> {
+    // Check email uniqueness
+    const existing = await this.userRepository.findByEmail(dto.email);
+    if (existing) {
+      throw new ConflictException(
+        `Email '${dto.email}' is already registered`,
+        ErrorCodes.USER_EMAIL_TAKEN,
+      );
+    }
+
+    const hashedPassword = await hashPassword(dto.password);
+
+    const user = await this.userRepository.create({
+      email: dto.email,
+      password: hashedPassword,
+      firstName: dto.firstName,
+      lastName: dto.lastName,
+      phone: dto.phone,
+      createdBy,
+    });
+
+    // Audit: record creation
+    void this.auditService.log({
+      userId: createdBy,
+      action: AuditAction.CREATE,
+      entityName: 'User',
+      entityId: user.id,
+      newValues: { email: user.email, firstName: user.firstName, lastName: user.lastName },
+    });
+
+    return this.sanitize(user);
+  }
+
+  /**
+   * Find user by ID with cache read-through.
+   */
+  async findById(id: string): Promise<Omit<User, 'password'>> {
+    const cacheKey = AppCacheService.buildKey(this.CACHE_PREFIX, id);
+
+    // Cache read-through
+    const cached = await this.cacheService.get<Omit<User, 'password'>>(cacheKey);
+    if (cached) return cached;
+
+    const user = await this.userRepository.findById(id);
+    if (!user) {
+      throw new NotFoundException('User not found', ErrorCodes.USER_NOT_FOUND);
+    }
+
+    const sanitized = this.sanitize(user);
+    await this.cacheService.set(cacheKey, sanitized, 300);
+
+    return sanitized;
+  }
+
+  /**
+   * List users with pagination.
+   */
+  async findAll(pagination: PaginationDto): Promise<PaginatedResult<Omit<User, 'password'>>> {
+    const result = await this.userRepository.paginate(
+      {},
+      {
+        page: pagination.page,
+        limit: pagination.take,
+        orderBy: { [pagination.orderBy ?? 'createdAt']: pagination.orderDir ?? 'desc' },
+      },
+    );
+
+    return {
+      ...result,
+      data: result.data.map((u) => this.sanitize(u)),
+    };
+  }
+
+  /**
+   * Update user profile.
+   */
+  async update(
+    id: string,
+    dto: UpdateUserDto,
+    updatedBy?: string,
+  ): Promise<Omit<User, 'password'>> {
+    const existing = await this.userRepository.findById(id);
+    if (!existing) {
+      throw new NotFoundException('User not found', ErrorCodes.USER_NOT_FOUND);
+    }
+
+    const updated = await this.userRepository.update(id, { ...dto, updatedBy });
+
+    // Invalidate cache
+    await this.cacheService.del(AppCacheService.buildKey(this.CACHE_PREFIX, id));
+
+    // Audit: record changes
+    void this.auditService.log({
+      userId: updatedBy,
+      action: AuditAction.UPDATE,
+      entityName: 'User',
+      entityId: id,
+      oldValues: { firstName: existing.firstName, lastName: existing.lastName, phone: existing.phone },
+      newValues: { firstName: updated.firstName, lastName: updated.lastName, phone: updated.phone },
+    });
+
+    return this.sanitize(updated);
+  }
+
+  /**
+   * Soft delete user.
+   */
+  async remove(id: string, deletedBy?: string): Promise<void> {
+    const existing = await this.userRepository.findById(id);
+    if (!existing) {
+      throw new NotFoundException('User not found', ErrorCodes.USER_NOT_FOUND);
+    }
+
+    await this.userRepository.softDelete(id, deletedBy);
+
+    // Invalidate cache
+    await this.cacheService.del(AppCacheService.buildKey(this.CACHE_PREFIX, id));
+
+    // Audit
+    void this.auditService.log({
+      userId: deletedBy,
+      action: AuditAction.SOFT_DELETE,
+      entityName: 'User',
+      entityId: id,
+    });
+  }
+
+  /**
+   * Remove password from user object before returning to client.
+   * NEVER return password hash to client, even in internal APIs.
+   */
+  private sanitize(user: User): Omit<User, 'password'> {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { password: _, ...sanitized } = user;
+    return sanitized;
+  }
+}

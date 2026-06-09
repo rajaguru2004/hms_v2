@@ -1,0 +1,19 @@
+/**
+ * Audit log action types.
+ * Recorded in AuditLog table for every state-changing operation.
+ */
+export enum AuditAction {
+  CREATE = 'CREATE',
+  UPDATE = 'UPDATE',
+  DELETE = 'DELETE',
+  SOFT_DELETE = 'SOFT_DELETE',
+  RESTORE = 'RESTORE',
+  LOGIN = 'LOGIN',
+  LOGOUT = 'LOGOUT',
+  LOGIN_FAILED = 'LOGIN_FAILED',
+  PASSWORD_CHANGE = 'PASSWORD_CHANGE',
+  ROLE_ASSIGN = 'ROLE_ASSIGN',
+  ROLE_REVOKE = 'ROLE_REVOKE',
+  PERMISSION_ASSIGN = 'PERMISSION_ASSIGN',
+  PERMISSION_REVOKE = 'PERMISSION_REVOKE',
+}

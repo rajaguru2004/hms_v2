@@ -1,0 +1,95 @@
+version: '3.9'
+
+services:
+  # ── NestJS API ─────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder   # Use builder stage for hot-reload in dev
+    container_name: hms_v2_api
+    restart: unless-stopped
+    env_file:
+      - .env.development
+    environment:
+      DATABASE_URL: postgresql://hms_user:hms_password@postgres:5432/hms_v2_dev
+      REDIS_HOST: redis
+    ports:
+      - '3000:3000'
+      - '9229:9229'   # Node.js debugger port
+    volumes:
+      - .:/app
+      - /app/node_modules   # Prevent host node_modules overwriting container's
+    command: npm run start:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - hms_network
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: hms_v2_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hms_user
+      POSTGRES_PASSWORD: hms_password
+      POSTGRES_DB: hms_v2_dev
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U hms_user -d hms_v2_dev']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hms_network
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: hms_v2_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hms_network
+
+  # ── pgAdmin (optional dev tool) ────────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: hms_v2_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@hms.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - '5050:80'
+    depends_on:
+      - postgres
+    networks:
+      - hms_network
+    profiles:
+      - tools   # Only starts with: docker-compose --profile tools up
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  hms_network:
+    driver: bridge

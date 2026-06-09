@@ -1,0 +1,42 @@
+/**
+ * Centralised error codes.
+ * Consumers (frontend, mobile) depend on these codes for i18n/handling.
+ * NEVER change existing values — add new ones only.
+ */
+export const ErrorCodes = {
+  // Generic
+  INTERNAL_SERVER_ERROR: 'INTERNAL_SERVER_ERROR',
+  VALIDATION_ERROR: 'VALIDATION_ERROR',
+  NOT_FOUND: 'NOT_FOUND',
+  BAD_REQUEST: 'BAD_REQUEST',
+
+  // Auth
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  FORBIDDEN: 'FORBIDDEN',
+  INVALID_CREDENTIALS: 'INVALID_CREDENTIALS',
+  TOKEN_EXPIRED: 'TOKEN_EXPIRED',
+  TOKEN_INVALID: 'TOKEN_INVALID',
+  ACCOUNT_DISABLED: 'ACCOUNT_DISABLED',
+
+  // Users
+  USER_NOT_FOUND: 'USER_NOT_FOUND',
+  USER_ALREADY_EXISTS: 'USER_ALREADY_EXISTS',
+  USER_EMAIL_TAKEN: 'USER_EMAIL_TAKEN',
+
+  // Roles
+  ROLE_NOT_FOUND: 'ROLE_NOT_FOUND',
+  ROLE_ALREADY_EXISTS: 'ROLE_ALREADY_EXISTS',
+
+  // Permissions
+  PERMISSION_NOT_FOUND: 'PERMISSION_NOT_FOUND',
+
+  // Database
+  DB_UNIQUE_CONSTRAINT: 'DB_UNIQUE_CONSTRAINT',
+  DB_FOREIGN_KEY_CONSTRAINT: 'DB_FOREIGN_KEY_CONSTRAINT',
+  DB_RECORD_NOT_FOUND: 'DB_RECORD_NOT_FOUND',
+
+  // Rate limiting
+  TOO_MANY_REQUESTS: 'TOO_MANY_REQUESTS',
+} as const;
+
+export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
