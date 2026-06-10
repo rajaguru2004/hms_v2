@@ -34,4 +34,10 @@ export enum Permission {
 
   // Audit logs
   AUDIT_READ = 'AUDIT_READ',
+
+  // Billing
+  BILLING_CREATE = 'BILLING_CREATE',
+  BILLING_READ = 'BILLING_READ',
+  BILLING_UPDATE = 'BILLING_UPDATE',
+  BILLING_DELETE = 'BILLING_DELETE',
 }

@@ -45,6 +45,12 @@ export const ErrorCodes = {
 
   // Rate limiting
   TOO_MANY_REQUESTS: 'TOO_MANY_REQUESTS',
+
+  // Billing
+  BILLING_SERVICE_NOT_FOUND: 'BILLING_SERVICE_NOT_FOUND',
+  INVOICE_NOT_FOUND: 'INVOICE_NOT_FOUND',
+  PAYMENT_NOT_FOUND: 'PAYMENT_NOT_FOUND',
+  INVALID_BILLING_RESOURCE: 'INVALID_BILLING_RESOURCE',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];

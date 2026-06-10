@@ -168,10 +168,7 @@ export class AppointmentsService {
     return this.appointmentRepository.paginate(where, {
       page: query.page,
       limit: query.limit,
-      orderBy: [
-        { appointmentDate: 'asc' },
-        { appointmentTime: 'asc' },
-      ],
+      orderBy: [{ appointmentDate: 'asc' }, { appointmentTime: 'asc' }],
       include: {
         patient: {
           select: {
@@ -228,16 +225,28 @@ export class AppointmentsService {
     }
 
     const updateData: Prisma.AppointmentUpdateInput = {
-      ...(dto.appointmentDate && { appointmentDate: new Date(dto.appointmentDate) }),
+      ...(dto.appointmentDate && {
+        appointmentDate: new Date(dto.appointmentDate),
+      }),
       ...(dto.appointmentTime && { appointmentTime: dto.appointmentTime }),
-      ...(dto.durationMinutes !== undefined && { durationMinutes: dto.durationMinutes }),
-      ...(dto.appointmentType !== undefined && { appointmentType: dto.appointmentType }),
-      ...(dto.chiefComplaint !== undefined && { chiefComplaint: dto.chiefComplaint }),
+      ...(dto.durationMinutes !== undefined && {
+        durationMinutes: dto.durationMinutes,
+      }),
+      ...(dto.appointmentType !== undefined && {
+        appointmentType: dto.appointmentType,
+      }),
+      ...(dto.chiefComplaint !== undefined && {
+        chiefComplaint: dto.chiefComplaint,
+      }),
       ...(dto.notes !== undefined && { notes: dto.notes }),
       ...(dto.departmentId !== undefined && { departmentId: dto.departmentId }),
       ...(dto.status !== undefined && { status: dto.status }),
-      ...(dto.cancellationReason !== undefined && { cancellationReason: dto.cancellationReason }),
-      ...(dto.consultationNotes !== undefined && { consultationNotes: dto.consultationNotes }),
+      ...(dto.cancellationReason !== undefined && {
+        cancellationReason: dto.cancellationReason,
+      }),
+      ...(dto.consultationNotes !== undefined && {
+        consultationNotes: dto.consultationNotes,
+      }),
       ...(dto.reminderSent !== undefined && { reminderSent: dto.reminderSent }),
     };
 
@@ -268,7 +277,9 @@ export class AppointmentsService {
     const updated = await this.appointmentRepository.update(id, updateData);
 
     // Invalidate cache
-    await this.cacheService.del(AppCacheService.buildKey(this.CACHE_PREFIX, id));
+    await this.cacheService.del(
+      AppCacheService.buildKey(this.CACHE_PREFIX, id),
+    );
 
     // Audit log
     void this.auditService.log({
@@ -315,7 +326,9 @@ export class AppointmentsService {
     await this.appointmentRepository.softDelete(id, userId);
 
     // Invalidate cache
-    await this.cacheService.del(AppCacheService.buildKey(this.CACHE_PREFIX, id));
+    await this.cacheService.del(
+      AppCacheService.buildKey(this.CACHE_PREFIX, id),
+    );
 
     // Audit log
     void this.auditService.log({

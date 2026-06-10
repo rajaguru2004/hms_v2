@@ -57,6 +57,10 @@ async function main(): Promise<void> {
     { name: 'APPOINTMENT_UPDATE', resource: 'appointments', action: 'update', description: 'Update appointments' },
     { name: 'APPOINTMENT_DELETE', resource: 'appointments', action: 'delete', description: 'Delete appointments' },
     { name: 'AUDIT_READ', resource: 'audit', action: 'read', description: 'Read audit logs' },
+    { name: 'BILLING_CREATE', resource: 'billing', action: 'create', description: 'Create billing records' },
+    { name: 'BILLING_READ', resource: 'billing', action: 'read', description: 'Read billing records' },
+    { name: 'BILLING_UPDATE', resource: 'billing', action: 'update', description: 'Update billing records' },
+    { name: 'BILLING_DELETE', resource: 'billing', action: 'delete', description: 'Delete billing records' },
   ];
 
   for (const perm of permissions) {

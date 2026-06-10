@@ -271,9 +271,9 @@ describe('AppointmentsService', () => {
     it('should throw NotFoundException if appointment to remove is not found', async () => {
       repository.findOne.mockResolvedValue(null);
 
-      await expect(service.remove('appt-99', 'org-1', 'user-1')).rejects.toThrow(
-        NotFoundException,
-      );
+      await expect(
+        service.remove('appt-99', 'org-1', 'user-1'),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 });

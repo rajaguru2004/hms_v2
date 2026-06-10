@@ -11,17 +11,26 @@ import {
 } from 'class-validator';
 
 export class UpdateAppointmentDto {
-  @ApiPropertyOptional({ example: 'cuid-doctor-456', description: 'ID of the doctor user' })
+  @ApiPropertyOptional({
+    example: 'cuid-doctor-456',
+    description: 'ID of the doctor user',
+  })
   @IsOptional()
   @IsString()
   doctorId?: string;
 
-  @ApiPropertyOptional({ example: '2026-06-11', description: 'Rescheduled date' })
+  @ApiPropertyOptional({
+    example: '2026-06-11',
+    description: 'Rescheduled date',
+  })
   @IsOptional()
   @IsDateString()
   appointmentDate?: string;
 
-  @ApiPropertyOptional({ example: '10:00', description: 'Rescheduled time (HH:mm)' })
+  @ApiPropertyOptional({
+    example: '10:00',
+    description: 'Rescheduled time (HH:mm)',
+  })
   @IsOptional()
   @IsString()
   appointmentTime?: string;
@@ -33,22 +42,34 @@ export class UpdateAppointmentDto {
   @Max(480)
   durationMinutes?: number;
 
-  @ApiPropertyOptional({ example: 'emergency', description: 'Type of appointment' })
+  @ApiPropertyOptional({
+    example: 'emergency',
+    description: 'Type of appointment',
+  })
   @IsOptional()
   @IsString()
   appointmentType?: string;
 
-  @ApiPropertyOptional({ example: 'Severe headache', description: 'Chief complaint' })
+  @ApiPropertyOptional({
+    example: 'Severe headache',
+    description: 'Chief complaint',
+  })
   @IsOptional()
   @IsString()
   chiefComplaint?: string;
 
-  @ApiPropertyOptional({ example: 'Update patient room info.', description: 'Notes' })
+  @ApiPropertyOptional({
+    example: 'Update patient room info.',
+    description: 'Notes',
+  })
   @IsOptional()
   @IsString()
   notes?: string;
 
-  @ApiPropertyOptional({ example: 'cuid-department-789', description: 'ID of the department' })
+  @ApiPropertyOptional({
+    example: 'cuid-department-789',
+    description: 'ID of the department',
+  })
   @IsOptional()
   @IsString()
   departmentId?: string;
@@ -81,17 +102,26 @@ export class UpdateAppointmentDto {
   ])
   status?: string;
 
-  @ApiPropertyOptional({ example: 'Patient canceled due to personal reasons.', description: 'Cancellation reason' })
+  @ApiPropertyOptional({
+    example: 'Patient canceled due to personal reasons.',
+    description: 'Cancellation reason',
+  })
   @IsOptional()
   @IsString()
   cancellationReason?: string;
 
-  @ApiPropertyOptional({ example: 'Completed prescription details.', description: 'Consultation notes' })
+  @ApiPropertyOptional({
+    example: 'Completed prescription details.',
+    description: 'Consultation notes',
+  })
   @IsOptional()
   @IsString()
   consultationNotes?: string;
 
-  @ApiPropertyOptional({ example: true, description: 'Whether the reminder has been sent' })
+  @ApiPropertyOptional({
+    example: true,
+    description: 'Whether the reminder has been sent',
+  })
   @IsOptional()
   @IsBoolean()
   reminderSent?: boolean;

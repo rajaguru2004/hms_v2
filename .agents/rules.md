@@ -226,6 +226,22 @@ const mockPrismaService = {
 };
 ```
 
+### Live API Verification Scripts
+For verifying APIs directly against a running server (without spinning up NestJS test containers or modifying database configurations in the script), write lightweight standalone verification scripts:
+
+- **Target**: Query the live running server directly (defaulting to `http://localhost:3000/api`). Do NOT initialize the NestJS application context or modify environment database URLs within the verification script.
+- **Location**: Store scripts under the `test/` directory, prefixing the filename with `verify-` (e.g., `test/verify-billing.ts`).
+- **Dependencies**: Use native Node.js `fetch` (available in Node.js 18+) for HTTP calls. Avoid external libraries like `axios` or `supertest` in these scripts to keep them lightweight.
+- **Authentication Flow**:
+  1. Authenticate first by calling the `/auth/login` endpoint with seed credentials (e.g., `admin@hms.local` / `Admin@HMS2024!`).
+  2. Extract the JWT `accessToken` from the response.
+  3. Append `Authorization: Bearer <token>` and `Content-Type: application/json` headers to all subsequent request headers.
+- **Test Execution Flow**:
+  1. **Prerequisites First**: Seed or create dependencies required by the module (e.g., create a patient before creating an invoice).
+  2. **Core API Actions**: Test the API flow sequentially (e.g., create a resource, fetch list/details, update status/values, and record linked items).
+  3. **Clean Assertions**: Check response statuses (`res.ok`), parse the envelope, verify fields, and throw descriptive errors immediately upon any failure.
+- **Execution Command**: Run directly with `npx ts-node test/verify-<name>.ts`.
+
 ---
 
 ## 11. SWAGGER/API DOCUMENTATION RULES
