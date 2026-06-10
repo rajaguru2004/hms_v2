@@ -61,6 +61,14 @@ async function main(): Promise<void> {
     { name: 'BILLING_READ', resource: 'billing', action: 'read', description: 'Read billing records' },
     { name: 'BILLING_UPDATE', resource: 'billing', action: 'update', description: 'Update billing records' },
     { name: 'BILLING_DELETE', resource: 'billing', action: 'delete', description: 'Delete billing records' },
+    { name: 'CONSULTATION_CREATE', resource: 'consultations', action: 'create', description: 'Create consultations' },
+    { name: 'CONSULTATION_READ', resource: 'consultations', action: 'read', description: 'Read consultations' },
+    { name: 'CONSULTATION_UPDATE', resource: 'consultations', action: 'update', description: 'Update consultations' },
+    { name: 'CONSULTATION_DELETE', resource: 'consultations', action: 'delete', description: 'Delete consultations' },
+    { name: 'INPATIENT_CREATE', resource: 'inpatient', action: 'create', description: 'Create inpatient records' },
+    { name: 'INPATIENT_READ', resource: 'inpatient', action: 'read', description: 'Read inpatient records' },
+    { name: 'INPATIENT_UPDATE', resource: 'inpatient', action: 'update', description: 'Update inpatient records' },
+    { name: 'INPATIENT_DELETE', resource: 'inpatient', action: 'delete', description: 'Delete inpatient records' },
   ];
 
   for (const perm of permissions) {
