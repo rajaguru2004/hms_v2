@@ -62,6 +62,10 @@ export const ErrorCodes = {
   BED_ALREADY_OCCUPIED: 'BED_ALREADY_OCCUPIED',
   BED_NOT_AVAILABLE: 'BED_NOT_AVAILABLE',
   INVALID_INPATIENT_RESOURCE: 'INVALID_INPATIENT_RESOURCE',
+
+  // Integrations
+  MACHINE_NOT_FOUND: 'MACHINE_NOT_FOUND',
+  FILE_PARSING_FAILED: 'FILE_PARSING_FAILED',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];

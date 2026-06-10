@@ -23,6 +23,7 @@ import { AppointmentsModule } from './modules/appointments/appointments.module';
 import { BillingModule } from './modules/billing/billing.module';
 import { ConsultationsModule } from './modules/consultations/consultations.module';
 import { InpatientModule } from './modules/inpatient/inpatient.module';
+import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { APP_GUARD, APP_INTERCEPTOR, APP_FILTER } from '@nestjs/core';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
@@ -74,8 +75,13 @@ import { GlobalExceptionFilter } from './common/filters/global-exception.filter'
         level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
         autoLogging: false, // We log manually via LoggingInterceptor
         serializers: {
-          req: (req) => ({ method: req.method, url: req.url }),
-          res: (res) => ({ statusCode: res.statusCode }),
+          req: (req: Record<string, unknown>) => ({
+            method: req.method as string,
+            url: req.url as string,
+          }),
+          res: (res: Record<string, unknown>) => ({
+            statusCode: res.statusCode as number,
+          }),
         },
       },
     }),
@@ -94,6 +100,7 @@ import { GlobalExceptionFilter } from './common/filters/global-exception.filter'
     BillingModule,
     ConsultationsModule,
     InpatientModule,
+    IntegrationsModule,
   ],
 
   providers: [
