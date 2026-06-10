@@ -296,6 +296,30 @@ async function main(): Promise<void> {
       action: 'delete',
       description: 'Delete pharmacy records',
     },
+    {
+      name: 'PRE_TRIAGE_CREATE',
+      resource: 'pre-triage',
+      action: 'create',
+      description: 'Create pre-triage screenings',
+    },
+    {
+      name: 'PRE_TRIAGE_READ',
+      resource: 'pre-triage',
+      action: 'read',
+      description: 'Read pre-triage screenings',
+    },
+    {
+      name: 'PRE_TRIAGE_UPDATE',
+      resource: 'pre-triage',
+      action: 'update',
+      description: 'Update pre-triage screenings',
+    },
+    {
+      name: 'PRE_TRIAGE_DELETE',
+      resource: 'pre-triage',
+      action: 'delete',
+      description: 'Delete pre-triage screenings',
+    },
   ];
 
   for (const perm of permissions) {

@@ -26,6 +26,7 @@ import { InpatientModule } from './modules/inpatient/inpatient.module';
 import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { LaboratoryModule } from './modules/laboratory/laboratory.module';
 import { PharmacyModule } from './modules/pharmacy/pharmacy.module';
+import { PreTriageModule } from './modules/pre-triage/pre-triage.module';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { APP_GUARD, APP_INTERCEPTOR, APP_FILTER } from '@nestjs/core';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
@@ -105,6 +106,7 @@ import { GlobalExceptionFilter } from './common/filters/global-exception.filter'
     IntegrationsModule,
     LaboratoryModule,
     PharmacyModule,
+    PreTriageModule,
   ],
 
   providers: [
