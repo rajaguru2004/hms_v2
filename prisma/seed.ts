@@ -248,6 +248,30 @@ async function main(): Promise<void> {
       action: 'delete',
       description: 'Delete integrations',
     },
+    {
+      name: 'LABORATORY_CREATE',
+      resource: 'laboratory',
+      action: 'create',
+      description: 'Create laboratory records',
+    },
+    {
+      name: 'LABORATORY_READ',
+      resource: 'laboratory',
+      action: 'read',
+      description: 'Read laboratory records',
+    },
+    {
+      name: 'LABORATORY_UPDATE',
+      resource: 'laboratory',
+      action: 'update',
+      description: 'Update laboratory records',
+    },
+    {
+      name: 'LABORATORY_DELETE',
+      resource: 'laboratory',
+      action: 'delete',
+      description: 'Delete laboratory records',
+    },
   ];
 
   for (const perm of permissions) {

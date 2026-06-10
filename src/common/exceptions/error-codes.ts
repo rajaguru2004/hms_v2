@@ -66,6 +66,12 @@ export const ErrorCodes = {
   // Integrations
   MACHINE_NOT_FOUND: 'MACHINE_NOT_FOUND',
   FILE_PARSING_FAILED: 'FILE_PARSING_FAILED',
+
+  // Laboratory
+  LAB_TEST_NOT_FOUND: 'LAB_TEST_NOT_FOUND',
+  LAB_ORDER_NOT_FOUND: 'LAB_ORDER_NOT_FOUND',
+  LAB_RESULT_NOT_FOUND: 'LAB_RESULT_NOT_FOUND',
+  INVALID_LAB_RESOURCE: 'INVALID_LAB_RESOURCE',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
