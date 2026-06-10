@@ -272,6 +272,30 @@ async function main(): Promise<void> {
       action: 'delete',
       description: 'Delete laboratory records',
     },
+    {
+      name: 'PHARMACY_CREATE',
+      resource: 'pharmacy',
+      action: 'create',
+      description: 'Create pharmacy records',
+    },
+    {
+      name: 'PHARMACY_READ',
+      resource: 'pharmacy',
+      action: 'read',
+      description: 'Read pharmacy records',
+    },
+    {
+      name: 'PHARMACY_UPDATE',
+      resource: 'pharmacy',
+      action: 'update',
+      description: 'Update pharmacy records',
+    },
+    {
+      name: 'PHARMACY_DELETE',
+      resource: 'pharmacy',
+      action: 'delete',
+      description: 'Delete pharmacy records',
+    },
   ];
 
   for (const perm of permissions) {
