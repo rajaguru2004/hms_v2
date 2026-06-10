@@ -349,7 +349,7 @@ model QueueManagement {
   serviceType String? // consultation, procedure, etc.
 
   // Queue Information
-  queueNumber String
+  queueNumber String @unique
   priority    String @default("normal") // urgent, normal, low
 
   // Assignment
@@ -373,6 +373,10 @@ model QueueManagement {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  createdBy String?
+  updatedBy String?
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
 
   // Relations
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -382,6 +386,7 @@ model QueueManagement {
   @@index([organizationId])
   @@index([serviceArea, status])
   @@index([assignedToId])
+  @@index([isDeleted])
 }
 
 /// Triage Assessment (Ethiopian multi-type triage)

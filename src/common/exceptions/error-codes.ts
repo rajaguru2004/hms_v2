@@ -83,6 +83,11 @@ export const ErrorCodes = {
   // Pre-Triage
   PRE_TRIAGE_NOT_FOUND: 'PRE_TRIAGE_NOT_FOUND',
   PRE_TRIAGE_ALREADY_CONVERTED: 'PRE_TRIAGE_ALREADY_CONVERTED',
+
+  // Queue
+  QUEUE_ITEM_NOT_FOUND: 'QUEUE_ITEM_NOT_FOUND',
+  QUEUE_NUMBER_CONFLICT: 'QUEUE_NUMBER_CONFLICT',
+  INVALID_QUEUE_STATUS: 'INVALID_QUEUE_STATUS',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];

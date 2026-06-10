@@ -320,6 +320,30 @@ async function main(): Promise<void> {
       action: 'delete',
       description: 'Delete pre-triage screenings',
     },
+    {
+      name: 'QUEUE_CREATE',
+      resource: 'queue',
+      action: 'create',
+      description: 'Create queue records',
+    },
+    {
+      name: 'QUEUE_READ',
+      resource: 'queue',
+      action: 'read',
+      description: 'Read queue records',
+    },
+    {
+      name: 'QUEUE_UPDATE',
+      resource: 'queue',
+      action: 'update',
+      description: 'Update queue records',
+    },
+    {
+      name: 'QUEUE_DELETE',
+      resource: 'queue',
+      action: 'delete',
+      description: 'Delete queue records',
+    },
   ];
 
   for (const perm of permissions) {
