@@ -273,6 +273,30 @@ async function main(): Promise<void> {
       description: 'Delete laboratory records',
     },
     {
+      name: 'RADIOLOGY_CREATE',
+      resource: 'radiology',
+      action: 'create',
+      description: 'Create radiology records',
+    },
+    {
+      name: 'RADIOLOGY_READ',
+      resource: 'radiology',
+      action: 'read',
+      description: 'Read radiology records',
+    },
+    {
+      name: 'RADIOLOGY_UPDATE',
+      resource: 'radiology',
+      action: 'update',
+      description: 'Update radiology records',
+    },
+    {
+      name: 'RADIOLOGY_DELETE',
+      resource: 'radiology',
+      action: 'delete',
+      description: 'Delete radiology records',
+    },
+    {
       name: 'PHARMACY_CREATE',
       resource: 'pharmacy',
       action: 'create',
