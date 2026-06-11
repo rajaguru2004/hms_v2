@@ -24,4 +24,15 @@ export class PatientRepository extends BaseRepository<
       where: { mrn, organizationId, isDeleted: false },
     });
   }
+
+  override async softDelete(id: string, deletedBy?: string): Promise<Patient> {
+    return this.prisma.patient.update({
+      where: { id },
+      data: {
+        isDeleted: true,
+        deletedAt: new Date(),
+        ...(deletedBy && { updatedById: deletedBy }),
+      },
+    });
+  }
 }
