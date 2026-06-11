@@ -368,6 +368,12 @@ async function main(): Promise<void> {
       action: 'delete',
       description: 'Delete queue records',
     },
+    {
+      name: 'DASHBOARD_READ',
+      resource: 'dashboard',
+      action: 'read',
+      description: 'Read dashboard statistics',
+    },
   ];
 
   for (const perm of permissions) {
@@ -449,6 +455,7 @@ async function main(): Promise<void> {
       'PATIENT_READ',
       'APPOINTMENT_READ',
       'AUDIT_READ',
+      'DASHBOARD_READ',
     ];
     const adminPerms = allPermissions.filter((p) =>
       adminPermNames.includes(p.name),
