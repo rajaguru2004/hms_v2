@@ -3,6 +3,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { UserRepository } from '../users/user.repository';
+import { AppCacheService } from '../../cache/cache.service';
 import {
   JwtPayload,
   AuthenticatedUser,
@@ -26,6 +27,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor(
     config: ConfigService,
     private readonly userRepository: UserRepository,
+    private readonly cacheService: AppCacheService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -40,6 +42,12 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         'Invalid token type',
         ErrorCodes.TOKEN_INVALID,
       );
+    }
+
+    const cacheKey = AppCacheService.buildKey('auth:user', payload.sub);
+    const cachedUser = await this.cacheService.get<AuthenticatedUser>(cacheKey);
+    if (cachedUser) {
+      return cachedUser;
     }
 
     const user = await this.userRepository.findByIdWithRolesAndPermissions(
@@ -63,12 +71,17 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       ),
     ];
 
-    return {
+    const authenticatedUser: AuthenticatedUser = {
       id: user.id,
       email: user.email,
       roles,
       permissions,
       organizationId: user.organizationId,
     };
+
+    // Cache authenticated user details for 5 minutes (300s)
+    await this.cacheService.set(cacheKey, authenticatedUser, 300);
+
+    return authenticatedUser;
   }
 }

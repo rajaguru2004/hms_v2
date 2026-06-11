@@ -94,6 +94,10 @@ export const ErrorCodes = {
   QUEUE_ITEM_NOT_FOUND: 'QUEUE_ITEM_NOT_FOUND',
   QUEUE_NUMBER_CONFLICT: 'QUEUE_NUMBER_CONFLICT',
   INVALID_QUEUE_STATUS: 'INVALID_QUEUE_STATUS',
+
+  // Settings
+  DEPARTMENT_NOT_FOUND: 'DEPARTMENT_NOT_FOUND',
+  ORGANIZATION_NOT_FOUND: 'ORGANIZATION_NOT_FOUND',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];
