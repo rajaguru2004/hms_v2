@@ -29,5 +29,5 @@
       "@jobs/*": ["src/jobs/*"]
     }
   },
-  "exclude": ["node_modules", "dist", "hospital-management-system"]
+  "exclude": ["node_modules", "dist", "hospital-management-system", "frontend"]
 }
