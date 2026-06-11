@@ -7,7 +7,6 @@ import {
   Param,
   Query,
   UseGuards,
-  Req,
   BadRequestException,
 } from '@nestjs/common';
 import {
@@ -16,7 +15,6 @@ import {
   ApiBearerAuth,
   ApiParam,
 } from '@nestjs/swagger';
-import { Request } from 'express';
 import { BillingService } from './billing.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -57,41 +55,33 @@ export class BillingController {
   async compatibilityGet(
     @Query() query: BillingQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     const resource = query.resource || 'invoices';
-    let resultData: unknown;
 
     if (resource === 'services') {
-      resultData = await this.billingService.getServices(
+      return this.billingService.getServices(
         currentUser.organizationId,
         query.category,
       );
-    } else if (resource === 'invoices') {
-      resultData = await this.billingService.getInvoices(
+    }
+    if (resource === 'invoices') {
+      return this.billingService.getInvoices(
         currentUser.organizationId,
         query.status,
         query.patientId,
       );
-    } else if (resource === 'payments') {
-      resultData = await this.billingService.getPayments(
+    }
+    if (resource === 'payments') {
+      return this.billingService.getPayments(
         currentUser.organizationId,
         query.invoiceId,
       );
-    } else if (resource === 'stats') {
-      resultData = await this.billingService.getStats(
-        currentUser.organizationId,
-      );
-    } else {
-      throw new BadRequestException('Invalid resource specified');
+    }
+    if (resource === 'stats') {
+      return this.billingService.getStats(currentUser.organizationId);
     }
 
-    return {
-      success: true,
-      data: resultData,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    throw new BadRequestException('Invalid resource specified');
   }
 
   @Post()
@@ -103,7 +93,6 @@ export class BillingController {
   async compatibilityPost(
     @Body() dto: BillingPostCompatDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     const resource = dto.resource || 'invoice';
 
@@ -113,7 +102,7 @@ export class BillingController {
           'serviceName and unitPrice are required for service creation',
         );
       }
-      const service = await this.billingService.createService(
+      return this.billingService.createService(
         {
           serviceName: dto.serviceName,
           serviceCode: dto.serviceCode,
@@ -129,13 +118,6 @@ export class BillingController {
         currentUser.organizationId,
         currentUser.id,
       );
-      return {
-        success: true,
-        data: service,
-        message: 'Service created successfully',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
     }
 
     if (resource === 'invoice') {
@@ -144,7 +126,7 @@ export class BillingController {
           'patientId and items array are required for invoice creation',
         );
       }
-      const invoice = await this.billingService.createInvoice(
+      return this.billingService.createInvoice(
         {
           patientId: dto.patientId,
           consultationId: dto.consultationId,
@@ -156,13 +138,6 @@ export class BillingController {
         currentUser.organizationId,
         currentUser.id,
       );
-      return {
-        success: true,
-        data: invoice,
-        message: 'Invoice created',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
     }
 
     if (resource === 'payment') {
@@ -171,7 +146,7 @@ export class BillingController {
           'invoiceId, amount, and paymentMethod are required for payment recording',
         );
       }
-      const payment = await this.billingService.createPayment(
+      return this.billingService.createPayment(
         {
           invoiceId: dto.invoiceId,
           patientId: dto.patientId,
@@ -186,13 +161,6 @@ export class BillingController {
         currentUser.organizationId,
         currentUser.id,
       );
-      return {
-        success: true,
-        data: payment,
-        message: 'Payment recorded',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
     }
 
     throw new BadRequestException('Invalid resource specified');
@@ -207,12 +175,9 @@ export class BillingController {
   async compatibilityPatch(
     @Body() dto: BillingPatchCompatDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
-    let updated: unknown;
-
     if (dto.resource === 'invoice') {
-      updated = await this.billingService.updateInvoice(
+      return this.billingService.updateInvoice(
         dto.id,
         {
           status: dto.status,
@@ -223,8 +188,10 @@ export class BillingController {
         currentUser.organizationId,
         currentUser.id,
       );
-    } else if (dto.resource === 'service') {
-      updated = await this.billingService.updateService(
+    }
+
+    if (dto.resource === 'service') {
+      return this.billingService.updateService(
         dto.id,
         {
           serviceName: dto.serviceName,
@@ -242,16 +209,9 @@ export class BillingController {
         currentUser.organizationId,
         currentUser.id,
       );
-    } else {
-      throw new BadRequestException('Invalid resource specified');
     }
 
-    return {
-      success: true,
-      data: updated,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    throw new BadRequestException('Invalid resource specified');
   }
 
   // =========================================================================

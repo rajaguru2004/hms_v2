@@ -8,7 +8,6 @@ import {
   Param,
   Query,
   UseGuards,
-  Req,
   Res,
   HttpStatus,
 } from '@nestjs/common';
@@ -18,7 +17,7 @@ import {
   ApiBearerAuth,
   ApiParam,
 } from '@nestjs/swagger';
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import { DeathCertificatesService } from './death-certificates.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -46,24 +45,9 @@ export class DeathCertificatesController {
   async findAll(
     @Query() query: DeathCertificateQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
-    const result = await this.service.findAll(
-      query,
-      currentUser.organizationId,
-    );
-    return {
-      success: true,
-      data: result.data,
-      meta: {
-        total: result.meta.total,
-        limit: result.meta.limit,
-        offset: query.offset ?? 0,
-        hasMore: result.meta.hasNextPage,
-      },
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    // ResponseInterceptor wraps the return value — no manual envelope needed.
+    return this.service.findAll(query, currentUser.organizationId);
   }
 
   @Post()
@@ -72,20 +56,8 @@ export class DeathCertificatesController {
   async create(
     @Body() dto: CreateDeathCertificateDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
-    const certificate = await this.service.create(
-      dto,
-      currentUser.organizationId,
-      currentUser.id,
-    );
-    return {
-      success: true,
-      data: certificate,
-      message: 'Death certificate created successfully',
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return this.service.create(dto, currentUser.organizationId, currentUser.id);
   }
 
   @Get(':id')
@@ -95,18 +67,8 @@ export class DeathCertificatesController {
   async findById(
     @Param('id') id: string,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
-    const certificate = await this.service.findById(
-      id,
-      currentUser.organizationId,
-    );
-    return {
-      success: true,
-      data: certificate,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return this.service.findById(id, currentUser.organizationId);
   }
 
   @Patch(':id')
@@ -117,21 +79,13 @@ export class DeathCertificatesController {
     @Param('id') id: string,
     @Body() dto: UpdateDeathCertificateDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
-    const certificate = await this.service.update(
+    return this.service.update(
       id,
       dto,
       currentUser.organizationId,
       currentUser.id,
     );
-    return {
-      success: true,
-      data: certificate,
-      message: 'Death certificate updated successfully',
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
   }
 
   @Delete(':id')
@@ -141,15 +95,9 @@ export class DeathCertificatesController {
   async remove(
     @Param('id') id: string,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     await this.service.remove(id, currentUser.organizationId, currentUser.id);
-    return {
-      success: true,
-      message: 'Death certificate deleted successfully',
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return { message: 'Death certificate deleted successfully' };
   }
 
   @Patch(':id/issue')
@@ -160,23 +108,20 @@ export class DeathCertificatesController {
     @Param('id') id: string,
     @Body() dto: IssueDeathCertificateDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
-    const certificate = await this.service.issue(
+    return this.service.issue(
       id,
       dto,
       currentUser.organizationId,
       currentUser.id,
     );
-    return {
-      success: true,
-      data: certificate,
-      message: 'Death certificate issuance recorded successfully',
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
   }
 
+  /**
+   * Print endpoint bypasses the ResponseInterceptor intentionally.
+   * Raw HTML must be streamed with Content-Type: text/html.
+   * Using @Res() disables NestJS response handling for this route only.
+   */
   @Get(':id/print')
   @Permissions(Permission.DEATH_CERTIFICATE_READ)
   @ApiOperation({ summary: 'Get printable HTML of a death certificate' })
