@@ -504,6 +504,65 @@ async function main(): Promise<void> {
   }
 
   console.log(`✅ Default admin user: ${defaultAdminEmail}`);
+
+  // ── 5. Additional Demo Users (Doctor & Nurse) ──────────────────────────────
+  const doctorRole = await prisma.role.findUnique({
+    where: { name: 'DOCTOR' },
+  });
+  const nurseRole = await prisma.role.findUnique({ where: { name: 'NURSE' } });
+
+  const doctorPassword = await bcrypt.hash('Doctor@HMS2024!', 12);
+  const doctorUser = await prisma.user.upsert({
+    where: { email: 'doctor@hms.local' },
+    update: {},
+    create: {
+      email: 'doctor@hms.local',
+      password: doctorPassword,
+      firstName: 'Gregory',
+      lastName: 'House',
+      fullName: 'Dr. Gregory House',
+      organizationId: defaultOrg.id,
+      isActive: true,
+    },
+  });
+
+  if (doctorRole) {
+    await prisma.userRole.upsert({
+      where: {
+        userId_roleId: { userId: doctorUser.id, roleId: doctorRole.id },
+      },
+      update: {},
+      create: { userId: doctorUser.id, roleId: doctorRole.id },
+    });
+  }
+  console.log('✅ Default doctor user: doctor@hms.local');
+
+  const nursePassword = await bcrypt.hash('Nurse@HMS2024!', 12);
+  const nurseUser = await prisma.user.upsert({
+    where: { email: 'nurse@hms.local' },
+    update: {},
+    create: {
+      email: 'nurse@hms.local',
+      password: nursePassword,
+      firstName: 'Abby',
+      lastName: 'Lockhart',
+      fullName: 'Nurse Abby Lockhart',
+      organizationId: defaultOrg.id,
+      isActive: true,
+    },
+  });
+
+  if (nurseRole) {
+    await prisma.userRole.upsert({
+      where: {
+        userId_roleId: { userId: nurseUser.id, roleId: nurseRole.id },
+      },
+      update: {},
+      create: { userId: nurseUser.id, roleId: nurseRole.id },
+    });
+  }
+  console.log('✅ Default nurse user: nurse@hms.local');
+
   console.log('🎉 Seed complete!');
 }
 
