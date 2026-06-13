@@ -121,7 +121,7 @@ async function runVerification() {
       throw new Error(`Failed to list/search certificates: ${listRes.status}`);
     }
     const listData = await listRes.json();
-    const foundCertificate = listData.data.find(
+    const foundCertificate = listData.data.data.find(
       (c: any) => c.id === certificateId,
     );
     if (!foundCertificate) {
