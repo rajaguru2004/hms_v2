@@ -113,10 +113,15 @@ export abstract class BaseRepository<TModel, TCreateInput, TUpdateInput> {
     id: string,
     data: TUpdateInput & { updatedBy?: string },
   ): Promise<TModel> {
+    const { updatedBy, ...prismaData } = data as Record<string, unknown>;
     return this.delegate.update({
       where: { id },
       data: {
-        ...data,
+        ...prismaData,
+        ...(typeof updatedBy === 'string' &&
+          this.modelName !== 'patient' && { updatedBy }),
+        ...(typeof updatedBy === 'string' &&
+          this.modelName === 'patient' && { updatedById: updatedBy }),
         updatedAt: new Date(),
       },
     }) as Promise<TModel>;
@@ -140,7 +145,10 @@ export abstract class BaseRepository<TModel, TCreateInput, TUpdateInput> {
       data: {
         isDeleted: true,
         deletedAt: new Date(),
-        ...(deletedBy && { updatedBy: deletedBy }),
+        ...(deletedBy &&
+          this.modelName !== 'patient' && { updatedBy: deletedBy }),
+        ...(deletedBy &&
+          this.modelName === 'patient' && { updatedById: deletedBy }),
       },
     }) as Promise<TModel>;
   }
@@ -154,7 +162,10 @@ export abstract class BaseRepository<TModel, TCreateInput, TUpdateInput> {
       data: {
         isDeleted: false,
         deletedAt: null,
-        ...(restoredBy && { updatedBy: restoredBy }),
+        ...(restoredBy &&
+          this.modelName !== 'patient' && { updatedBy: restoredBy }),
+        ...(restoredBy &&
+          this.modelName === 'patient' && { updatedById: restoredBy }),
       },
     }) as Promise<TModel>;
   }
