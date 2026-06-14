@@ -162,8 +162,8 @@ export class InpatientService {
     status?: string,
   ): Promise<Bed[]> {
     const where: Record<string, unknown> = { organizationId };
-    if (wardId) where.wardId = wardId;
-    if (status) where.status = status;
+    if (wardId && wardId !== 'all') where.wardId = wardId;
+    if (status && status !== 'all') where.status = status;
 
     return this.bedRepository.findMany(where, {
       orderBy: { bedNumber: 'asc' },
@@ -268,7 +268,7 @@ export class InpatientService {
     status?: string,
   ): Promise<Admission[]> {
     const where: Record<string, unknown> = { organizationId };
-    if (status) where.status = status;
+    if (status && status !== 'all') where.status = status;
 
     return this.admissionRepository.findMany(where, {
       orderBy: { admissionDate: 'desc' },
