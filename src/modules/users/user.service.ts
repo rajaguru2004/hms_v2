@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { User } from '@prisma/client';
+import { Prisma, User } from '@prisma/client';
 import { UserRepository } from './user.repository';
 import { AuditService } from '../../audit/audit.service';
 import { AppCacheService } from '../../cache/cache.service';
@@ -90,6 +90,17 @@ export class UserService {
       fullName,
       phone: dto.phone,
       organization: { connect: { id: organizationId } },
+      dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
+      gender: dto.gender,
+      address: dto.address,
+      employeeId: dto.employeeId,
+      role: dto.role,
+      department: dto.departmentId
+        ? { connect: { id: dto.departmentId } }
+        : undefined,
+      specialization: dto.specialization,
+      licenseNumber: dto.licenseNumber,
+      defaultCalendar: dto.defaultCalendar || 'ethiopian',
       createdBy,
     });
 
@@ -168,7 +179,11 @@ export class UserService {
       throw new NotFoundException('User not found', ErrorCodes.USER_NOT_FOUND);
     }
 
-    const updateData: any = { ...dto, updatedBy };
+    const updateData: Prisma.UserUpdateInput & { updatedBy?: string } = {
+      ...dto,
+      dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : undefined,
+      updatedBy,
+    };
     if (dto.firstName !== undefined || dto.lastName !== undefined) {
       const newFirstName =
         dto.firstName !== undefined ? dto.firstName : existing.firstName;

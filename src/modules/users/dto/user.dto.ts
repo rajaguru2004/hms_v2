@@ -4,7 +4,6 @@ import {
   MinLength,
   MaxLength,
   IsOptional,
-  IsPhoneNumber,
 } from 'class-validator';
 import {
   ApiProperty,
@@ -45,6 +44,51 @@ export class CreateUserDto {
   @IsOptional()
   @IsString()
   organizationId?: string;
+
+  @ApiPropertyOptional({ example: '1990-05-15' })
+  @IsOptional()
+  @IsString()
+  dateOfBirth?: string;
+
+  @ApiPropertyOptional({ example: 'male' })
+  @IsOptional()
+  @IsString()
+  gender?: string;
+
+  @ApiPropertyOptional({ example: '123 Main St' })
+  @IsOptional()
+  @IsString()
+  address?: string;
+
+  @ApiPropertyOptional({ example: 'EMP123' })
+  @IsOptional()
+  @IsString()
+  employeeId?: string;
+
+  @ApiPropertyOptional({ example: 'DOCTOR' })
+  @IsOptional()
+  @IsString()
+  role?: string;
+
+  @ApiPropertyOptional({ example: 'dept_cuid_here' })
+  @IsOptional()
+  @IsString()
+  departmentId?: string;
+
+  @ApiPropertyOptional({ example: 'Cardiology' })
+  @IsOptional()
+  @IsString()
+  specialization?: string;
+
+  @ApiPropertyOptional({ example: 'LIC9876' })
+  @IsOptional()
+  @IsString()
+  licenseNumber?: string;
+
+  @ApiPropertyOptional({ example: 'ethiopian' })
+  @IsOptional()
+  @IsString()
+  defaultCalendar?: string;
 }
 
 export class UpdateUserDto extends PartialType(
@@ -76,4 +120,13 @@ export class UserResponseDto {
   @ApiPropertyOptional() lastLoginAt?: Date;
   @ApiProperty() createdAt: Date;
   @ApiProperty() updatedAt: Date;
+  @ApiPropertyOptional() dateOfBirth?: Date;
+  @ApiPropertyOptional() gender?: string;
+  @ApiPropertyOptional() address?: string;
+  @ApiPropertyOptional() employeeId?: string;
+  @ApiPropertyOptional() role?: string;
+  @ApiPropertyOptional() departmentId?: string;
+  @ApiPropertyOptional() specialization?: string;
+  @ApiPropertyOptional() licenseNumber?: string;
+  @ApiPropertyOptional() defaultCalendar?: string;
 }
