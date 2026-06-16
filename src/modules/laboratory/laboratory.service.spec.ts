@@ -337,6 +337,51 @@ describe('LaboratoryService', () => {
     });
   });
 
+  describe('updateOrder', () => {
+    it('should generate a unique accession number when status becomes sample_collected', async () => {
+      labOrderRepository.findById.mockResolvedValue(mockOrderRecord);
+      labOrderRepository.findOne.mockResolvedValueOnce(null); // No existing order with generated accession
+      labOrderRepository.update.mockImplementation((id, data) =>
+        Promise.resolve({ ...mockOrderRecord, ...data } as LabOrder),
+      );
+
+      const result = await service.updateOrder(
+        'order-1',
+        { status: 'sample_collected', sampleCollectedAt: new Date() },
+        'org-demo',
+        'user-1',
+      );
+
+      expect(labOrderRepository.update).toHaveBeenCalledWith(
+        'order-1',
+        expect.objectContaining({
+          status: 'sample_collected',
+          accessionNumber: expect.stringMatching(/^ACC-[0-9A-Z]{8}$/),
+        }),
+      );
+      expect(result.accessionNumber).toMatch(/^ACC-[0-9A-Z]{8}$/);
+    });
+
+    it('should ignore and delete custom accession number from client to prevent duplication', async () => {
+      labOrderRepository.findById.mockResolvedValue(mockOrderRecord);
+      labOrderRepository.findOne.mockResolvedValueOnce(null);
+      labOrderRepository.update.mockImplementation((id, data) =>
+        Promise.resolve({ ...mockOrderRecord, ...data } as LabOrder),
+      );
+
+      const result = await service.updateOrder(
+        'order-1',
+        { status: 'sample_collected', accessionNumber: 'CUSTOM-ACC-123' },
+        'org-demo',
+        'user-1',
+      );
+
+      // Should be overwritten with a generated unique one
+      expect(result.accessionNumber).not.toBe('CUSTOM-ACC-123');
+      expect(result.accessionNumber).toMatch(/^ACC-[0-9A-Z]{8}$/);
+    });
+  });
+
   describe('getStats', () => {
     it('should calculate laboratory statistics', async () => {
       labOrderRepository.count.mockResolvedValueOnce(5); // pending

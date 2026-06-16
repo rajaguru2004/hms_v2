@@ -17,11 +17,17 @@ import Redis from 'ioredis';
 @Injectable()
 export class AppCacheService {
   private readonly logger = new Logger(AppCacheService.name);
-  private readonly redis: Redis;
+  private readonly redis: Redis | null = null;
   private readonly defaultTtl: number;
 
   constructor(private readonly config: ConfigService) {
     this.defaultTtl = this.config.get<number>('redis.ttl', 300);
+    const isEnabled = this.config.get<boolean>('redis.enabled', true);
+
+    if (!isEnabled) {
+      this.logger.warn('Redis cache is disabled via config.');
+      return;
+    }
 
     this.redis = new Redis({
       host: this.config.get<string>('redis.host', 'localhost'),
@@ -48,6 +54,7 @@ export class AppCacheService {
    * Get cached value. Returns null on miss or parse error.
    */
   async get<T>(key: string): Promise<T | null> {
+    if (!this.redis) return null;
     try {
       const value = await this.redis.get(key);
       if (!value) return null;
@@ -62,6 +69,7 @@ export class AppCacheService {
    * Set a cache value with optional TTL (seconds).
    */
   async set<T>(key: string, value: T, ttl?: number): Promise<void> {
+    if (!this.redis) return;
     try {
       const serialized = JSON.stringify(value);
       const expiry = ttl ?? this.defaultTtl;
@@ -75,6 +83,7 @@ export class AppCacheService {
    * Delete a specific key.
    */
   async del(key: string): Promise<void> {
+    if (!this.redis) return;
     try {
       await this.redis.del(key);
     } catch (err) {
@@ -87,6 +96,7 @@ export class AppCacheService {
    * e.g. invalidateByPrefix('user:123:*') clears all user-specific caches.
    */
   async invalidateByPrefix(prefix: string): Promise<void> {
+    if (!this.redis) return;
     try {
       const keys = await this.redis.keys(`${prefix}*`);
       if (keys.length > 0) {
@@ -113,6 +123,7 @@ export class AppCacheService {
    * Ping Redis — used by health check.
    */
   async ping(): Promise<boolean> {
+    if (!this.redis) return true; // Pretend it's up if disabled so health check passes if it ever gets added.
     try {
       const result = await this.redis.ping();
       return result === 'PONG';
@@ -124,7 +135,7 @@ export class AppCacheService {
   /**
    * Get the underlying Redis client for advanced usage.
    */
-  getClient(): Redis {
+  getClient(): Redis | null {
     return this.redis;
   }
 }

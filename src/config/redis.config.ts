@@ -5,6 +5,7 @@ import { registerAs } from '@nestjs/config';
  * Used by CacheModule and BullMQ (jobs) if added later.
  */
 export default registerAs('redis', () => ({
+  enabled: process.env.REDIS_ENABLED !== 'false',
   host: process.env.REDIS_HOST || 'localhost',
   port: parseInt(process.env.REDIS_PORT || '6379', 10),
   password: process.env.REDIS_PASSWORD || undefined,

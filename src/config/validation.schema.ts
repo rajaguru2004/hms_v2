@@ -30,8 +30,9 @@ export const validationSchema = Joi.object({
   JWT_REFRESH_SECRET: Joi.string().min(32).optional(),
   JWT_REFRESH_EXPIRES_IN: Joi.string().default('7d'),
 
-  // Redis — REQUIRED
-  REDIS_HOST: Joi.string().required().description('Redis server hostname'),
+  // Redis
+  REDIS_ENABLED: Joi.string().valid('true', 'false').default('true'),
+  REDIS_HOST: Joi.string().optional().description('Redis server hostname'),
   REDIS_PORT: Joi.number().default(6379),
   REDIS_PASSWORD: Joi.string().optional().allow(''),
   REDIS_TTL: Joi.number().default(300),

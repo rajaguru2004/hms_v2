@@ -210,6 +210,35 @@ export class LaboratoryService {
       updates.resultsReportedAt = new Date();
     }
 
+    // Auto-generate unique accession number on sample collection, ignore client value to prevent duplication
+    if (dto.status === 'sample_collected') {
+      if (!oldOrder.accessionNumber) {
+        let uniqueAccession = '';
+        let isUnique = false;
+        while (!isUnique) {
+          const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+          let randomStr = '';
+          for (let i = 0; i < 8; i++) {
+            randomStr += chars[Math.floor(Math.random() * chars.length)];
+          }
+          uniqueAccession = `ACC-${randomStr}`;
+          const existing = await this.labOrderRepository.findOne({
+            accessionNumber: uniqueAccession,
+          });
+          if (!existing) {
+            isUnique = true;
+          }
+        }
+        updates.accessionNumber = uniqueAccession;
+      } else {
+        // Prevent changing existing accession number
+        delete updates.accessionNumber;
+      }
+    } else {
+      // Prevent setting accession number if status is not sample_collected
+      delete updates.accessionNumber;
+    }
+
     const order = await this.labOrderRepository.update(id, updates);
 
     void this.auditService.log({
