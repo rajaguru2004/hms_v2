@@ -113,6 +113,7 @@ describe('LaboratoryService', () => {
     const mockOrderRepo = {
       findById: jest.fn(),
       findMany: jest.fn(),
+      paginate: jest.fn(),
       findOne: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
@@ -172,14 +173,24 @@ describe('LaboratoryService', () => {
 
   describe('getOrders', () => {
     it('should query and return orders', async () => {
-      labOrderRepository.findMany.mockResolvedValue([mockOrderRecord]);
+      labOrderRepository.paginate.mockResolvedValue({
+        data: [mockOrderRecord],
+        meta: {
+          page: 1,
+          limit: 10,
+          total: 1,
+          totalPages: 1,
+          hasNextPage: false,
+          hasPreviousPage: false,
+        },
+      });
       const result = await service.getOrders('org-demo', 'pending', 'routine');
-      expect(labOrderRepository.findMany).toHaveBeenCalledWith(
+      expect(labOrderRepository.paginate).toHaveBeenCalledWith(
         { organizationId: 'org-demo', status: 'pending', priority: 'routine' },
         expect.any(Object),
       );
-      expect(result).toHaveLength(1);
-      expect(result[0].id).toBe(mockOrderRecord.id);
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].id).toBe(mockOrderRecord.id);
     });
   });
 

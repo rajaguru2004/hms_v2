@@ -9,6 +9,7 @@ import {
   UseGuards,
   Req,
   BadRequestException,
+  Delete,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -325,6 +326,22 @@ export class LaboratoryController {
     );
   }
 
+  @Delete('tests/:id')
+  @Permissions(Permission.LABORATORY_UPDATE)
+  @ApiOperation({ summary: 'Delete a laboratory test (soft delete)' })
+  @ApiParam({ name: 'id', type: String })
+  @ApiResponse({ status: 200, type: LabTestResponseDto })
+  async deleteTest(
+    @Param('id') id: string,
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ) {
+    return this.laboratoryService.deleteTest(
+      id,
+      currentUser.organizationId,
+      currentUser.id,
+    );
+  }
+
   @Get('orders')
   @Permissions(Permission.LABORATORY_READ)
   @ApiOperation({ summary: 'Get laboratory orders' })
@@ -332,12 +349,21 @@ export class LaboratoryController {
   async getOrders(
     @Query('status') status: string,
     @Query('priority') priority: string,
+    @Query('search') search: string,
+    @Query('page') page: string,
+    @Query('limit') limit: string,
     @CurrentUser() currentUser: AuthenticatedUser,
   ) {
+    const pageNumber = page ? parseInt(page, 10) : 1;
+    const limitNumber = limit ? parseInt(limit, 10) : 10;
+
     return this.laboratoryService.getOrders(
       currentUser.organizationId,
       status,
       priority,
+      search,
+      pageNumber,
+      limitNumber,
     );
   }
 

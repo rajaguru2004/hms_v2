@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { LabTest, LabOrder, LabResult } from '@prisma/client';
+import { Prisma, LabTest, LabOrder, LabResult } from '@prisma/client';
 import { LabTestRepository } from './lab-test.repository';
 import { LabOrderRepository } from './lab-order.repository';
 import { LabResultRepository } from './lab-result.repository';
@@ -100,21 +100,66 @@ export class LaboratoryService {
     return test;
   }
 
+  async deleteTest(
+    id: string,
+    organizationId: string,
+    userId: string,
+  ): Promise<LabTest> {
+    const oldTest = await this.getTestById(id);
+
+    const test = await this.labTestRepository.update(id, {
+      isActive: false,
+    });
+
+    void this.auditService.log({
+      userId,
+      action: AuditAction.UPDATE,
+      entityName: 'LabTest',
+      entityId: test.id,
+      oldValues: oldTest,
+      newValues: test,
+      metadata: { organizationId, deleted: true },
+    });
+
+    return test;
+  }
+
   // ── Orders ───────────────────────────────────────────────────────────────
   async getOrders(
     organizationId: string,
     status?: string,
     priority?: string,
-  ): Promise<LabOrder[]> {
-    const where: Record<string, unknown> = { organizationId };
+    search?: string,
+    page: number = 1,
+    limit: number = 10,
+  ): Promise<{ data: LabOrder[]; meta: any }> {
+    const where: Prisma.LabOrderWhereInput = { organizationId };
+
     if (status) {
       where.status = status;
     }
     if (priority) {
       where.priority = priority;
     }
+    if (search) {
+      where.OR = [
+        { orderNumber: { contains: search, mode: 'insensitive' } },
+        { accessionNumber: { contains: search, mode: 'insensitive' } },
+        {
+          patient: {
+            OR: [
+              { firstName: { contains: search, mode: 'insensitive' } },
+              { lastName: { contains: search, mode: 'insensitive' } },
+              { mrn: { contains: search, mode: 'insensitive' } },
+            ],
+          },
+        },
+      ];
+    }
 
-    return this.labOrderRepository.findMany(where, {
+    return this.labOrderRepository.paginate(where, {
+      page,
+      limit,
       orderBy: { orderDate: 'desc' },
       include: {
         patient: {
