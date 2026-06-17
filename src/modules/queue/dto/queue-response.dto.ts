@@ -1,5 +1,28 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
+export class QueuePreTriageSummaryDto {
+  @ApiProperty()
+  id!: string;
+
+  @ApiPropertyOptional()
+  chiefComplaint?: string | null;
+
+  @ApiPropertyOptional()
+  briefHistory?: string | null;
+
+  @ApiPropertyOptional()
+  temperature?: number | null;
+
+  @ApiPropertyOptional()
+  bloodPressureSystolic?: number | null;
+
+  @ApiPropertyOptional()
+  bloodPressureDiastolic?: number | null;
+
+  @ApiPropertyOptional()
+  pulseRate?: number | null;
+}
+
 export class QueuePatientSummaryDto {
   @ApiProperty()
   id!: string;
@@ -18,6 +41,9 @@ export class QueuePatientSummaryDto {
 
   @ApiPropertyOptional()
   gender?: string | null;
+
+  @ApiPropertyOptional({ type: QueuePreTriageSummaryDto })
+  preTriage?: QueuePreTriageSummaryDto | null;
 }
 
 export class QueueResponseDto {
@@ -80,4 +106,32 @@ export class QueueResponseDto {
 
   @ApiProperty()
   updatedAt!: Date;
+}
+
+export class QueuePaginationMeta {
+  @ApiProperty()
+  total!: number;
+
+  @ApiProperty()
+  lastPage!: number;
+
+  @ApiProperty()
+  currentPage!: number;
+
+  @ApiProperty()
+  perPage!: number;
+
+  @ApiPropertyOptional({ nullable: true })
+  prev!: number | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  next!: number | null;
+}
+
+export class PaginatedQueueResponseDto {
+  @ApiProperty({ type: [QueueResponseDto] })
+  data!: QueueResponseDto[];
+
+  @ApiProperty({ type: QueuePaginationMeta })
+  meta!: QueuePaginationMeta;
 }

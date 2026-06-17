@@ -9,9 +9,16 @@ import {
 import { ErrorCodes } from '../../common/exceptions/error-codes';
 import { CreateQueueDto } from './dto/create-queue.dto';
 import { QueueQueryDto } from './dto/queue-query.dto';
-import { QueueResponseDto } from './dto/queue-response.dto';
+import {
+  PaginatedQueueResponseDto,
+  QueueResponseDto,
+} from './dto/queue-response.dto';
 import { UpdateQueueDto } from './dto/update-queue.dto';
-import { QueueRepository, QueueWithPatient } from './queue.repository';
+import {
+  QueueRepository,
+  QueueWithPatient,
+  QUEUE_PATIENT_INCLUDE,
+} from './queue.repository';
 
 @Injectable()
 export class QueueService {
@@ -53,7 +60,17 @@ export class QueueService {
       estimatedWaitMinutes: item.estimatedWaitMinutes,
       displayMessage: item.displayMessage,
       waitTime,
-      patient: item.patient,
+      patient: item.patient
+        ? {
+            id: item.patient.id,
+            mrn: item.patient.mrn,
+            firstName: item.patient.firstName,
+            lastName: item.patient.lastName,
+            phonePrimary: item.patient.phonePrimary,
+            gender: item.patient.gender,
+            preTriage: item.patient.preTriages?.[0] ?? null,
+          }
+        : null,
       createdAt: item.createdAt,
       updatedAt: item.updatedAt,
     };
@@ -62,7 +79,7 @@ export class QueueService {
   async findAll(
     query: QueueQueryDto,
     organizationId: string,
-  ): Promise<QueueResponseDto[]> {
+  ): Promise<PaginatedQueueResponseDto> {
     const where: Prisma.QueueManagementWhereInput = { organizationId };
 
     if (query.serviceArea) {
@@ -70,11 +87,29 @@ export class QueueService {
     }
 
     if (query.status) {
-      where.status = query.status;
+      if (Array.isArray(query.status)) {
+        where.status = { in: query.status };
+      } else {
+        where.status = query.status;
+      }
     }
 
-    const queue = await this.queueRepository.findQueue(where);
-    return queue.map((item) => this.mapToResponse(item));
+    const result = await this.queueRepository.findQueue(where, {
+      page: query.page,
+      limit: query.limit,
+      orderBy: query.orderBy,
+      orderDir: query.orderDir,
+    });
+
+    return {
+      data: result.data.map((item) => this.mapToResponse(item)),
+      meta: result.meta,
+    };
+  }
+
+  async findOne(id: string, organizationId: string): Promise<QueueResponseDto> {
+    const item = await this.findExisting(id, organizationId);
+    return this.mapToResponse(item);
   }
 
   async create(
@@ -150,6 +185,7 @@ export class QueueService {
     const updateData: Prisma.QueueManagementUpdateInput = {
       status: dto.status,
       priority: dto.priority,
+      serviceArea: dto.serviceArea,
       serviceType: dto.serviceType,
       assignedTo: dto.assignedToId
         ? { connect: { id: dto.assignedToId } }
@@ -208,6 +244,21 @@ export class QueueService {
       entityId: id,
       metadata: { organizationId },
     });
+  }
+
+  async findActiveQueueEntry(
+    patientId: string,
+    organizationId: string,
+  ): Promise<QueueResponseDto | null> {
+    const item = (await this.queueRepository.findOne(
+      {
+        patientId,
+        organizationId,
+        status: { in: ['waiting', 'called', 'in_service'] },
+      },
+      QUEUE_PATIENT_INCLUDE,
+    )) as QueueWithPatient | null;
+    return item ? this.mapToResponse(item) : null;
   }
 
   private async findExisting(

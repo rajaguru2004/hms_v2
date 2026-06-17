@@ -3,6 +3,7 @@ import { Prisma, PreTriage } from '@prisma/client';
 import { PreTriageRepository } from './pre-triage.repository';
 import { PatientsService } from '../patients/patients.service';
 import { AuditService } from '../../audit/audit.service';
+import { QueueService } from '../queue/queue.service';
 import { CreatePreTriageDto } from './dto/create-pre-triage.dto';
 import { UpdatePreTriageDto } from './dto/update-pre-triage.dto';
 import { PreTriageQueryDto } from './dto/pre-triage-query.dto';
@@ -20,6 +21,7 @@ export class PreTriageService {
     private readonly preTriageRepository: PreTriageRepository,
     private readonly patientsService: PatientsService,
     private readonly auditService: AuditService,
+    private readonly queueService: QueueService,
   ) {}
 
   /**
@@ -107,6 +109,25 @@ export class PreTriageService {
       metadata: { organizationId },
     });
 
+    if (screening.routedTo) {
+      try {
+        const patientId = await this.autoRegisterPatient(
+          screening,
+          organizationId,
+          userId,
+        );
+        screening.patientId = patientId;
+        await this.ensureQueueEntry(
+          patientId,
+          screening.routedTo,
+          organizationId,
+          userId,
+        );
+      } catch (error) {
+        console.error('Failed auto queue/registration on create:', error);
+      }
+    }
+
     return screening;
   }
 
@@ -187,6 +208,8 @@ export class PreTriageService {
     userId?: string,
   ): Promise<PreTriage> {
     const existing = await this.findById(id, organizationId);
+    const targetStatus =
+      dto.status ?? (dto.routedTo ? 'routed' : existing.status);
 
     const updateData: Prisma.PreTriageUpdateInput & { updatedBy?: string } = {
       firstName: dto.firstName,
@@ -201,17 +224,36 @@ export class PreTriageService {
       bloodPressureDiastolic: dto.bloodPressureDiastolic,
       pulseRate: dto.pulseRate,
       routedTo: dto.routedTo,
-      status: dto.status,
+      status: targetStatus,
       patient: dto.patientId ? { connect: { id: dto.patientId } } : undefined,
       updatedBy: userId,
     };
 
-    if (dto.status === 'routed' && existing.status !== 'routed') {
+    if (targetStatus === 'routed' && existing.status !== 'routed') {
       updateData.routedAt = new Date();
       updateData.routedBy = userId ? { connect: { id: userId } } : undefined;
     }
 
     const updated = await this.preTriageRepository.update(id, updateData);
+
+    if (updated.status === 'routed' && updated.routedTo) {
+      try {
+        const patientId = await this.autoRegisterPatient(
+          updated,
+          organizationId,
+          userId,
+        );
+        updated.patientId = patientId;
+        await this.ensureQueueEntry(
+          patientId,
+          updated.routedTo,
+          organizationId,
+          userId,
+        );
+      } catch (error) {
+        console.error('Failed auto queue/registration on update:', error);
+      }
+    }
 
     // Audit log update
     void this.auditService.log({
@@ -324,5 +366,81 @@ export class PreTriageService {
       patientId: patient.id,
       mrn: patient.mrn,
     };
+  }
+
+  /**
+   * Automatically registers a walk-in pre-triage patient in the system.
+   */
+  private async autoRegisterPatient(
+    screening: PreTriage,
+    organizationId: string,
+    userId?: string,
+  ): Promise<string> {
+    if (screening.patientId) {
+      return screening.patientId;
+    }
+
+    const dob = new Date(
+      new Date().getFullYear() - (screening.age || 0),
+      0,
+      1,
+    ).toISOString();
+
+    const patientDto = {
+      firstName: screening.firstName || 'Unknown',
+      lastName: screening.lastName || 'Unknown',
+      dateOfBirth: dob,
+      gender: screening.gender || 'other',
+      phonePrimary: screening.phone || undefined,
+      notes: `Converted from screening ${screening.screeningNumber}. Complaint: ${screening.chiefComplaint}`,
+    };
+
+    const patient = await this.patientsService.create(
+      patientDto,
+      organizationId,
+      userId,
+    );
+
+    await this.preTriageRepository.update(screening.id, {
+      patient: { connect: { id: patient.id } },
+    });
+
+    return patient.id;
+  }
+
+  /**
+   * Ensures the patient has a queue entry for the routed service area.
+   */
+  private async ensureQueueEntry(
+    patientId: string,
+    serviceArea: string,
+    organizationId: string,
+    userId?: string,
+  ): Promise<void> {
+    const activeEntry = await this.queueService.findActiveQueueEntry(
+      patientId,
+      organizationId,
+    );
+
+    if (activeEntry) {
+      if (activeEntry.serviceArea !== serviceArea) {
+        await this.queueService.update(
+          activeEntry.id,
+          { serviceArea },
+          organizationId,
+          userId,
+        );
+      }
+    } else {
+      await this.queueService.create(
+        {
+          patientId,
+          serviceArea,
+          priority: 'normal',
+        },
+        organizationId,
+        userId,
+      );
+    }
   }
 }

@@ -26,7 +26,10 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
 import { CreateQueueDto } from './dto/create-queue.dto';
 import { QueueQueryDto } from './dto/queue-query.dto';
-import { QueueResponseDto } from './dto/queue-response.dto';
+import {
+  PaginatedQueueResponseDto,
+  QueueResponseDto,
+} from './dto/queue-response.dto';
 import { UpdateQueueDto } from './dto/update-queue.dto';
 import { QueueService } from './queue.service';
 
@@ -39,13 +42,27 @@ export class QueueController {
 
   @Get()
   @Permissions(Permission.QUEUE_READ)
-  @ApiOperation({ summary: 'List queue entries by service area and status' })
-  @ApiResponse({ status: 200, type: [QueueResponseDto] })
+  @ApiOperation({
+    summary: 'List queue entries by service area and status (paginated)',
+  })
+  @ApiResponse({ status: 200, type: PaginatedQueueResponseDto })
   async findAll(
     @Query() query: QueueQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-  ): Promise<QueueResponseDto[]> {
+  ): Promise<PaginatedQueueResponseDto> {
     return this.queueService.findAll(query, currentUser.organizationId);
+  }
+
+  @Get(':id')
+  @Permissions(Permission.QUEUE_READ)
+  @ApiOperation({ summary: 'Get a single queue entry by ID' })
+  @ApiParam({ name: 'id', type: String })
+  @ApiResponse({ status: 200, type: QueueResponseDto })
+  async findOne(
+    @Param('id') id: string,
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<QueueResponseDto> {
+    return this.queueService.findOne(id, currentUser.organizationId);
   }
 
   @Post()

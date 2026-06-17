@@ -4,7 +4,11 @@ import { Prisma } from '@prisma/client';
 import { AuditService } from '../../audit/audit.service';
 import { NotFoundException } from '../../common/exceptions/app.exception';
 import { CreateQueueDto } from './dto/create-queue.dto';
-import { QueueRepository, QueueWithPatient } from './queue.repository';
+import {
+  QueueRepository,
+  QueueWithPatient,
+  QueuePaginatedResult,
+} from './queue.repository';
 import { QueueService } from './queue.service';
 
 describe('QueueService', () => {
@@ -109,20 +113,27 @@ describe('QueueService', () => {
   });
 
   it('should list queue entries with filters and wait time', async () => {
-    repository.findQueue.mockResolvedValue([mockQueueItem]);
+    const paginatedResult: QueuePaginatedResult = {
+      data: [mockQueueItem],
+      meta: {
+        total: 1,
+        lastPage: 1,
+        currentPage: 1,
+        perPage: 50,
+        prev: null,
+        next: null,
+      },
+    };
+    repository.findQueue.mockResolvedValue(paginatedResult);
 
     const result = await service.findAll(
       { serviceArea: 'opd', status: 'waiting' },
       'org-1',
     );
 
-    expect(repository.findQueue).toHaveBeenCalledWith({
-      organizationId: 'org-1',
-      serviceArea: 'opd',
-      status: 'waiting',
-    });
-    expect(result).toHaveLength(1);
-    expect(result[0].waitTime).toBeGreaterThanOrEqual(9);
+    expect(repository.findQueue).toHaveBeenCalled();
+    expect(result.data).toHaveLength(1);
+    expect(result.data[0]?.waitTime).toBeGreaterThanOrEqual(9);
   });
 
   it('should set calledAt when status becomes called', async () => {

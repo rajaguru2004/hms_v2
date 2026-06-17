@@ -18,6 +18,11 @@ export class UpdateQueueDto {
   @IsIn(QUEUE_STATUSES)
   status?: QueueStatusValue;
 
+  @ApiPropertyOptional({ example: 'opd' })
+  @IsOptional()
+  @IsString()
+  serviceArea?: string;
+
   @ApiPropertyOptional({ enum: QUEUE_PRIORITIES, example: 'urgent' })
   @IsOptional()
   @IsIn(QUEUE_PRIORITIES)

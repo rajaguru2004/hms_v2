@@ -123,6 +123,21 @@ export class ConsultationsService {
         });
       }
 
+      // Complete active queue entries for patient
+      await tx.queueManagement.updateMany({
+        where: {
+          patientId: dto.patientId,
+          organizationId,
+          status: { in: ['waiting', 'called', 'in_service'] },
+          isDeleted: false,
+        },
+        data: {
+          status: 'completed',
+          serviceCompletedAt: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+
       return created;
     });
 

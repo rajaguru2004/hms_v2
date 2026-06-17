@@ -85,6 +85,7 @@ describe('ConsultationsService', () => {
             },
             prescription: { create: jest.fn() },
             appointment: { update: jest.fn() },
+            queueManagement: { updateMany: jest.fn() },
           }),
         ),
     };

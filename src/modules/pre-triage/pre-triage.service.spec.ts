@@ -4,6 +4,7 @@ import { PreTriageService } from './pre-triage.service';
 import { PreTriageRepository } from './pre-triage.repository';
 import { PatientsService } from '../patients/patients.service';
 import { AuditService } from '../../audit/audit.service';
+import { QueueService } from '../queue/queue.service';
 import { Prisma, PreTriage } from '@prisma/client';
 import { CreatePreTriageDto } from './dto/create-pre-triage.dto';
 import { UpdatePreTriageDto } from './dto/update-pre-triage.dto';
@@ -18,6 +19,7 @@ describe('PreTriageService', () => {
   let repository: jest.Mocked<PreTriageRepository>;
   let patientsService: jest.Mocked<PatientsService>;
   let auditService: jest.Mocked<AuditService>;
+  let queueService: jest.Mocked<QueueService>;
 
   const mockPreTriage: PreTriage = {
     id: 'scr-1',
@@ -34,7 +36,7 @@ describe('PreTriageService', () => {
     bloodPressureSystolic: 120,
     bloodPressureDiastolic: 80,
     pulseRate: 72,
-    routedTo: 'adult_triage',
+    routedTo: null,
     status: 'screening',
     patientId: null,
     screenedAt: new Date(),
@@ -72,12 +74,19 @@ describe('PreTriageService', () => {
       log: jest.fn(),
     };
 
+    const mockQueueService = {
+      create: jest.fn(),
+      update: jest.fn(),
+      findActiveQueueEntry: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PreTriageService,
         { provide: PreTriageRepository, useValue: mockRepo },
         { provide: PatientsService, useValue: mockPatientsService },
         { provide: AuditService, useValue: mockAudit },
+        { provide: QueueService, useValue: mockQueueService },
       ],
     }).compile();
 
@@ -85,6 +94,7 @@ describe('PreTriageService', () => {
     repository = module.get(PreTriageRepository);
     patientsService = module.get(PatientsService);
     auditService = module.get(AuditService);
+    queueService = module.get(QueueService);
   });
 
   it('should be defined', () => {
@@ -126,6 +136,40 @@ describe('PreTriageService', () => {
 
       expect(repository.create).toHaveBeenCalledTimes(2);
       expect(result.id).toBe(mockPreTriage.id);
+    });
+
+    it('should auto-register patient and add to queue when routedTo is provided', async () => {
+      const routedMockPreTriage = {
+        ...mockPreTriage,
+        routedTo: 'opd',
+        status: 'routed',
+      };
+      repository.create.mockResolvedValue(routedMockPreTriage);
+      patientsService.create.mockResolvedValue(mockPatient as any);
+      repository.update.mockResolvedValue({
+        ...routedMockPreTriage,
+        patientId: 'pat-1',
+      });
+      queueService.findActiveQueueEntry.mockResolvedValue(null);
+      queueService.create.mockResolvedValue({ id: 'q-1' } as any);
+
+      const result = await service.create(
+        { ...createDto, routedTo: 'opd' },
+        'org-1',
+        'user-1',
+      );
+
+      expect(repository.create).toHaveBeenCalled();
+      expect(patientsService.create).toHaveBeenCalled();
+      expect(repository.update).toHaveBeenCalledWith(routedMockPreTriage.id, {
+        patient: { connect: { id: 'pat-1' } },
+      });
+      expect(queueService.create).toHaveBeenCalledWith(
+        { patientId: 'pat-1', serviceArea: 'opd', priority: 'normal' },
+        'org-1',
+        'user-1',
+      );
+      expect(result.patientId).toBe('pat-1');
     });
   });
 
@@ -193,6 +237,39 @@ describe('PreTriageService', () => {
       expect(repository.update).toHaveBeenCalled();
       expect(auditService.log).toHaveBeenCalled();
       expect(result.chiefComplaint).toBe('Severe Fever');
+    });
+
+    it('should auto-register patient and add to queue when routedTo is updated', async () => {
+      repository.findOne.mockResolvedValue(mockPreTriage);
+      const routedMockPreTriage = {
+        ...mockPreTriage,
+        routedTo: 'mch',
+        status: 'routed',
+      };
+      repository.update.mockResolvedValue(routedMockPreTriage);
+      patientsService.create.mockResolvedValue(mockPatient as any);
+
+      // Secondary update mock inside autoRegisterPatient helper
+      repository.update
+        .mockResolvedValueOnce(routedMockPreTriage) // first update in the method
+        .mockResolvedValueOnce({ ...routedMockPreTriage, patientId: 'pat-1' }); // update inside helper
+
+      queueService.findActiveQueueEntry.mockResolvedValue(null);
+      queueService.create.mockResolvedValue({ id: 'q-1' } as any);
+
+      const result = await service.update(
+        'scr-1',
+        { routedTo: 'mch' },
+        'org-1',
+        'user-1',
+      );
+
+      expect(patientsService.create).toHaveBeenCalled();
+      expect(queueService.create).toHaveBeenCalledWith(
+        { patientId: 'pat-1', serviceArea: 'mch', priority: 'normal' },
+        'org-1',
+        'user-1',
+      );
     });
   });
 
