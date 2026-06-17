@@ -411,4 +411,65 @@ export class BillingService {
 
     return updated;
   }
+
+  /**
+   * Get single invoice by ID.
+   */
+  async getInvoiceById(id: string, organizationId: string): Promise<Invoice> {
+    const invoice = await this.invoiceRepository.findOne(
+      { id, organizationId },
+      {
+        patient: {
+          select: {
+            id: true,
+            mrn: true,
+            firstName: true,
+            lastName: true,
+            phonePrimary: true,
+            hasInsurance: true,
+            insuranceProvider: true,
+          },
+        },
+        payments: true,
+      },
+    );
+
+    if (!invoice) {
+      throw new NotFoundException(
+        'Invoice not found',
+        ErrorCodes.INVOICE_NOT_FOUND,
+      );
+    }
+
+    return invoice;
+  }
+
+  /**
+   * Get single payment transaction details by ID.
+   */
+  async getPaymentById(id: string, organizationId: string): Promise<Payment> {
+    const payment = await this.paymentRepository.findOne(
+      { id, organizationId },
+      {
+        patient: {
+          select: {
+            id: true,
+            mrn: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+        invoice: true,
+      },
+    );
+
+    if (!payment) {
+      throw new NotFoundException(
+        'Payment record not found',
+        ErrorCodes.PAYMENT_NOT_FOUND,
+      );
+    }
+
+    return payment;
+  }
 }

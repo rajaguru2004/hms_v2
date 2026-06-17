@@ -168,6 +168,22 @@ async function runVerification() {
       `✅ Found invoice: Number: ${foundInvoice.invoiceNumber}, Status: ${foundInvoice.status}`,
     );
 
+    // 6.5. Get Invoice by ID (RESTful Route)
+    console.log('\n🔍 Fetching single invoice by ID (RESTful)...');
+    const getInvoiceRes = await fetch(
+      `${BASE_URL}/billing/invoices/${invoiceId}`,
+      { headers },
+    );
+    if (!getInvoiceRes.ok) {
+      throw new Error(
+        `Failed to fetch single invoice: ${getInvoiceRes.status}`,
+      );
+    }
+    const getInvoiceData = await getInvoiceRes.json();
+    console.log(
+      `✅ Single Invoice: Number: ${getInvoiceData.data.invoiceNumber}, Total: $${getInvoiceData.data.totalAmount}`,
+    );
+
     // 7. Record Payment (Compatibility Route)
     console.log('\n💳 Recording payment (Compatibility Route)...');
     const paymentRes = await fetch(`${BASE_URL}/billing`, {
@@ -210,6 +226,23 @@ async function runVerification() {
     expectNotEmpty(getPaymentsData.data, 'Payments list should not be empty');
     console.log(
       `✅ Found payments for invoice. First payment amount: $${getPaymentsData.data[0].amount}`,
+    );
+
+    const paymentId = getPaymentsData.data[0].id;
+    // 8.5. Get Payment by ID (RESTful Route)
+    console.log('\n🔍 Fetching single payment by ID (RESTful)...');
+    const getPaymentRes = await fetch(
+      `${BASE_URL}/billing/payments/${paymentId}`,
+      { headers },
+    );
+    if (!getPaymentRes.ok) {
+      throw new Error(
+        `Failed to fetch single payment: ${getPaymentRes.status}`,
+      );
+    }
+    const getPaymentData = await getPaymentRes.json();
+    console.log(
+      `✅ Single Payment: Receipt: ${getPaymentData.data.receiptNumber}, Amount: $${getPaymentData.data.amount}`,
     );
 
     // 9. Fetch stats (Compatibility Route)

@@ -277,6 +277,17 @@ export class BillingController {
     );
   }
 
+  @Get('invoices/:id')
+  @Permissions(Permission.BILLING_READ)
+  @ApiOperation({ summary: 'Get a single invoice details' })
+  @ApiParam({ name: 'id', type: String })
+  async getInvoiceById(
+    @Param('id') id: string,
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ) {
+    return this.billingService.getInvoiceById(id, currentUser.organizationId);
+  }
+
   @Post('invoices')
   @Permissions(Permission.BILLING_CREATE)
   @ApiOperation({ summary: 'Create a new draft invoice' })
@@ -319,6 +330,17 @@ export class BillingController {
       currentUser.organizationId,
       invoiceId,
     );
+  }
+
+  @Get('payments/:id')
+  @Permissions(Permission.BILLING_READ)
+  @ApiOperation({ summary: 'Get a single payment transaction details' })
+  @ApiParam({ name: 'id', type: String })
+  async getPaymentById(
+    @Param('id') id: string,
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ) {
+    return this.billingService.getPaymentById(id, currentUser.organizationId);
   }
 
   @Post('payments')

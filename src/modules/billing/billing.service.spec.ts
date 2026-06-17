@@ -353,4 +353,42 @@ describe('BillingService', () => {
       ).rejects.toThrow(NotFoundException);
     });
   });
+
+  describe('getInvoiceById', () => {
+    it('should return invoice if found', async () => {
+      invoiceRepository.findOne.mockResolvedValue(mockInvoiceRecord);
+      const result = await service.getInvoiceById('inv-1', 'org-demo');
+      expect(invoiceRepository.findOne).toHaveBeenCalledWith(
+        { id: 'inv-1', organizationId: 'org-demo' },
+        expect.any(Object),
+      );
+      expect(result).toEqual(mockInvoiceRecord);
+    });
+
+    it('should throw NotFoundException if invoice not found', async () => {
+      invoiceRepository.findOne.mockResolvedValue(null);
+      await expect(
+        service.getInvoiceById('inv-different', 'org-demo'),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('getPaymentById', () => {
+    it('should return payment if found', async () => {
+      paymentRepository.findOne.mockResolvedValue(mockPaymentRecord);
+      const result = await service.getPaymentById('pay-1', 'org-demo');
+      expect(paymentRepository.findOne).toHaveBeenCalledWith(
+        { id: 'pay-1', organizationId: 'org-demo' },
+        expect.any(Object),
+      );
+      expect(result).toEqual(mockPaymentRecord);
+    });
+
+    it('should throw NotFoundException if payment not found', async () => {
+      paymentRepository.findOne.mockResolvedValue(null);
+      await expect(
+        service.getPaymentById('pay-different', 'org-demo'),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
 });
