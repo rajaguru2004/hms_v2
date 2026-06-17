@@ -52,12 +52,20 @@ describe('QueueService', () => {
   } as unknown as QueueWithPatient;
 
   beforeEach(async () => {
+    const mockPrisma = {
+      preTriage: { findFirst: jest.fn() },
+      radiologyOrder: { findFirst: jest.fn(), create: jest.fn() },
+      radiologyExam: { findFirst: jest.fn(), create: jest.fn() },
+      user: { findFirst: jest.fn() },
+    };
+
     const mockRepo = {
       findQueue: jest.fn(),
       findQueueById: jest.fn(),
       createQueue: jest.fn(),
       updateQueue: jest.fn(),
       softDelete: jest.fn(),
+      prismaClient: mockPrisma,
     };
 
     const mockAudit = {
@@ -208,5 +216,55 @@ describe('QueueService', () => {
 
     expect(repository.softDelete).toHaveBeenCalledWith('queue-1', 'user-1');
     expect(auditService.log).toHaveBeenCalled();
+  });
+
+  it('should auto-create a pending radiology order if updated to called and patient routed from pre-triage', async () => {
+    const mockRadQueueItem = {
+      ...mockQueueItem,
+      id: 'queue-rad',
+      serviceArea: 'radiology',
+      status: 'waiting',
+    } as unknown as QueueWithPatient;
+
+    repository.findQueueById.mockResolvedValue(mockRadQueueItem);
+    repository.updateQueue.mockResolvedValue({
+      ...mockRadQueueItem,
+      status: 'called',
+      calledAt: new Date(),
+    });
+
+    const mockPrisma = repository.prismaClient as any;
+    mockPrisma.preTriage.findFirst.mockResolvedValue({
+      id: 'pt-1',
+      chiefComplaint: 'cough',
+      briefHistory: 'fever',
+      temperature: 38.5,
+    });
+    mockPrisma.radiologyOrder.findFirst.mockResolvedValue(null);
+    mockPrisma.radiologyExam.findFirst.mockResolvedValue({
+      id: 'exam-1',
+      examName: 'Chest X-Ray',
+    });
+
+    const result = await service.update(
+      'queue-rad',
+      { status: 'called' },
+      'org-1',
+      'user-1',
+    );
+
+    expect(result.status).toBe('called');
+    // Allow macro-task queue / promise ticks to complete for async call
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(mockPrisma.preTriage.findFirst).toHaveBeenCalledWith({
+      where: {
+        patientId: 'patient-1',
+        routedTo: 'radiology',
+        isDeleted: false,
+      },
+      orderBy: { screenedAt: 'desc' },
+    });
+    expect(mockPrisma.radiologyOrder.create).toHaveBeenCalled();
   });
 });

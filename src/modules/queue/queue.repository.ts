@@ -56,6 +56,10 @@ export class QueueRepository extends BaseRepository<
     super(prisma, 'queueManagement');
   }
 
+  get prismaClient() {
+    return this.prisma;
+  }
+
   async findQueue(
     where: Prisma.QueueManagementWhereInput,
     options?: {

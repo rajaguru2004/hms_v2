@@ -226,6 +226,19 @@ export class QueueService {
       metadata: { organizationId },
     });
 
+    if (
+      updated.serviceArea === 'radiology' &&
+      (updated.status === 'called' || updated.status === 'in_service')
+    ) {
+      void this.createRadiologyOrderForQueueItem(
+        updated,
+        organizationId,
+        userId,
+      ).catch((err) => {
+        console.error('Failed to auto create radiology order from queue:', err);
+      });
+    }
+
     return this.mapToResponse(updated);
   }
 
@@ -275,5 +288,133 @@ export class QueueService {
     }
 
     return item;
+  }
+
+  private async createRadiologyOrderForQueueItem(
+    queueItem: QueueWithPatient,
+    organizationId: string,
+    userId?: string,
+  ): Promise<void> {
+    if (!queueItem.patientId) return;
+
+    const prisma = this.queueRepository.prismaClient;
+
+    // 1. Verify if patient is from pre-triage and routed to radiology
+    const preTriage = await prisma.preTriage.findFirst({
+      where: {
+        patientId: queueItem.patientId,
+        routedTo: 'radiology',
+        isDeleted: false,
+      },
+      orderBy: { screenedAt: 'desc' },
+    });
+
+    if (!preTriage) {
+      return;
+    }
+
+    // 2. Check if a pending radiology order already exists for this patient
+    const existingOrder = await prisma.radiologyOrder.findFirst({
+      where: {
+        patientId: queueItem.patientId,
+        organizationId,
+        status: 'pending',
+      },
+    });
+
+    if (existingOrder) {
+      return;
+    }
+
+    // 3. Determine requestedById (foreign key User)
+    let requestedById = userId;
+    if (!requestedById) {
+      requestedById = queueItem.createdBy ?? undefined;
+      if (!requestedById) {
+        const fallbackUser = await prisma.user.findFirst({
+          where: { organizationId, isActive: true },
+        });
+        requestedById = fallbackUser?.id;
+      }
+    }
+
+    if (!requestedById) {
+      return;
+    }
+
+    // 4. Find or create default RadiologyExam
+    let exam = await prisma.radiologyExam.findFirst({
+      where: { organizationId, isActive: true },
+    });
+
+    if (!exam) {
+      exam = await prisma.radiologyExam.create({
+        data: {
+          organizationId,
+          examName: 'General/Unspecified Radiology Exam',
+          examCode: 'GEN-RAD',
+          examCategory: 'x-ray',
+          modality: 'CR',
+          price: 0,
+          estimatedDuration: 15,
+          isActive: true,
+          createdById: requestedById,
+        },
+      });
+    }
+
+    // 5. Construct clinical details from pre-triage
+    const clinicalIndication = preTriage.chiefComplaint || 'Pre-Triage Routing';
+
+    const historyParts = [];
+    if (preTriage.briefHistory) {
+      historyParts.push(preTriage.briefHistory);
+    }
+    const vitals = [];
+    if (preTriage.temperature) vitals.push(`Temp: ${preTriage.temperature}°C`);
+    if (preTriage.pulseRate) vitals.push(`Pulse: ${preTriage.pulseRate} bpm`);
+    if (preTriage.bloodPressureSystolic && preTriage.bloodPressureDiastolic) {
+      vitals.push(
+        `BP: ${preTriage.bloodPressureSystolic}/${preTriage.bloodPressureDiastolic} mmHg`,
+      );
+    }
+    if (vitals.length > 0) {
+      historyParts.push(`Vitals: ${vitals.join(', ')}`);
+    }
+    const relevantHistory =
+      historyParts.join(' | ') || 'Pre-Triage Screening Details';
+
+    // 6. Create the pending RadiologyOrder
+    const orderNumber = `RAD${Date.now()}`;
+    await prisma.radiologyOrder.create({
+      data: {
+        organization: { connect: { id: organizationId } },
+        patient: { connect: { id: queueItem.patientId } },
+        exam: { connect: { id: exam.id } },
+        requestedBy: { connect: { id: requestedById } },
+        orderNumber,
+        clinicalIndication,
+        relevantHistory,
+        provisionalDiagnosis: preTriage.chiefComplaint || 'Pre-Triage Route',
+        urgency: queueItem.priority === 'urgent' ? 'urgent' : 'routine',
+        status: 'pending',
+        createdById: requestedById,
+      },
+    });
+
+    // 7. Audit log the order creation
+    void this.auditService.log({
+      userId: requestedById,
+      action: AuditAction.CREATE,
+      entityName: 'RadiologyOrder',
+      entityId: orderNumber,
+      newValues: {
+        patientId: queueItem.patientId,
+        examId: exam.id,
+        orderNumber,
+        source: 'Pre-Triage Queue Automation',
+      },
+      metadata: { organizationId },
+    });
   }
 }
