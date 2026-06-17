@@ -63,7 +63,10 @@ export class PreTriageService {
           bloodPressureDiastolic: dto.bloodPressureDiastolic,
           pulseRate: dto.pulseRate,
           routedTo: dto.routedTo,
-          status: 'screening',
+          status: dto.routedTo ? 'routed' : 'screening',
+          routedAt: dto.routedTo ? new Date() : undefined,
+          routedBy:
+            dto.routedTo && userId ? { connect: { id: userId } } : undefined,
           screenedBy: userId ? { connect: { id: userId } } : undefined,
         });
         break;
@@ -145,6 +148,8 @@ export class PreTriageService {
       },
       include: {
         screenedBy: { select: { fullName: true } },
+        routedBy: { select: { fullName: true } },
+        patient: { select: { mrn: true, firstName: true, lastName: true } },
       },
     });
   }
@@ -157,6 +162,7 @@ export class PreTriageService {
       { id, organizationId },
       {
         screenedBy: { select: { fullName: true } },
+        routedBy: { select: { fullName: true } },
         patient: { select: { mrn: true, firstName: true, lastName: true } },
       },
     );

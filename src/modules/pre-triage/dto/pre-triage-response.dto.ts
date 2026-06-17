@@ -92,6 +92,9 @@ export class PreTriageResponseDto {
   @ApiPropertyOptional({ type: ScreenedByResponseDto })
   screenedBy?: ScreenedByResponseDto;
 
+  @ApiPropertyOptional({ type: ScreenedByResponseDto })
+  routedBy?: ScreenedByResponseDto;
+
   @ApiPropertyOptional({ type: PatientMinimalPreTriageResponseDto })
   patient?: PatientMinimalPreTriageResponseDto;
 }
