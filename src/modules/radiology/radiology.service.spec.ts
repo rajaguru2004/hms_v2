@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/unbound-method */
 import { Test, TestingModule } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
 import { RadiologyService } from './radiology.service';
 import { RadiologyExamRepository } from './radiology-exam.repository';
 import { RadiologyOrderRepository } from './radiology-order.repository';
@@ -128,6 +129,19 @@ describe('RadiologyService', () => {
         { provide: RadiologyOrderRepository, useValue: mockOrderRepo },
         { provide: RadiologyReportRepository, useValue: mockReportRepo },
         { provide: AuditService, useValue: mockAudit },
+        {
+          provide: ConfigService,
+          useValue: {
+            get: jest.fn((key: string) => {
+              if (key === 'S3_ENDPOINT')
+                return 'https://hms.s3.skillhiveinnovations.com';
+              if (key === 'S3_BUCKET') return 'hmsbucket';
+              if (key === 'S3_ACCESS_KEY') return 'minio_admin';
+              if (key === 'S3_SECRET_KEY') return 'minio_password';
+              return null;
+            }),
+          },
+        },
       ],
     }).compile();
 
@@ -276,6 +290,78 @@ describe('RadiologyService', () => {
       await expect(
         service.compatibilityGet({ resource: 'invalid' }, ORG),
       ).rejects.toThrow(AppException);
+    });
+  });
+
+  describe('uploadToS3', () => {
+    it('should throw error if no file provided', async () => {
+      await expect(
+        service.uploadToS3(null as unknown as Express.Multer.File, ORG),
+      ).rejects.toThrow(AppException);
+    });
+
+    it('should throw error if file is not an image', async () => {
+      const mockFile = {
+        fieldname: 'file',
+        originalname: 'test.pdf',
+        encoding: '7bit',
+        mimetype: 'application/pdf',
+        buffer: Buffer.from('test'),
+        size: 4,
+      } as Express.Multer.File;
+
+      await expect(service.uploadToS3(mockFile, ORG)).rejects.toThrow(
+        AppException,
+      );
+    });
+
+    it('should upload successfully and return URL', async () => {
+      const mockFile = {
+        fieldname: 'file',
+        originalname: 'test.png',
+        encoding: '7bit',
+        mimetype: 'image/png',
+        buffer: Buffer.from('test-image'),
+        size: 10,
+      } as Express.Multer.File;
+
+      const mockSend = jest.fn().mockResolvedValue({});
+      const serviceBypass = service as unknown as {
+        s3Client: {
+          send: (command: unknown) => Promise<unknown>;
+        };
+      };
+      jest.spyOn(serviceBypass.s3Client, 'send').mockImplementation(mockSend);
+
+      const result = await service.uploadToS3(mockFile, ORG);
+      expect(result).toContain(
+        'https://hms.s3.skillhiveinnovations.com/hmsbucket/org-demo/radiology/',
+      );
+      expect(result).toContain('.png');
+      expect(mockSend).toHaveBeenCalled();
+    });
+
+    it('should throw error if S3 send fails', async () => {
+      const mockFile = {
+        fieldname: 'file',
+        originalname: 'test.png',
+        encoding: '7bit',
+        mimetype: 'image/png',
+        buffer: Buffer.from('test-image'),
+        size: 10,
+      } as Express.Multer.File;
+
+      const mockSend = jest.fn().mockRejectedValue(new Error('S3 error'));
+      const serviceBypass = service as unknown as {
+        s3Client: {
+          send: (command: unknown) => Promise<unknown>;
+        };
+      };
+      jest.spyOn(serviceBypass.s3Client, 'send').mockImplementation(mockSend);
+
+      await expect(service.uploadToS3(mockFile, ORG)).rejects.toThrow(
+        AppException,
+      );
     });
   });
 });

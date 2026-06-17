@@ -7,10 +7,15 @@ import {
   Post,
   Query,
   Req,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
   ApiOperation,
   ApiParam,
   ApiResponse,
@@ -301,6 +306,34 @@ export class RadiologyController {
       currentUser.organizationId,
       currentUser.id,
     );
+  }
+
+  @Post('upload')
+  @Permissions(Permission.RADIOLOGY_CREATE)
+  @UseInterceptors(FileInterceptor('file'))
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        file: {
+          type: 'string',
+          format: 'binary',
+        },
+      },
+    },
+  })
+  @ApiOperation({ summary: 'Upload an image attachment to S3' })
+  @ApiResponse({ status: 201, description: 'File uploaded successfully' })
+  async uploadFile(
+    @UploadedFile() file: Express.Multer.File,
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<{ url: string }> {
+    const url = await this.radiologyService.uploadToS3(
+      file,
+      currentUser.organizationId,
+    );
+    return { url };
   }
 
   @Get('stats/summary')

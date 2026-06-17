@@ -1,4 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import {
   Prisma,
   RadiologyExam,
@@ -49,13 +51,77 @@ interface RadiologyStats {
 @Injectable()
 export class RadiologyService {
   private readonly logger = new Logger(RadiologyService.name);
+  private readonly s3Client: S3Client;
+  private readonly s3Bucket: string;
+  private readonly s3Endpoint: string;
 
   constructor(
     private readonly examRepository: RadiologyExamRepository,
     private readonly orderRepository: RadiologyOrderRepository,
     private readonly reportRepository: RadiologyReportRepository,
     private readonly auditService: AuditService,
-  ) {}
+    private readonly configService: ConfigService,
+  ) {
+    const endpoint =
+      this.configService.get<string>('S3_ENDPOINT') ||
+      'https://hms.s3.skillhiveinnovations.com';
+    const accessKeyId =
+      this.configService.get<string>('S3_ACCESS_KEY') || 'minio_admin';
+    const secretAccessKey =
+      this.configService.get<string>('S3_SECRET_KEY') || 'minio_password';
+    this.s3Bucket = this.configService.get<string>('S3_BUCKET') || 'hmsbucket';
+    this.s3Endpoint = endpoint;
+
+    this.s3Client = new S3Client({
+      endpoint,
+      region: 'us-east-1',
+      credentials: {
+        accessKeyId,
+        secretAccessKey,
+      },
+      forcePathStyle: true,
+    });
+  }
+
+  async uploadToS3(
+    file: Express.Multer.File,
+    organizationId: string,
+  ): Promise<string> {
+    if (!file) {
+      throw new AppException('No file uploaded', ErrorCodes.BAD_REQUEST);
+    }
+
+    if (!file.mimetype.startsWith('image/')) {
+      throw new AppException(
+        'Only image files are allowed',
+        ErrorCodes.VALIDATION_ERROR,
+      );
+    }
+
+    const fileExtension = file.originalname.split('.').pop() || '';
+    const key = `${organizationId}/radiology/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${fileExtension}`;
+
+    const command = new PutObjectCommand({
+      Bucket: this.s3Bucket,
+      Key: key,
+      Body: file.buffer,
+      ContentType: file.mimetype,
+    });
+
+    try {
+      await this.s3Client.send(command);
+      const baseUrl = this.s3Endpoint.endsWith('/')
+        ? this.s3Endpoint.slice(0, -1)
+        : this.s3Endpoint;
+      return `${baseUrl}/${this.s3Bucket}/${key}`;
+    } catch (error) {
+      this.logger.error('Failed to upload file to S3', error);
+      throw new AppException(
+        'Failed to upload file to S3',
+        ErrorCodes.S3_UPLOAD_FAILED,
+      );
+    }
+  }
 
   async compatibilityGet(
     query: RadiologyQueryDto,

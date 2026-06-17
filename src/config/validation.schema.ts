@@ -42,6 +42,14 @@ export const validationSchema = Joi.object({
   DB_CONNECTION_TIMEOUT: Joi.number().default(10000),
   DB_POOL_MIN: Joi.number().default(2),
   DB_POOL_MAX: Joi.number().default(10),
+
+  // S3
+  S3_ENDPOINT: Joi.string()
+    .optional()
+    .default('https://hms.s3.skillhiveinnovations.com'),
+  S3_BUCKET: Joi.string().optional().default('hmsbucket'),
+  S3_ACCESS_KEY: Joi.string().optional(),
+  S3_SECRET_KEY: Joi.string().optional(),
 });
 
 export const validationOptions = {
