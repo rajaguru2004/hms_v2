@@ -8,6 +8,7 @@ export interface JwtPayload {
   email: string;
   roles: string[];
   permissions: string[];
+  organizationId: string;
   type: 'access' | 'refresh';
   iat?: number;
   exp?: number;

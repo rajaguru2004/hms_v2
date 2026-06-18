@@ -107,6 +107,7 @@ export class AuthService {
       user.email,
       roles,
       permissions,
+      user.organizationId,
     );
 
     // Update last login timestamp
@@ -175,6 +176,7 @@ export class AuthService {
       user.email,
       roles,
       permissions,
+      user.organizationId,
       ipAddress,
     );
   }
@@ -206,6 +208,7 @@ export class AuthService {
     email: string,
     roles: string[],
     permissions: string[],
+    organizationId: string,
     ipAddress?: string,
   ): Promise<TokenResponseDto> {
     const accessPayload: JwtPayload = {
@@ -213,6 +216,7 @@ export class AuthService {
       email,
       roles,
       permissions,
+      organizationId,
       type: 'access',
     };
 
