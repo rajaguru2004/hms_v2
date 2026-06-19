@@ -692,6 +692,21 @@ export class SettingsService {
       createdById: userId,
     });
 
+    if (dto.role) {
+      const role = await this.prisma.role.findUnique({
+        where: { name: dto.role },
+      });
+      if (role) {
+        await this.prisma.userRole.create({
+          data: {
+            userId: user.id,
+            roleId: role.id,
+            assignedBy: userId,
+          },
+        });
+      }
+    }
+
     void this.auditService.log({
       userId,
       action: AuditAction.CREATE,
@@ -738,6 +753,30 @@ export class SettingsService {
     }
 
     const updated = await this.userRepository.update(id, updateData);
+
+    if (dto.role !== undefined) {
+      if (dto.role) {
+        const role = await this.prisma.role.findUnique({
+          where: { name: dto.role },
+        });
+        if (role) {
+          await this.prisma.userRole.deleteMany({
+            where: { userId: id },
+          });
+          await this.prisma.userRole.create({
+            data: {
+              userId: id,
+              roleId: role.id,
+              assignedBy: userId,
+            },
+          });
+        }
+      } else {
+        await this.prisma.userRole.deleteMany({
+          where: { userId: id },
+        });
+      }
+    }
 
     // Invalidate cache
     await this.cacheService.del(

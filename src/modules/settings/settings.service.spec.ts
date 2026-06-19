@@ -172,6 +172,13 @@ describe('SettingsService', () => {
       department: {
         findUnique: jest.fn(),
       },
+      role: {
+        findUnique: jest.fn(),
+      },
+      userRole: {
+        create: jest.fn(),
+        deleteMany: jest.fn(),
+      },
     };
 
     const module: TestingModule = await Test.createTestingModule({

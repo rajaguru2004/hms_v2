@@ -667,7 +667,9 @@ async function main(): Promise<void> {
 
   const adminUser = await prisma.user.upsert({
     where: { email: defaultAdminEmail },
-    update: {},
+    update: {
+      role: 'SUPER_ADMIN',
+    },
     create: {
       email: defaultAdminEmail,
       password: hashedPassword,
@@ -676,6 +678,7 @@ async function main(): Promise<void> {
       fullName: 'System Admin',
       organizationId: defaultOrg.id,
       isActive: true,
+      role: 'SUPER_ADMIN',
     },
   });
 
@@ -700,7 +703,9 @@ async function main(): Promise<void> {
   const doctorPassword = await bcrypt.hash('Doctor@HMS2024!', 12);
   const doctorUser = await prisma.user.upsert({
     where: { email: 'doctor@hms.local' },
-    update: {},
+    update: {
+      role: 'DOCTOR',
+    },
     create: {
       email: 'doctor@hms.local',
       password: doctorPassword,
@@ -709,6 +714,7 @@ async function main(): Promise<void> {
       fullName: 'Dr. Gregory House',
       organizationId: defaultOrg.id,
       isActive: true,
+      role: 'DOCTOR',
     },
   });
 
@@ -726,7 +732,9 @@ async function main(): Promise<void> {
   const nursePassword = await bcrypt.hash('Nurse@HMS2024!', 12);
   const nurseUser = await prisma.user.upsert({
     where: { email: 'nurse@hms.local' },
-    update: {},
+    update: {
+      role: 'NURSE',
+    },
     create: {
       email: 'nurse@hms.local',
       password: nursePassword,
@@ -735,6 +743,7 @@ async function main(): Promise<void> {
       fullName: 'Nurse Abby Lockhart',
       organizationId: defaultOrg.id,
       isActive: true,
+      role: 'NURSE',
     },
   });
 
@@ -748,6 +757,156 @@ async function main(): Promise<void> {
     });
   }
   console.log('✅ Default nurse user: nurse@hms.local');
+
+  const additionalDemoUsers = [
+    {
+      email: 'admin-staff@hms.local',
+      firstName: 'Admin',
+      lastName: 'Staff',
+      fullName: 'Admin Staff',
+      roleName: 'ADMIN',
+    },
+    {
+      email: 'receptionist@hms.local',
+      firstName: 'Receptionist',
+      lastName: 'Staff',
+      fullName: 'Receptionist Staff',
+      roleName: 'RECEPTIONIST',
+    },
+    {
+      email: 'pharmacist@hms.local',
+      firstName: 'Pharmacist',
+      lastName: 'Staff',
+      fullName: 'Pharmacist Staff',
+      roleName: 'PHARMACIST',
+    },
+    {
+      email: 'lab-tech@hms.local',
+      firstName: 'Lab',
+      lastName: 'Tech',
+      fullName: 'Lab Tech',
+      roleName: 'LAB_TECHNICIAN',
+    },
+    {
+      email: 'radiologist@hms.local',
+      firstName: 'Radiologist',
+      lastName: 'Staff',
+      fullName: 'Radiologist Staff',
+      roleName: 'RADIOLOGIST',
+    },
+    {
+      email: 'billing@hms.local',
+      firstName: 'Billing',
+      lastName: 'Staff',
+      fullName: 'Billing Staff',
+      roleName: 'BILLING_STAFF',
+    },
+    {
+      email: 'patient@hms.local',
+      firstName: 'Patient',
+      lastName: 'Self',
+      fullName: 'Patient Self',
+      roleName: 'PATIENT',
+    },
+  ];
+
+  const demoPassword = await bcrypt.hash('Demo@HMS2024!', 12);
+  for (const demoUser of additionalDemoUsers) {
+    const user = await prisma.user.upsert({
+      where: { email: demoUser.email },
+      update: {
+        role: demoUser.roleName,
+      },
+      create: {
+        email: demoUser.email,
+        password: demoPassword,
+        firstName: demoUser.firstName,
+        lastName: demoUser.lastName,
+        fullName: demoUser.fullName,
+        organizationId: defaultOrg.id,
+        isActive: true,
+        role: demoUser.roleName,
+      },
+    });
+
+    const role = await prisma.role.findUnique({
+      where: { name: demoUser.roleName },
+    });
+    if (role) {
+      await prisma.userRole.upsert({
+        where: {
+          userId_roleId: { userId: user.id, roleId: role.id },
+        },
+        update: {},
+        create: { userId: user.id, roleId: role.id },
+      });
+    }
+    console.log(
+      `✅ Default ${demoUser.roleName.toLowerCase()} user: ${demoUser.email}`,
+    );
+  }
+
+  // ── 6. Sync legacy role column and userRoles junction table ───────────────
+  // A. Sync from legacy role column to userRoles junction table
+  const usersToSyncJunction = await prisma.user.findMany({
+    where: {
+      role: { not: null },
+      userRoles: { none: {} },
+    },
+  });
+  if (usersToSyncJunction.length > 0) {
+    console.log(
+      `Syncing ${usersToSyncJunction.length} users: role column -> userRoles...`,
+    );
+    for (const u of usersToSyncJunction) {
+      if (u.role) {
+        const roleRecord = await prisma.role.findUnique({
+          where: { name: u.role },
+        });
+        if (roleRecord) {
+          await prisma.userRole.create({
+            data: {
+              userId: u.id,
+              roleId: roleRecord.id,
+            },
+          });
+          console.log(`  Synced role ${u.role} to userRoles for ${u.email}`);
+        }
+      }
+    }
+  }
+
+  // B. Sync from userRoles junction table to legacy role column
+  const usersToSyncColumn = await prisma.user.findMany({
+    where: {
+      role: null,
+      userRoles: { some: {} },
+    },
+    include: {
+      userRoles: {
+        include: {
+          role: true,
+        },
+      },
+    },
+  });
+  if (usersToSyncColumn.length > 0) {
+    console.log(
+      `Syncing ${usersToSyncColumn.length} users: userRoles -> role column...`,
+    );
+    for (const u of usersToSyncColumn) {
+      const primaryRole = u.userRoles[0]?.role?.name;
+      if (primaryRole) {
+        await prisma.user.update({
+          where: { id: u.id },
+          data: { role: primaryRole },
+        });
+        console.log(
+          `  Synced role ${primaryRole} to role column for ${u.email}`,
+        );
+      }
+    }
+  }
 
   console.log('🎉 Seed complete!');
 }
