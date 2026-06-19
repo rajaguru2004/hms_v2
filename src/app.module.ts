@@ -32,6 +32,8 @@ import { RadiologyModule } from './modules/radiology/radiology.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { DeathCertificatesModule } from './modules/death-certificates/death-certificates.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { RolesModule } from './modules/roles/roles.module';
+import { PermissionsModule } from './modules/permissions/permissions.module';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { APP_GUARD, APP_INTERCEPTOR, APP_FILTER } from '@nestjs/core';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
@@ -117,6 +119,8 @@ import { GlobalExceptionFilter } from './common/filters/global-exception.filter'
     SettingsModule,
     DeathCertificatesModule,
     DashboardModule,
+    RolesModule,
+    PermissionsModule,
   ],
 
   providers: [

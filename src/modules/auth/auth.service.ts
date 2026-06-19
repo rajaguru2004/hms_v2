@@ -8,9 +8,10 @@ import { AuditService } from '../../audit/audit.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { UnauthorizedException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/exceptions/error-codes';
+import { AuditAction } from '../../common/enums/action.enum';
+import { AppCacheService } from '../../cache/cache.service';
 import { comparePassword, hashPassword } from '../../common/utils/hash.util';
 import { JwtPayload } from '../../common/types/jwt-payload.type';
-import { AuditAction } from '../../common/enums/action.enum';
 
 /**
  * AuthService — handles login, token issuance, refresh, logout.
@@ -32,6 +33,7 @@ export class AuthService {
     private readonly config: ConfigService,
     private readonly auditService: AuditService,
     private readonly prisma: PrismaService,
+    private readonly cacheService: AppCacheService,
   ) {
     this.accessExpiresIn = this.config.get<string>('jwt.expiresIn', '15m');
     this.refreshExpiresIn = this.config.get<string>(
@@ -251,5 +253,112 @@ export class AuthService {
       expiresIn: 15 * 60, // 15 minutes in seconds
       tokenType: 'Bearer',
     };
+  }
+
+  /**
+   * Get dynamic permission map per module for user.
+   */
+  async getMyAccess(userId: string, roles: string[]) {
+    const cacheKey = AppCacheService.buildKey('auth:access-map', userId);
+    const cached = await this.cacheService.get<{
+      modules: Record<
+        string,
+        {
+          canCreate: boolean;
+          canRead: boolean;
+          canUpdate: boolean;
+          canDelete: boolean;
+        }
+      >;
+    }>(cacheKey);
+
+    if (cached) {
+      return cached;
+    }
+
+    // 1. Get all distinct active permission categories
+    const permissions = await this.prisma.permission.findMany({
+      where: { isDeleted: false },
+      select: { category: true },
+      distinct: ['category'],
+    });
+
+    const categories = permissions
+      .map((p) => p.category)
+      .filter((c): c is string => !!c);
+
+    const modules: Record<
+      string,
+      {
+        canCreate: boolean;
+        canRead: boolean;
+        canUpdate: boolean;
+        canDelete: boolean;
+      }
+    > = {};
+
+    // 2. Initialize map for all modules to false
+    for (const cat of categories) {
+      modules[cat] = {
+        canCreate: false,
+        canRead: false,
+        canUpdate: false,
+        canDelete: false,
+      };
+    }
+
+    // 3. Populate permissions
+    if (roles.includes('SUPER_ADMIN')) {
+      // Super admin has full control over all modules
+      for (const cat of categories) {
+        modules[cat] = {
+          canCreate: true,
+          canRead: true,
+          canUpdate: true,
+          canDelete: true,
+        };
+      }
+    } else {
+      // Query role permissions assigned to the user
+      const rolePermissions = await this.prisma.rolePermission.findMany({
+        where: {
+          role: {
+            userRoles: {
+              some: {
+                userId,
+              },
+            },
+            isDeleted: false,
+          },
+        },
+        include: {
+          permission: true,
+        },
+      });
+
+      for (const rp of rolePermissions) {
+        const cat = rp.permission?.category;
+        if (cat) {
+          if (!modules[cat]) {
+            modules[cat] = {
+              canCreate: false,
+              canRead: false,
+              canUpdate: false,
+              canDelete: false,
+            };
+          }
+          modules[cat].canCreate = modules[cat].canCreate || rp.canCreate;
+          modules[cat].canRead = modules[cat].canRead || rp.canRead;
+          modules[cat].canUpdate = modules[cat].canUpdate || rp.canUpdate;
+          modules[cat].canDelete = modules[cat].canDelete || rp.canDelete;
+        }
+      }
+    }
+
+    const result = { modules };
+    // Cache map for 5 minutes
+    await this.cacheService.set(cacheKey, result, 300);
+
+    return result;
   }
 }

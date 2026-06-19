@@ -379,8 +379,15 @@ async function main(): Promise<void> {
   for (const perm of permissions) {
     await prisma.permission.upsert({
       where: { name: perm.name },
-      update: {},
-      create: perm,
+      update: {
+        category: perm.resource,
+        code: `${perm.resource}:${perm.action}`,
+      },
+      create: {
+        ...perm,
+        category: perm.resource,
+        code: `${perm.resource}:${perm.action}`,
+      },
     });
   }
   console.log(`✅ Seeded ${permissions.length} permissions`);
@@ -437,8 +444,22 @@ async function main(): Promise<void> {
             permissionId: perm.id,
           },
         },
-        update: {},
-        create: { roleId: superAdminRole.id, permissionId: perm.id },
+        update: {
+          canRead: true,
+          canUpdate: true,
+          canCreate: true,
+          canDelete: true,
+          roleName: 'SUPER_ADMIN',
+        },
+        create: {
+          roleId: superAdminRole.id,
+          permissionId: perm.id,
+          canRead: true,
+          canUpdate: true,
+          canCreate: true,
+          canDelete: true,
+          roleName: 'SUPER_ADMIN',
+        },
       });
     }
     console.log(`✅ Assigned all permissions to SUPER_ADMIN`);
@@ -461,15 +482,180 @@ async function main(): Promise<void> {
       adminPermNames.includes(p.name),
     );
     for (const perm of adminPerms) {
+      const isCreate = perm.action === 'create';
+      const isRead = perm.action === 'read';
+      const isUpdate = perm.action === 'update';
+      const isDelete = perm.action === 'delete';
+
       await prisma.rolePermission.upsert({
         where: {
           roleId_permissionId: { roleId: adminRole.id, permissionId: perm.id },
         },
-        update: {},
-        create: { roleId: adminRole.id, permissionId: perm.id },
+        update: {
+          canRead: isRead,
+          canUpdate: isUpdate,
+          canCreate: isCreate,
+          canDelete: isDelete,
+          roleName: 'ADMIN',
+        },
+        create: {
+          roleId: adminRole.id,
+          permissionId: perm.id,
+          canRead: isRead,
+          canUpdate: isUpdate,
+          canCreate: isCreate,
+          canDelete: isDelete,
+          roleName: 'ADMIN',
+        },
       });
     }
     console.log(`✅ Assigned ${adminPerms.length} permissions to ADMIN`);
+  }
+
+  // Map of default permissions for all clinical and admin roles
+  const rolePermissionsMap: Record<string, string[]> = {
+    DOCTOR: [
+      'PATIENT_CREATE',
+      'PATIENT_READ',
+      'PATIENT_UPDATE',
+      'PATIENT_DELETE',
+      'APPOINTMENT_CREATE',
+      'APPOINTMENT_READ',
+      'APPOINTMENT_UPDATE',
+      'APPOINTMENT_DELETE',
+      'CONSULTATION_CREATE',
+      'CONSULTATION_READ',
+      'CONSULTATION_UPDATE',
+      'CONSULTATION_DELETE',
+      'INPATIENT_CREATE',
+      'INPATIENT_READ',
+      'INPATIENT_UPDATE',
+      'INPATIENT_DELETE',
+      'LABORATORY_CREATE',
+      'LABORATORY_READ',
+      'LABORATORY_UPDATE',
+      'LABORATORY_DELETE',
+      'RADIOLOGY_CREATE',
+      'RADIOLOGY_READ',
+      'RADIOLOGY_UPDATE',
+      'RADIOLOGY_DELETE',
+      'PHARMACY_CREATE',
+      'PHARMACY_READ',
+      'PHARMACY_UPDATE',
+      'PHARMACY_DELETE',
+      'PRE_TRIAGE_CREATE',
+      'PRE_TRIAGE_READ',
+      'PRE_TRIAGE_UPDATE',
+      'PRE_TRIAGE_DELETE',
+      'QUEUE_CREATE',
+      'QUEUE_READ',
+      'QUEUE_UPDATE',
+      'QUEUE_DELETE',
+      'DASHBOARD_READ',
+    ],
+    NURSE: [
+      'PATIENT_READ',
+      'APPOINTMENT_READ',
+      'CONSULTATION_READ',
+      'INPATIENT_CREATE',
+      'INPATIENT_READ',
+      'INPATIENT_UPDATE',
+      'PRE_TRIAGE_CREATE',
+      'PRE_TRIAGE_READ',
+      'PRE_TRIAGE_UPDATE',
+      'QUEUE_CREATE',
+      'QUEUE_READ',
+      'QUEUE_UPDATE',
+      'DASHBOARD_READ',
+    ],
+    RECEPTIONIST: [
+      'PATIENT_CREATE',
+      'PATIENT_READ',
+      'PATIENT_UPDATE',
+      'APPOINTMENT_CREATE',
+      'APPOINTMENT_READ',
+      'APPOINTMENT_UPDATE',
+      'APPOINTMENT_DELETE',
+      'QUEUE_CREATE',
+      'QUEUE_READ',
+      'QUEUE_UPDATE',
+      'QUEUE_DELETE',
+      'BILLING_READ',
+      'DASHBOARD_READ',
+    ],
+    PHARMACIST: [
+      'PHARMACY_CREATE',
+      'PHARMACY_READ',
+      'PHARMACY_UPDATE',
+      'PHARMACY_DELETE',
+      'PATIENT_READ',
+      'DASHBOARD_READ',
+    ],
+    LAB_TECHNICIAN: [
+      'LABORATORY_CREATE',
+      'LABORATORY_READ',
+      'LABORATORY_UPDATE',
+      'LABORATORY_DELETE',
+      'PATIENT_READ',
+      'DASHBOARD_READ',
+    ],
+    RADIOLOGIST: [
+      'RADIOLOGY_CREATE',
+      'RADIOLOGY_READ',
+      'RADIOLOGY_UPDATE',
+      'RADIOLOGY_DELETE',
+      'PATIENT_READ',
+      'DASHBOARD_READ',
+    ],
+    BILLING_STAFF: [
+      'BILLING_CREATE',
+      'BILLING_READ',
+      'BILLING_UPDATE',
+      'BILLING_DELETE',
+      'PATIENT_READ',
+      'DASHBOARD_READ',
+    ],
+    PATIENT: ['APPOINTMENT_CREATE', 'APPOINTMENT_READ', 'DASHBOARD_READ'],
+  };
+
+  for (const [roleName, permNames] of Object.entries(rolePermissionsMap)) {
+    const role = await prisma.role.findUnique({ where: { name: roleName } });
+    if (!role) continue;
+
+    const matchedPerms = allPermissions.filter((p) =>
+      permNames.includes(p.name),
+    );
+    for (const perm of matchedPerms) {
+      const isCreate = perm.action === 'create';
+      const isRead = perm.action === 'read';
+      const isUpdate = perm.action === 'update';
+      const isDelete = perm.action === 'delete';
+
+      await prisma.rolePermission.upsert({
+        where: {
+          roleId_permissionId: { roleId: role.id, permissionId: perm.id },
+        },
+        update: {
+          canRead: isRead,
+          canUpdate: isUpdate,
+          canCreate: isCreate,
+          canDelete: isDelete,
+          roleName,
+        },
+        create: {
+          roleId: role.id,
+          permissionId: perm.id,
+          canRead: isRead,
+          canUpdate: isUpdate,
+          canCreate: isCreate,
+          canDelete: isDelete,
+          roleName,
+        },
+      });
+    }
+    console.log(
+      `✅ Assigned ${matchedPerms.length} permissions to ${roleName}`,
+    );
   }
 
   // ── 4. Default SUPER_ADMIN user ───────────────────────────────────────────

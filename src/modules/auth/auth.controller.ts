@@ -1,11 +1,11 @@
 import {
   Controller,
   Post,
+  Get,
   Body,
   Req,
   HttpCode,
   HttpStatus,
-  UseGuards,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -58,5 +58,12 @@ export class AuthController {
     @Body() dto: RefreshTokenDto,
   ): Promise<void> {
     await this.authService.logout(user.id, dto.refreshToken);
+  }
+
+  @Get('me/access')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get current user access permissions per module' })
+  async getMyAccess(@CurrentUser() user: AuthenticatedUser) {
+    return this.authService.getMyAccess(user.id, user.roles);
   }
 }
