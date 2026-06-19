@@ -56,16 +56,36 @@ export class PrismaService
     }
   }
 
+  private getDbConnectionInfo(): string {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      return 'unknown';
+    }
+    try {
+      const url = new URL(connectionString);
+      const host = url.hostname;
+      const port = url.port || '5432';
+      const database = url.pathname.replace(/^\//, '');
+      return `${host}:${port}/${database}`;
+    } catch {
+      return 'custom-url';
+    }
+  }
+
   async onModuleInit(): Promise<void> {
-    this.logger.log('Connecting to PostgreSQL via Prisma...');
+    const dbInfo = this.getDbConnectionInfo();
+    this.logger.log(
+      `Connecting to PostgreSQL database (${dbInfo}) via Prisma...`,
+    );
     await this.$connect();
-    this.logger.log('Prisma connected successfully');
+    this.logger.log(`Prisma connected successfully to database (${dbInfo})`);
   }
 
   async onModuleDestroy(): Promise<void> {
-    this.logger.log('Disconnecting from PostgreSQL...');
+    const dbInfo = this.getDbConnectionInfo();
+    this.logger.log(`Disconnecting from PostgreSQL database (${dbInfo})...`);
     await this.$disconnect();
-    this.logger.log('Prisma disconnected');
+    this.logger.log(`Prisma disconnected from database (${dbInfo})`);
   }
 
   /**
@@ -73,11 +93,13 @@ export class PrismaService
    * NestJS calls onModuleDestroy automatically, but this is available
    * for manual invocation from main.ts shutdown hooks.
    */
-  async enableShutdownHooks(app: {
-    close: () => Promise<void>;
-  }): Promise<void> {
-    process.on('beforeExit', async () => {
-      await app.close();
+  enableShutdownHooks(app: { close: () => Promise<void> }): void {
+    process.on('beforeExit', () => {
+      app.close().catch((err) => {
+        this.logger.error(
+          `Failed to close app: ${err instanceof Error ? err.message : err}`,
+        );
+      });
     });
   }
 
