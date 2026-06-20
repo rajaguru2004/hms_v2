@@ -17,6 +17,7 @@ import {
   ApiBearerAuth,
   ApiResponse,
   ApiParam,
+  ApiQuery,
 } from '@nestjs/swagger';
 import { UserService } from './user.service';
 import { CreateUserDto, UpdateUserDto, UserResponseDto } from './dto/user.dto';
@@ -56,6 +57,25 @@ export class UserController {
     @CurrentUser() currentUser: AuthenticatedUser,
   ) {
     return this.userService.create(dto, currentUser.id);
+  }
+
+  @Get('staff')
+  @Permissions(Permission.PATIENT_READ)
+  @ApiOperation({
+    summary: 'List active staff by role (for clinical dropdowns)',
+  })
+  @ApiQuery({
+    name: 'role',
+    required: false,
+    type: String,
+    description: 'Filter by role name e.g. DOCTOR',
+  })
+  async findStaff(
+    @Query('role') role?: string,
+    @CurrentUser() currentUser?: AuthenticatedUser,
+  ) {
+    const organizationId = currentUser?.organizationId ?? 'org-demo';
+    return this.userService.findStaff(organizationId, role);
   }
 
   @Get()

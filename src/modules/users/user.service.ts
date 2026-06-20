@@ -159,6 +159,45 @@ export class UserService {
   }
 
   /**
+   * Find active staff by role — used for doctor/nurse dropdowns in clinical modules.
+   * Requires only PATIENT_READ permission (all clinical roles have this).
+   * Returns a slim projection: id, fullName, email, role, specialization.
+   */
+  async findStaff(
+    organizationId: string,
+    role?: string,
+  ): Promise<
+    {
+      id: string;
+      fullName: string;
+      email: string;
+      role: string | null;
+      specialization: string | null;
+    }[]
+  > {
+    const where: Record<string, unknown> = {
+      organizationId,
+      isDeleted: false,
+      isActive: true,
+    };
+    if (role) where.role = role;
+
+    const users = await this.prisma.user.findMany({
+      where,
+      select: {
+        id: true,
+        fullName: true,
+        email: true,
+        role: true,
+        specialization: true,
+      },
+      orderBy: { fullName: 'asc' },
+    });
+
+    return users;
+  }
+
+  /**
    * List users with pagination.
    */
   async findAll(

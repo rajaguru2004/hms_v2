@@ -374,6 +374,18 @@ async function main(): Promise<void> {
       action: 'read',
       description: 'Read dashboard statistics',
     },
+    {
+      name: 'SETTINGS_READ',
+      resource: 'settings',
+      action: 'read',
+      description: 'Read system settings',
+    },
+    {
+      name: 'SETTINGS_UPDATE',
+      resource: 'settings',
+      action: 'update',
+      description: 'Update system settings',
+    },
   ];
 
   for (const perm of permissions) {
@@ -477,6 +489,8 @@ async function main(): Promise<void> {
       'APPOINTMENT_READ',
       'AUDIT_READ',
       'DASHBOARD_READ',
+      'SETTINGS_READ',
+      'SETTINGS_UPDATE',
     ];
     const adminPerms = allPermissions.filter((p) =>
       adminPermNames.includes(p.name),
