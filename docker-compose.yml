@@ -3,24 +3,26 @@ version: '3.9'
 services:
   # ── NestJS API ─────────────────────────────────────────────────────────────
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: builder # Use builder stage for hot-reload in dev
+    image: ghcr.io/rajaguru2004/hms-v2-api:latest
+    # To build and run locally, comment out the image line and uncomment the build block below:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    #   target: builder # Use builder stage for hot-reload in dev
     container_name: hms_v2_api
     restart: unless-stopped
     env_file:
-      - .env.development
+      - .env
     environment:
       DATABASE_URL: postgresql://hms_user:hms_password@postgres:5432/hms_v2_dev
       REDIS_HOST: redis
     ports:
       - '3000:3000'
       - '9229:9229' # Node.js debugger port
-    volumes:
-      - .:/app
-      - /app/node_modules # Prevent host node_modules overwriting container's
-    command: npm run start:dev
+    # volumes:
+    #   - .:/app
+    #   - /app/node_modules # Prevent host node_modules overwriting container's
+    # command: npm run start:dev
     depends_on:
       postgres:
         condition: service_healthy
