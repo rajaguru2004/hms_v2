@@ -14,7 +14,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql://hms_user:hms_password@postgres:5432/hms_v2_dev
+      DATABASE_URL: postgresql://db_user:db_password@postgres:5432/hms_v2_prod
       REDIS_HOST: redis
     ports:
       - '3000:3000'
@@ -38,16 +38,16 @@ services:
     container_name: hms_v2_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: hms_user
-      POSTGRES_PASSWORD: hms_password
-      POSTGRES_DB: hms_v2_dev
+      POSTGRES_USER: db_user
+      POSTGRES_PASSWORD: db_password
+      POSTGRES_DB: hms_v2_prod
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
       - '5432:5432'
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_prod:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U hms_user -d hms_v2_dev']
+      test: ['CMD-SHELL', 'pg_isready -U db_user -d hms_v2_prod']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -108,7 +108,7 @@ services:
       - nginx-proxy-manager_default
 
 volumes:
-  postgres_data:
+  postgres_data_prod:
   redis_data:
   minio_data:
 

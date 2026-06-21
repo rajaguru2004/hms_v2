@@ -77,8 +77,17 @@ export class PrismaService
     this.logger.log(
       `Connecting to PostgreSQL database (${dbInfo}) via Prisma...`,
     );
-    await this.$connect();
-    this.logger.log(`Prisma connected successfully to database (${dbInfo})`);
+    try {
+      await this.$connect();
+      // Force connection & credential validation on startup
+      await this.$queryRawUnsafe('SELECT 1');
+      this.logger.log(`Prisma connected successfully to database (${dbInfo})`);
+    } catch (err) {
+      this.logger.error(
+        `Database connection/authentication failed for (${dbInfo}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw err;
+    }
   }
 
   async onModuleDestroy(): Promise<void> {
