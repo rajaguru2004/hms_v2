@@ -30,6 +30,7 @@ services:
         condition: service_healthy
     networks:
       - hms_network
+      - nginx-proxy-manager_default
 
   # ── PostgreSQL ─────────────────────────────────────────────────────────────
   postgres:
@@ -104,6 +105,7 @@ services:
     command: server /data --console-address ":9001"
     networks:
       - hms_network
+      - nginx-proxy-manager_default
 
 volumes:
   postgres_data:
@@ -113,3 +115,5 @@ volumes:
 networks:
   hms_network:
     driver: bridge
+  nginx-proxy-manager_default:
+    external: true
