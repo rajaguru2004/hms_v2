@@ -20,6 +20,7 @@ model Organization {
   name           String
   slug           String  @unique
   logoUrl        String?
+  logoTextUrl    String?
   primaryColor   String  @default("#2563eb")
   secondaryColor String  @default("#7c3aed")
 

@@ -46,6 +46,7 @@ describe('SettingsService', () => {
     name: 'Default Hospital',
     slug: 'default-hospital',
     logoUrl: null,
+    logoTextUrl: null,
     primaryColor: '#2563eb',
     secondaryColor: '#7c3aed',
     email: 'info@hospital.com',

@@ -29,6 +29,7 @@ export interface OrganizationWithModules {
   name: string;
   slug: string;
   logoUrl: string | null;
+  logoTextUrl: string | null;
   primaryColor: string;
   secondaryColor: string;
   email: string | null;
@@ -470,6 +471,7 @@ export class SettingsService {
       name: updated.name,
       slug: updated.slug,
       logoUrl: updated.logoUrl,
+      logoTextUrl: updated.logoTextUrl,
       primaryColor: updated.primaryColor,
       secondaryColor: updated.secondaryColor,
       email: updated.email,
@@ -515,6 +517,7 @@ export class SettingsService {
       name: organization.name,
       slug: organization.slug,
       logoUrl: organization.logoUrl,
+      logoTextUrl: organization.logoTextUrl,
       primaryColor: organization.primaryColor,
       secondaryColor: organization.secondaryColor,
       email: organization.email,
@@ -599,6 +602,7 @@ export class SettingsService {
       name: updated.name,
       slug: updated.slug,
       logoUrl: updated.logoUrl,
+      logoTextUrl: updated.logoTextUrl,
       primaryColor: updated.primaryColor,
       secondaryColor: updated.secondaryColor,
       email: updated.email,

@@ -241,6 +241,11 @@ export class UpdateOrganizationDto {
   @IsString()
   logoUrl?: string;
 
+  @ApiPropertyOptional({ example: 'http://logo-text.url' })
+  @IsOptional()
+  @IsString()
+  logoTextUrl?: string;
+
   @ApiPropertyOptional({ example: '#ffffff' })
   @IsOptional()
   @IsString()
