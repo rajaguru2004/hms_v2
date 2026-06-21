@@ -34,7 +34,7 @@ export class AppCacheService {
       port: this.config.get<number>('redis.port', 6379),
       password: this.config.get<string>('redis.password'),
       db: this.config.get<number>('redis.db', 0),
-      lazyConnect: true,
+      lazyConnect: false,
       retryStrategy: (times) => {
         if (times > 3) return null; // Stop retrying after 3 attempts
         return Math.min(times * 100, 3000);
@@ -42,11 +42,22 @@ export class AppCacheService {
     });
 
     this.redis.on('error', (err) => {
-      this.logger.error('Redis connection error', err);
+      this.logger.error(
+        'Redis connection status: FAILED (Could not connect to Redis server)',
+        err,
+      );
     });
 
     this.redis.on('connect', () => {
-      this.logger.log('Redis connected');
+      this.logger.log(
+        'Redis connection status: CONNECTED (Establishing connection to Redis server)',
+      );
+    });
+
+    this.redis.on('ready', () => {
+      this.logger.log(
+        'Redis connection status: SUCCESS (Redis is ready and connected)',
+      );
     });
   }
 
