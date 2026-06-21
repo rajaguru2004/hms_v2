@@ -7,7 +7,7 @@ dist/
 build/
 
 # Environment files — NEVER commit real secrets
-.env
+# .env
 .env.development
 .env.staging
 .env.production
