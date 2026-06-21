@@ -18,19 +18,9 @@ export class DashboardService {
       const todayEnd = new Date(today);
       todayEnd.setHours(23, 59, 59, 999);
 
-      // Run aggregates in parallel for optimal performance
+      // Single $queryRaw metrics + parallel secondary queries
       const [
-        [
-          totalPatients,
-          todayAppointments,
-          pendingLabOrders,
-          pendingPrescriptions,
-          todayPayments,
-          occupiedBeds,
-          totalBeds,
-          waitingQueue,
-          criticalLabResults,
-        ],
+        metrics,
         appointmentStatuses,
         queueByService,
         recentPatients,
@@ -78,15 +68,15 @@ export class DashboardService {
 
       return {
         stats: {
-          totalPatients,
-          todayAppointments,
-          pendingLabOrders,
-          pendingPrescriptions,
-          todayRevenue: todayPayments?._sum?.amount || 0,
-          occupiedBeds,
-          availableBeds: Math.max(0, totalBeds - occupiedBeds),
-          queueWaiting: waitingQueue,
-          criticalAlerts: criticalLabResults,
+          totalPatients: metrics.totalPatients,
+          todayAppointments: metrics.todayAppointments,
+          pendingLabOrders: metrics.pendingLabOrders,
+          pendingPrescriptions: metrics.pendingPrescriptions,
+          todayRevenue: metrics.todayRevenue ?? 0,
+          occupiedBeds: metrics.occupiedBeds,
+          availableBeds: Math.max(0, metrics.totalBeds - metrics.occupiedBeds),
+          queueWaiting: metrics.waitingQueue,
+          criticalAlerts: metrics.criticalLabResults,
         },
         appointmentStatuses: formattedStatuses,
         queueByService: formattedQueue,

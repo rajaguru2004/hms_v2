@@ -10,6 +10,7 @@ import { CreateLabOrderDto, UpdateLabOrderDto } from './dto/lab-order.dto';
 import { CreateLabResultDto, UpdateLabResultDto } from './dto/lab-result.dto';
 import { NotFoundException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/exceptions/error-codes';
+import { PrismaService } from '../../prisma/prisma.service';
 
 @Injectable()
 export class LaboratoryService {
@@ -20,6 +21,7 @@ export class LaboratoryService {
     private readonly labOrderRepository: LabOrderRepository,
     private readonly labResultRepository: LabResultRepository,
     private readonly auditService: AuditService,
+    private readonly prisma: PrismaService,
   ) {}
 
   // ── Tests ────────────────────────────────────────────────────────────────
@@ -438,36 +440,53 @@ export class LaboratoryService {
     const todayStart = new Date(today.setHours(0, 0, 0, 0));
     const todayEnd = new Date(today.setHours(23, 59, 59, 999));
 
-    const [
-      pending,
-      sampleCollected,
-      inProgress,
-      completedToday,
-      criticalResults,
-      totalTests,
-    ] = await Promise.all([
-      this.labOrderRepository.count({ organizationId, status: 'pending' }),
-      this.labOrderRepository.count({
-        organizationId,
-        status: 'sample_collected',
-      }),
-      this.labOrderRepository.count({ organizationId, status: 'in_progress' }),
-      this.labOrderRepository.count({
-        organizationId,
-        status: 'completed',
-        resultsReportedAt: { gte: todayStart, lte: todayEnd },
-      }),
-      this.labResultRepository.count({ isCritical: true, verifiedAt: null }),
-      this.labTestRepository.count({ organizationId, isActive: true }),
-    ]);
+    // Single $queryRaw replaces 6 parallel COUNT queries (each was 1-2s).
+    // Uses indexes: LabOrder_organizationId_status_idx,
+    //               LabOrder_organizationId_status_resultsReportedAt_idx,
+    //               LabResult_isCritical_verifiedAt_idx,
+    //               LabTest_organizationId_isActive_idx
+    type StatsRow = {
+      pending: bigint;
+      sample_collected: bigint;
+      in_progress: bigint;
+      completed_today: bigint;
+      critical_results: bigint;
+      total_tests: bigint;
+    };
 
+    const rows = await this.prisma.$queryRaw<StatsRow[]>`
+      SELECT
+        (SELECT COUNT(*) FROM "LabOrder"
+          WHERE "organizationId" = ${organizationId} AND "status" = 'pending'
+        ) AS pending,
+        (SELECT COUNT(*) FROM "LabOrder"
+          WHERE "organizationId" = ${organizationId} AND "status" = 'sample_collected'
+        ) AS sample_collected,
+        (SELECT COUNT(*) FROM "LabOrder"
+          WHERE "organizationId" = ${organizationId} AND "status" = 'in_progress'
+        ) AS in_progress,
+        (SELECT COUNT(*) FROM "LabOrder"
+          WHERE "organizationId" = ${organizationId}
+            AND "status" = 'completed'
+            AND "resultsReportedAt" >= ${todayStart}
+            AND "resultsReportedAt" <= ${todayEnd}
+        ) AS completed_today,
+        (SELECT COUNT(*) FROM "LabResult"
+          WHERE "isCritical" = true AND "verifiedAt" IS NULL
+        ) AS critical_results,
+        (SELECT COUNT(*) FROM "LabTest"
+          WHERE "organizationId" = ${organizationId} AND "isActive" = true
+        ) AS total_tests
+    `;
+
+    const r = rows[0];
     return {
-      pending,
-      sampleCollected,
-      inProgress,
-      completedToday,
-      criticalResults,
-      totalTests,
+      pending: Number(r.pending),
+      sampleCollected: Number(r.sample_collected),
+      inProgress: Number(r.in_progress),
+      completedToday: Number(r.completed_today),
+      criticalResults: Number(r.critical_results),
+      totalTests: Number(r.total_tests),
     };
   }
 }
