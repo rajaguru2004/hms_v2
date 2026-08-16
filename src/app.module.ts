@@ -58,6 +58,14 @@ import { GlobalExceptionFilter } from './common/filters/global-exception.filter'
     // Config — must be first
     ConfigModule.forRoot({
       isGlobal: true,
+      // Explicit load order — first file to define a key wins.
+      // Without this, Nest falls back to `.env` alone, which points at a remote
+      // production host. Keep in sync with prisma.config.ts and prisma/load-env.ts.
+      envFilePath: [
+        '.env.local',
+        `.env.${process.env.NODE_ENV ?? 'development'}`,
+        '.env',
+      ],
       load: [appConfig, databaseConfig, jwtConfig, redisConfig],
       validationSchema,
       validationOptions,

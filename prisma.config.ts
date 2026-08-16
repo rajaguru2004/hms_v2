@@ -1,5 +1,12 @@
 import { defineConfig } from 'prisma/config';
-import 'dotenv/config';
+import * as dotenv from 'dotenv';
+
+// Load order must match ConfigModule in src/app.module.ts and prisma/load-env.ts:
+// .env.local (gitignored) → .env.<NODE_ENV> → .env. Without this, the Prisma CLI
+// falls back to .env, which points at a remote production host.
+dotenv.config({
+  path: ['.env.local', `.env.${process.env.NODE_ENV ?? 'development'}`, '.env'],
+});
 
 /**
  * Prisma 7+ configuration file.
