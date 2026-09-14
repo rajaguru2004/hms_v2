@@ -7,7 +7,7 @@
 # from source with `npm run start:dev`, which is what makes a debugger and a
 # watch loop possible.
 #
-#   docker compose -f docker-compose.local.yml up -d postgres redis
+#   docker compose -f docker-compose.local.yml up -d postgres redis minio
 #   docker compose -f docker-compose.local.yml --profile test up -d postgres_test
 #
 # The database name is `hms_v2_dev`, which is what `.env.local` must point at.
@@ -45,6 +45,46 @@ services:
       timeout: 3s
       retries: 10
 
+  # Object storage, so a developer testing an upload is not writing into the
+  # shared bucket. `S3_ENDPOINT` in `.env.local` points here; without it the
+  # code's own default is the deployed endpoint, and a logo uploaded from a
+  # laptop lands on a URL the whole product serves.
+  minio:
+    image: minio/minio:latest
+    container_name: hms_v2_minio_local
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio_admin
+      MINIO_ROOT_PASSWORD: minio_password
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - minio_data_local:/data
+    # The bucket, made by hand once. On a single drive MinIO reads a directory
+    # under /data as a bucket, so this is all `mc mb` would have done — and it
+    # means the first upload does not fail with `NoSuchBucket` from inside the
+    # S3 client, which is nowhere a reader would look.
+    #   docker exec hms_v2_minio_local mkdir -p /data/hmsbucket
+    #
+    # The bucket stays private, which is right: a URL this API hands back is
+    # read by a signed-in client. If a local browser needs to fetch one
+    # directly, set an anonymous download policy on it in the MinIO console at
+    # http://localhost:9001 (minio_admin / minio_password).
+    # `mc ready` would be the right check, but `minio/mc` is a separate image
+    # and a local stack should not need a second pull to come up. MinIO answers
+    # this endpoint as soon as it is serving.
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'curl -sf http://localhost:9000/minio/health/live || exit 1',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   # The e2e database `.env.test` expects: port 5433, user hms_user, db
   # hms_v2_test. `tmpfs` rather than a volume because the suite truncates every
   # table on each run — there is nothing here worth keeping across a restart,
@@ -70,3 +110,4 @@ services:
 
 volumes:
   postgres_data_local:
+  minio_data_local:

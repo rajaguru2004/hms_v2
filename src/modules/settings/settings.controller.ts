@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Controller,
   Get,
   Post,
@@ -7,9 +8,13 @@ import {
   Body,
   Param,
   Query,
+  UploadedFile,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import {
+  ApiConsumes,
   ApiTags,
   ApiOperation,
   ApiBearerAuth,
@@ -23,7 +28,21 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { Permission } from '../../common/enums/permission.enum';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
+import { ErrorCodes } from '../../common/exceptions/error-codes';
 import { resolveOrganizationId } from '../../common/utils/tenant.util';
+import { ObjectStorageService } from '../../storage/object-storage.service';
+
+/**
+ * What a hospital's mark may be, and how big.
+ *
+ * SVG is deliberately absent: it is a script container, it would be served
+ * back to every browser that renders the site's branding, and a logo is not
+ * worth that.
+ */
+const LOGO_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
+
+/** Two megabytes. A logo that needs more than that is the wrong asset. */
+const LOGO_UPLOAD_MAX_BYTES = 2 * 1024 * 1024;
 import {
   CreateDepartmentDto,
   UpdateDepartmentDto,
@@ -40,7 +59,10 @@ import {
 @UseGuards(RolesGuard, PermissionsGuard)
 @Controller('settings')
 export class SettingsController {
-  constructor(private readonly settingsService: SettingsService) {}
+  constructor(
+    private readonly settingsService: SettingsService,
+    private readonly storage: ObjectStorageService,
+  ) {}
 
   // ── SITE ───────────────────────────────────────────────────────────────────
 
@@ -235,6 +257,55 @@ export class SettingsController {
       dto,
       currentUser.id,
     );
+  }
+
+  /**
+   * Stores a hospital's logo and answers with its address.
+   *
+   * The app's profile screen has always posted here; the route did not exist,
+   * so changing a site's mark meant going to the web console — on a product
+   * whose own record says the phone is the primary platform. The record itself
+   * is not written here: the screen sends the address back through
+   * `PUT organization` with everything else it changed, so one save is one
+   * audit entry.
+   */
+  @Post('organization/logo')
+  @Permissions(Permission.SETTINGS_UPDATE)
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: LOGO_UPLOAD_MAX_BYTES },
+      fileFilter: (_req, file, callback) => {
+        if (!(LOGO_MIME_TYPES as readonly string[]).includes(file.mimetype)) {
+          callback(
+            new BadRequestException(
+              `Unsupported file type "${file.mimetype}". Allowed types: ${LOGO_MIME_TYPES.join(', ')}.`,
+              ErrorCodes.VALIDATION_ERROR,
+            ),
+            false,
+          );
+          return;
+        }
+        callback(null, true);
+      },
+    }),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: "Upload a hospital's logo or wordmark" })
+  async uploadLogo(
+    @UploadedFile() file: Express.Multer.File,
+    @CurrentUser() currentUser: AuthenticatedUser,
+    @Body('type') type?: string,
+  ): Promise<{ url: string; type: string }> {
+    // `logoText` is the wordmark, anything else the symbol. A site draws the
+    // two separately and both live on the same record, so the answer says
+    // which one came back rather than leaving the caller to remember.
+    const mark = type === 'logoText' ? 'logoText' : 'logo';
+    const url = await this.storage.upload(file, {
+      organizationId: resolveOrganizationId(currentUser),
+      folder: `branding/${mark}`,
+      allowedMimeTypes: LOGO_MIME_TYPES,
+    });
+    return { url, type: mark };
   }
 
   // ── USERS ──────────────────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ import {
 import { PrismaModule } from './prisma/prisma.module';
 import { AuditModule } from './audit/audit.module';
 import { AppCacheModule } from './cache/cache.module';
+import { StorageModule } from './storage/storage.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { HealthModule } from './modules/health/health.module';
@@ -53,6 +54,7 @@ import { envFilePaths } from '../prisma/env-paths';
  * - PrismaModule: @Global() → same
  * - AuditModule: @Global() → services log without importing AuditModule
  * - AppCacheModule: @Global() → services cache without importing CacheModule
+ * - StorageModule: @Global() → one S3 client, one bucket, one key scheme
  * - ThrottlerModule: rate limiting applied globally via APP_GUARD
  * - LoggerModule: Pino HTTP logging for structured JSON logs in production
  * - Global guards/interceptors/filters applied via APP_* providers
@@ -107,6 +109,7 @@ import { envFilePaths } from '../prisma/env-paths';
     PrismaModule,
     AuditModule,
     AppCacheModule,
+    StorageModule,
 
     // Feature modules
     AuthModule,
