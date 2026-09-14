@@ -26,8 +26,15 @@ import {
   CreateBillingServiceDto,
   UpdateBillingServiceDto,
 } from './dto/service.dto';
-import { CreateInvoiceDto, UpdateInvoiceDto } from './dto/invoice.dto';
-import { CreatePaymentDto } from './dto/payment.dto';
+import {
+  CreateInvoiceDto,
+  UpdateInvoiceDto,
+  InvoiceListQueryDto,
+} from './dto/invoice.dto';
+import { CreatePaymentDto, PaymentListQueryDto } from './dto/payment.dto';
+import { Invoice, Payment } from '@prisma/client';
+import { PaginatedResult } from '../../common/types/paginated.type';
+import { resolveOrganizationId } from '../../common/utils/tenant.util';
 import {
   BillingQueryDto,
   BillingPostCompatDto,
@@ -264,16 +271,32 @@ export class BillingController {
 
   @Get('invoices')
   @Permissions(Permission.BILLING_READ)
-  @ApiOperation({ summary: 'Get all invoices' })
+  @ApiOperation({
+    summary: 'Get all invoices',
+    description:
+      'Returns a bare array. Send "page" to receive {data, meta} instead.',
+  })
   async getInvoices(
-    @Query('status') status: string,
-    @Query('patientId') patientId: string,
+    @Query() query: InvoiceListQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-  ) {
+  ): Promise<Invoice[] | PaginatedResult<Invoice>> {
+    const organizationId = resolveOrganizationId(currentUser);
+
+    if (query.isPaged) {
+      return this.billingService.getInvoicesPaginated(organizationId, {
+        status: query.status,
+        patientId: query.patientId,
+        search: query.search,
+        page: query.pageNumber,
+        limit: query.pageSize,
+      });
+    }
+
     return this.billingService.getInvoices(
-      currentUser.organizationId,
-      status,
-      patientId,
+      organizationId,
+      query.status,
+      query.patientId,
+      query.search,
     );
   }
 
@@ -321,14 +344,30 @@ export class BillingController {
 
   @Get('payments')
   @Permissions(Permission.BILLING_READ)
-  @ApiOperation({ summary: 'Get all payment transaction records' })
+  @ApiOperation({
+    summary: 'Get all payment transaction records',
+    description:
+      'Returns a bare array. Send "page" to receive {data, meta} instead.',
+  })
   async getPayments(
-    @Query('invoiceId') invoiceId: string,
+    @Query() query: PaymentListQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-  ) {
+  ): Promise<Payment[] | PaginatedResult<Payment>> {
+    const organizationId = resolveOrganizationId(currentUser);
+
+    if (query.isPaged) {
+      return this.billingService.getPaymentsPaginated(organizationId, {
+        invoiceId: query.invoiceId,
+        search: query.search,
+        page: query.pageNumber,
+        limit: query.pageSize,
+      });
+    }
+
     return this.billingService.getPayments(
-      currentUser.organizationId,
-      invoiceId,
+      organizationId,
+      query.invoiceId,
+      query.search,
     );
   }
 

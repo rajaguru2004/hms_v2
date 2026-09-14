@@ -1,3 +1,6 @@
+// Must come first: decorators in the imports below read process.env.
+import './config/load-env';
+
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';

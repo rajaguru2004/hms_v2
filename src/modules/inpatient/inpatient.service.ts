@@ -15,6 +15,8 @@ import {
   ConflictException,
 } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/exceptions/error-codes';
+import { PaginatedResult } from '../../common/types/paginated.type';
+import { buildPaginationMeta } from '../../common/utils/pagination.util';
 
 export interface InpatientStats {
   totalBeds: number;
@@ -263,32 +265,80 @@ export class InpatientService {
   // ADMISSIONS
   // =========================================================================
 
+  /**
+   * One where-clause and one include for both the bare-array and the paginated
+   * reader, so a filter added to one can never silently miss the other.
+   */
+  private buildAdmissionWhere(
+    organizationId: string,
+    status?: string,
+    search?: string,
+  ): Prisma.AdmissionWhereInput {
+    const where: Prisma.AdmissionWhereInput = { organizationId };
+    if (status && status !== 'all') where.status = status;
+
+    if (search) {
+      where.patient = {
+        OR: [
+          { firstName: { contains: search, mode: 'insensitive' } },
+          { lastName: { contains: search, mode: 'insensitive' } },
+          { mrn: { contains: search, mode: 'insensitive' } },
+        ],
+      };
+    }
+
+    return where;
+  }
+
+  private static readonly ADMISSION_INCLUDE = {
+    patient: {
+      select: {
+        id: true,
+        mrn: true,
+        firstName: true,
+        lastName: true,
+        gender: true,
+        dateOfBirth: true,
+        phonePrimary: true,
+      },
+    },
+    bed: {
+      include: { ward: true },
+    },
+  };
+
   async getAdmissions(
     organizationId: string,
     status?: string,
+    search?: string,
   ): Promise<Admission[]> {
-    const where: Record<string, unknown> = { organizationId };
-    if (status && status !== 'all') where.status = status;
-
-    return this.admissionRepository.findMany(where, {
-      orderBy: { admissionDate: 'desc' },
-      include: {
-        patient: {
-          select: {
-            id: true,
-            mrn: true,
-            firstName: true,
-            lastName: true,
-            gender: true,
-            dateOfBirth: true,
-            phonePrimary: true,
-          },
-        },
-        bed: {
-          include: { ward: true },
-        },
+    return this.admissionRepository.findMany(
+      this.buildAdmissionWhere(organizationId, status, search),
+      {
+        orderBy: { admissionDate: 'desc' },
+        include: InpatientService.ADMISSION_INCLUDE,
       },
-    });
+    );
+  }
+
+  async getAdmissionsPaginated(
+    organizationId: string,
+    options: { status?: string; search?: string; page: number; limit: number },
+  ): Promise<PaginatedResult<Admission>> {
+    const { data, meta } = await this.admissionRepository.paginate(
+      this.buildAdmissionWhere(organizationId, options.status, options.search),
+      {
+        page: options.page,
+        limit: options.limit,
+        orderBy: { admissionDate: 'desc' },
+        include: InpatientService.ADMISSION_INCLUDE,
+      },
+    );
+
+    return {
+      data,
+      meta: buildPaginationMeta(meta.total, meta.page, meta.limit),
+    };
   }
 
   async getAdmissionById(

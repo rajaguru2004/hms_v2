@@ -2,12 +2,18 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsBoolean,
   IsDateString,
+  IsIn,
   IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
   Min,
 } from 'class-validator';
+import {
+  RADIOLOGY_ORDER_STATUSES,
+  RADIOLOGY_ORDER_URGENCIES,
+  RADIOLOGY_REPORT_STATUSES,
+} from '../../../common/enums/clinical-status.enum';
 
 export class RadiologyQueryDto {
   @ApiPropertyOptional({
@@ -37,6 +43,14 @@ export class RadiologyQueryDto {
   @IsOptional()
   @IsString()
   orderId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Restrict orders to one patient, for the mobile patient hub.',
+    example: 'patient-cuid',
+  })
+  @IsOptional()
+  @IsString()
+  patientId?: string;
 }
 
 export class RadiologyPostCompatDto {
@@ -127,9 +141,10 @@ export class RadiologyPostCompatDto {
   @IsString()
   relevantHistory?: string;
 
-  @ApiPropertyOptional({ example: 'routine' })
+  @ApiPropertyOptional({ example: 'routine', enum: RADIOLOGY_ORDER_URGENCIES })
   @IsOptional()
   @IsString()
+  @IsIn(RADIOLOGY_ORDER_URGENCIES)
   urgency?: string;
 
   @ApiPropertyOptional({ example: 'Order notes' })
@@ -251,14 +266,19 @@ export class RadiologyPatchCompatDto {
   @IsBoolean()
   isActive?: boolean;
 
-  @ApiPropertyOptional({ example: 'in_progress' })
+  @ApiPropertyOptional({
+    example: 'in_progress',
+    enum: RADIOLOGY_ORDER_STATUSES,
+  })
   @IsOptional()
   @IsString()
+  @IsIn(RADIOLOGY_ORDER_STATUSES)
   status?: string;
 
-  @ApiPropertyOptional({ example: 'urgent' })
+  @ApiPropertyOptional({ example: 'urgent', enum: RADIOLOGY_ORDER_URGENCIES })
   @IsOptional()
   @IsString()
+  @IsIn(RADIOLOGY_ORDER_URGENCIES)
   urgency?: string;
 
   @ApiPropertyOptional({ example: 'Updated notes' })
@@ -351,9 +371,10 @@ export class RadiologyPatchCompatDto {
   @IsString()
   comparisonNotes?: string;
 
-  @ApiPropertyOptional({ example: 'final' })
+  @ApiPropertyOptional({ example: 'final', enum: RADIOLOGY_REPORT_STATUSES })
   @IsOptional()
   @IsString()
+  @IsIn(RADIOLOGY_REPORT_STATUSES)
   reportStatus?: string;
 
   @ApiPropertyOptional({ example: '2026-06-10T12:00:00.000Z' })

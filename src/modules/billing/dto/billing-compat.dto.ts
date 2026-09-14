@@ -1,7 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  INVOICE_PAYMENT_STATUSES,
+  INVOICE_STATUSES,
+  PAYMENT_METHODS,
+} from '../../../common/enums/clinical-status.enum';
+import {
   IsString,
   IsOptional,
+  IsIn,
   IsNumber,
   IsBoolean,
   IsNotEmpty,
@@ -135,9 +141,10 @@ export class BillingPostCompatDto {
   @IsNumber()
   amount?: number;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ enum: PAYMENT_METHODS })
   @IsOptional()
   @IsString()
+  @IsIn(PAYMENT_METHODS)
   paymentMethod?: string;
 
   @ApiPropertyOptional()
@@ -184,14 +191,16 @@ export class BillingPatchCompatDto {
   id: string;
 
   // Updates properties (from Invoice & BillingService updates)
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ enum: INVOICE_STATUSES })
   @IsOptional()
   @IsString()
+  @IsIn(INVOICE_STATUSES)
   status?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ enum: INVOICE_PAYMENT_STATUSES })
   @IsOptional()
   @IsString()
+  @IsIn(INVOICE_PAYMENT_STATUSES)
   paymentStatus?: string;
 
   @ApiPropertyOptional()

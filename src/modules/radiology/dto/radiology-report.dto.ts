@@ -2,10 +2,12 @@ import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import {
   IsBoolean,
   IsDateString,
+  IsIn,
   IsNotEmpty,
   IsOptional,
   IsString,
 } from 'class-validator';
+import { RADIOLOGY_REPORT_STATUSES } from '../../../common/enums/clinical-status.enum';
 
 export class CreateRadiologyReportDto {
   @ApiProperty({ example: 'order-cuid' })
@@ -104,9 +106,10 @@ export class UpdateRadiologyReportDto extends PartialType(
   @IsDateString()
   verifiedAt?: string;
 
-  @ApiPropertyOptional({ example: 'final' })
+  @ApiPropertyOptional({ example: 'final', enum: RADIOLOGY_REPORT_STATUSES })
   @IsOptional()
   @IsString()
+  @IsIn(RADIOLOGY_REPORT_STATUSES)
   status?: string;
 
   @ApiPropertyOptional({ example: 'Typo correction' })

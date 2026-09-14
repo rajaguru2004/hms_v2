@@ -1,10 +1,16 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import {
   IsDateString,
+  IsIn,
   IsNotEmpty,
   IsOptional,
   IsString,
 } from 'class-validator';
+import { OptionalPaginationDto } from '../../../common/dto/optional-pagination.dto';
+import {
+  RADIOLOGY_ORDER_STATUSES,
+  RADIOLOGY_ORDER_URGENCIES,
+} from '../../../common/enums/clinical-status.enum';
 
 export class CreateRadiologyOrderDto {
   @ApiProperty({ example: 'patient-cuid' })
@@ -37,9 +43,14 @@ export class CreateRadiologyOrderDto {
   @IsString()
   relevantHistory?: string;
 
-  @ApiPropertyOptional({ example: 'routine', default: 'routine' })
+  @ApiPropertyOptional({
+    example: 'routine',
+    default: 'routine',
+    enum: RADIOLOGY_ORDER_URGENCIES,
+  })
   @IsOptional()
   @IsString()
+  @IsIn(RADIOLOGY_ORDER_URGENCIES)
   urgency?: string;
 
   @ApiPropertyOptional({ example: 'Wheelchair patient' })
@@ -51,9 +62,13 @@ export class CreateRadiologyOrderDto {
 export class UpdateRadiologyOrderDto extends PartialType(
   CreateRadiologyOrderDto,
 ) {
-  @ApiPropertyOptional({ example: 'in_progress' })
+  @ApiPropertyOptional({
+    example: 'in_progress',
+    enum: RADIOLOGY_ORDER_STATUSES,
+  })
   @IsOptional()
   @IsString()
+  @IsIn(RADIOLOGY_ORDER_STATUSES)
   status?: string;
 
   @ApiPropertyOptional({ example: '2026-06-10T10:00:00.000Z' })
@@ -172,4 +187,24 @@ export class RadiologyOrderResponseDto {
 
   @ApiProperty({ example: 'user-cuid', nullable: true })
   createdById: string | null;
+}
+
+export class RadiologyOrderListQueryDto extends OptionalPaginationDto {
+  @ApiPropertyOptional({ example: 'pending' })
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  @ApiPropertyOptional({ example: 'urgent' })
+  @IsOptional()
+  @IsString()
+  urgency?: string;
+
+  @ApiPropertyOptional({
+    description: 'Restrict orders to one patient, for the mobile patient hub.',
+    example: 'patient-cuid',
+  })
+  @IsOptional()
+  @IsString()
+  patientId?: string;
 }

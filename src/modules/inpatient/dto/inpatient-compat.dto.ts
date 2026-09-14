@@ -6,7 +6,25 @@ import {
   IsNotEmpty,
   Min,
   IsBoolean,
+  IsIn,
 } from 'class-validator';
+import {
+  ADMISSION_STATUSES,
+  ADMISSION_TYPES,
+  BED_STATUSES,
+} from '../../../common/enums/clinical-status.enum';
+
+/**
+ * One flat `status` field serves two resources on this multiplexed route: a bed
+ * on `resource: 'bed'` and an admission on `resource: 'admission'`. Narrowing it
+ * to either vocabulary alone would reject every legitimate call to the other,
+ * so the union is the tightest list this shape can carry. The per-resource DTOs
+ * (`CreateBedDto`, `UpdateAdmissionDto`, ...) enforce the real vocabularies.
+ */
+const BED_OR_ADMISSION_STATUSES = [
+  ...BED_STATUSES,
+  ...ADMISSION_STATUSES,
+] as const;
 
 export class InpatientQueryDto {
   @ApiPropertyOptional({
@@ -75,9 +93,13 @@ export class InpatientPostCompatDto {
   @IsString()
   bedNumber?: string;
 
-  @ApiPropertyOptional({ example: 'available' })
+  @ApiPropertyOptional({
+    example: 'available',
+    enum: BED_OR_ADMISSION_STATUSES,
+  })
   @IsOptional()
   @IsString()
+  @IsIn(BED_OR_ADMISSION_STATUSES)
   status?: string;
 
   // Admission fields
@@ -91,9 +113,10 @@ export class InpatientPostCompatDto {
   @IsString()
   bedId?: string;
 
-  @ApiPropertyOptional({ example: 'emergency' })
+  @ApiPropertyOptional({ example: 'emergency', enum: ADMISSION_TYPES })
   @IsOptional()
   @IsString()
+  @IsIn(ADMISSION_TYPES)
   admissionType?: string;
 
   @ApiPropertyOptional({ example: 'Severe pneumonia' })
@@ -124,9 +147,13 @@ export class InpatientPatchCompatDto {
   id: string;
 
   // Admission & Bed & Ward updates (flat object payload)
-  @ApiPropertyOptional({ example: 'discharged' })
+  @ApiPropertyOptional({
+    example: 'discharged',
+    enum: BED_OR_ADMISSION_STATUSES,
+  })
   @IsOptional()
   @IsString()
+  @IsIn(BED_OR_ADMISSION_STATUSES)
   status?: string;
 
   @ApiPropertyOptional({ example: 'Fully recovered' })
@@ -169,9 +196,10 @@ export class InpatientPatchCompatDto {
   @IsString()
   bedId?: string;
 
-  @ApiPropertyOptional({ example: 'emergency' })
+  @ApiPropertyOptional({ example: 'emergency', enum: ADMISSION_TYPES })
   @IsOptional()
   @IsString()
+  @IsIn(ADMISSION_TYPES)
   admissionType?: string;
 
   @ApiPropertyOptional({ example: 'Severe pneumonia' })

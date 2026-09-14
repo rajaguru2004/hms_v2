@@ -18,6 +18,8 @@ import {
 } from './dto/service.dto';
 import { CreateInvoiceDto, UpdateInvoiceDto } from './dto/invoice.dto';
 import { CreatePaymentDto } from './dto/payment.dto';
+import { PaginatedResult } from '../../common/types/paginated.type';
+import { buildPaginationMeta } from '../../common/utils/pagination.util';
 
 @Injectable()
 export class BillingService {
@@ -49,61 +51,172 @@ export class BillingService {
   /**
    * Get invoices for an organization with optional filters, ordered by invoice date descending.
    */
+  /** One where-clause for both readers of this list, paginated or not. */
+  private buildInvoiceWhere(
+    organizationId: string,
+    filters: { status?: string; patientId?: string; search?: string },
+  ): Prisma.InvoiceWhereInput {
+    const where: Prisma.InvoiceWhereInput = { organizationId };
+    if (filters.status) {
+      where.status = filters.status;
+    }
+    if (filters.patientId) {
+      where.patientId = filters.patientId;
+    }
+    if (filters.search) {
+      where.OR = [
+        { invoiceNumber: { contains: filters.search, mode: 'insensitive' } },
+        {
+          patient: {
+            OR: [
+              { firstName: { contains: filters.search, mode: 'insensitive' } },
+              { lastName: { contains: filters.search, mode: 'insensitive' } },
+              { mrn: { contains: filters.search, mode: 'insensitive' } },
+            ],
+          },
+        },
+      ];
+    }
+    return where;
+  }
+
+  private static readonly INVOICE_INCLUDE = {
+    patient: {
+      select: {
+        id: true,
+        mrn: true,
+        firstName: true,
+        lastName: true,
+        phonePrimary: true,
+        hasInsurance: true,
+        insuranceProvider: true,
+      },
+    },
+    payments: true,
+  };
+
   async getInvoices(
     organizationId: string,
     status?: string,
     patientId?: string,
+    search?: string,
   ): Promise<Invoice[]> {
-    const where: Record<string, unknown> = { organizationId };
-    if (status) {
-      where.status = status;
-    }
-    if (patientId) {
-      where.patientId = patientId;
-    }
-    return this.invoiceRepository.findMany(where, {
-      orderBy: { invoiceDate: 'desc' },
-      include: {
-        patient: {
-          select: {
-            id: true,
-            mrn: true,
-            firstName: true,
-            lastName: true,
-            phonePrimary: true,
-            hasInsurance: true,
-            insuranceProvider: true,
-          },
-        },
-        payments: true,
+    return this.invoiceRepository.findMany(
+      this.buildInvoiceWhere(organizationId, {
+        status,
+        patientId,
+        search,
+      }),
+      {
+        orderBy: { invoiceDate: 'desc' },
+        include: BillingService.INVOICE_INCLUDE,
       },
-    });
+    );
+  }
+
+  async getInvoicesPaginated(
+    organizationId: string,
+    options: {
+      status?: string;
+      patientId?: string;
+      search?: string;
+      page: number;
+      limit: number;
+    },
+  ): Promise<PaginatedResult<Invoice>> {
+    const { data, meta } = await this.invoiceRepository.paginate(
+      this.buildInvoiceWhere(organizationId, options),
+      {
+        page: options.page,
+        limit: options.limit,
+        orderBy: { invoiceDate: 'desc' },
+        include: BillingService.INVOICE_INCLUDE,
+      },
+    );
+
+    return {
+      data,
+      meta: buildPaginationMeta(meta.total, meta.page, meta.limit),
+    };
   }
 
   /**
    * Get payments for an organization with optional filters, ordered by payment date descending.
    */
+  /** One where-clause for both readers of this list, paginated or not. */
+  private buildPaymentWhere(
+    organizationId: string,
+    filters: { invoiceId?: string; search?: string },
+  ): Prisma.PaymentWhereInput {
+    const where: Prisma.PaymentWhereInput = { organizationId };
+    if (filters.invoiceId) {
+      where.invoiceId = filters.invoiceId;
+    }
+    if (filters.search) {
+      where.OR = [
+        { receiptNumber: { contains: filters.search, mode: 'insensitive' } },
+        {
+          patient: {
+            OR: [
+              { firstName: { contains: filters.search, mode: 'insensitive' } },
+              { lastName: { contains: filters.search, mode: 'insensitive' } },
+              { mrn: { contains: filters.search, mode: 'insensitive' } },
+            ],
+          },
+        },
+      ];
+    }
+    return where;
+  }
+
+  private static readonly PAYMENT_INCLUDE = {
+    patient: {
+      select: {
+        id: true,
+        mrn: true,
+        firstName: true,
+        lastName: true,
+      },
+    },
+  };
+
   async getPayments(
     organizationId: string,
     invoiceId?: string,
+    search?: string,
   ): Promise<Payment[]> {
-    const where: Record<string, unknown> = { organizationId };
-    if (invoiceId) {
-      where.invoiceId = invoiceId;
-    }
-    return this.paymentRepository.findMany(where, {
-      orderBy: { paymentDate: 'desc' },
-      include: {
-        patient: {
-          select: {
-            id: true,
-            mrn: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
+    return this.paymentRepository.findMany(
+      this.buildPaymentWhere(organizationId, { invoiceId, search }),
+      {
+        orderBy: { paymentDate: 'desc' },
+        include: BillingService.PAYMENT_INCLUDE,
       },
-    });
+    );
+  }
+
+  async getPaymentsPaginated(
+    organizationId: string,
+    options: {
+      invoiceId?: string;
+      search?: string;
+      page: number;
+      limit: number;
+    },
+  ): Promise<PaginatedResult<Payment>> {
+    const { data, meta } = await this.paymentRepository.paginate(
+      this.buildPaymentWhere(organizationId, options),
+      {
+        page: options.page,
+        limit: options.limit,
+        orderBy: { paymentDate: 'desc' },
+        include: BillingService.PAYMENT_INCLUDE,
+      },
+    );
+
+    return {
+      data,
+      meta: buildPaginationMeta(meta.total, meta.page, meta.limit),
+    };
   }
 
   /**

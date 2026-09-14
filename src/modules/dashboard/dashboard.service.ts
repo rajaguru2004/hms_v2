@@ -74,6 +74,11 @@ export class DashboardService {
           pendingPrescriptions: metrics.pendingPrescriptions,
           todayRevenue: metrics.todayRevenue ?? 0,
           occupiedBeds: metrics.occupiedBeds,
+          // Reported directly rather than left for the client to infer. The
+          // mobile board was computing capacity as occupied + available, which
+          // omits every reserved and maintenance bed — the ward screen counted
+          // 40 where the board said 26.
+          totalBeds: metrics.totalBeds,
           availableBeds: Math.max(0, metrics.totalBeds - metrics.occupiedBeds),
           queueWaiting: metrics.waitingQueue,
           criticalAlerts: metrics.criticalLabResults,

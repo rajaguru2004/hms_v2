@@ -7,7 +7,6 @@ import {
   Param,
   Query,
   UseGuards,
-  Req,
   BadRequestException,
   Delete,
 } from '@nestjs/common';
@@ -18,7 +17,6 @@ import {
   ApiParam,
   ApiResponse,
 } from '@nestjs/swagger';
-import { Request } from 'express';
 import { LaboratoryService } from './laboratory.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -26,6 +24,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { Permission } from '../../common/enums/permission.enum';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
+import { resolveOrganizationId } from '../../common/utils/tenant.util';
 import {
   LaboratoryQueryDto,
   LaboratoryPostCompatDto,
@@ -67,7 +66,6 @@ export class LaboratoryController {
   async compatibilityGet(
     @Query() query: LaboratoryQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     const resource = query.resource || 'tests';
     let resultData: unknown;
@@ -82,9 +80,16 @@ export class LaboratoryController {
         currentUser.organizationId,
         query.status,
         query.priority,
+        undefined,
+        undefined,
+        undefined,
+        query.patientId,
       );
     } else if (resource === 'results') {
-      resultData = await this.laboratoryService.getResults(query.orderId);
+      resultData = await this.laboratoryService.getResults(
+        resolveOrganizationId(currentUser),
+        query.orderId,
+      );
     } else if (resource === 'stats') {
       resultData = await this.laboratoryService.getStats(
         currentUser.organizationId,
@@ -93,12 +98,7 @@ export class LaboratoryController {
       throw new BadRequestException('Invalid resource specified');
     }
 
-    return {
-      success: true,
-      data: resultData,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return resultData;
   }
 
   @Post()
@@ -110,7 +110,6 @@ export class LaboratoryController {
   async compatibilityPost(
     @Body() dto: LaboratoryPostCompatDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     const resource = dto.resource || 'test';
 
@@ -139,13 +138,7 @@ export class LaboratoryController {
         currentUser.organizationId,
         currentUser.id,
       );
-      return {
-        success: true,
-        data: test,
-        message: 'Test added successfully',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
+      return test;
     }
 
     if (resource === 'order') {
@@ -172,13 +165,7 @@ export class LaboratoryController {
         currentUser.organizationId,
         currentUser.id,
       );
-      return {
-        success: true,
-        data: order,
-        message: 'Lab order created',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
+      return order;
     }
 
     if (resource === 'result') {
@@ -201,13 +188,7 @@ export class LaboratoryController {
         currentUser.organizationId,
         currentUser.id,
       );
-      return {
-        success: true,
-        data: result,
-        message: 'Result saved',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
+      return result;
     }
 
     throw new BadRequestException('Invalid resource specified');
@@ -222,7 +203,6 @@ export class LaboratoryController {
   async compatibilityPatch(
     @Body() dto: LaboratoryPatchCompatDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     let updated: unknown;
 
@@ -267,12 +247,7 @@ export class LaboratoryController {
       throw new BadRequestException('Invalid resource specified');
     }
 
-    return {
-      success: true,
-      data: updated,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return updated;
   }
 
   // =========================================================================
@@ -327,7 +302,7 @@ export class LaboratoryController {
   }
 
   @Delete('tests/:id')
-  @Permissions(Permission.LABORATORY_UPDATE)
+  @Permissions(Permission.LABORATORY_DELETE)
   @ApiOperation({ summary: 'Delete a laboratory test (soft delete)' })
   @ApiParam({ name: 'id', type: String })
   @ApiResponse({ status: 200, type: LabTestResponseDto })
@@ -352,6 +327,7 @@ export class LaboratoryController {
     @Query('search') search: string,
     @Query('page') page: string,
     @Query('limit') limit: string,
+    @Query('patientId') patientId: string,
     @CurrentUser() currentUser: AuthenticatedUser,
   ) {
     const pageNumber = page ? parseInt(page, 10) : 1;
@@ -364,6 +340,7 @@ export class LaboratoryController {
       search,
       pageNumber,
       limitNumber,
+      patientId,
     );
   }
 
@@ -404,8 +381,14 @@ export class LaboratoryController {
   @Permissions(Permission.LABORATORY_READ)
   @ApiOperation({ summary: 'Get laboratory results' })
   @ApiResponse({ status: 200, type: [LabResultResponseDto] })
-  async getResults(@Query('orderId') orderId: string) {
-    return this.laboratoryService.getResults(orderId);
+  async getResults(
+    @Query('orderId') orderId: string,
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ) {
+    return this.laboratoryService.getResults(
+      resolveOrganizationId(currentUser),
+      orderId,
+    );
   }
 
   @Post('results')

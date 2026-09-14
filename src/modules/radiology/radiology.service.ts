@@ -34,6 +34,22 @@ import {
 import { RadiologyExamRepository } from './radiology-exam.repository';
 import { RadiologyOrderRepository } from './radiology-order.repository';
 import { RadiologyReportRepository } from './radiology-report.repository';
+import { PaginatedResult } from '../../common/types/paginated.type';
+import { buildPaginationMeta } from '../../common/utils/pagination.util';
+
+/**
+ * What a PACS viewer or the mobile client can actually render. DICOM is here
+ * deliberately: the previous `startsWith('image/')` guard rejected every study
+ * uploaded in its native format, which is most of them.
+ */
+export const RADIOLOGY_UPLOAD_MIME_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'application/dicom',
+] as const;
+
+export const RADIOLOGY_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 
 interface CompatibilityResult {
   data: unknown;
@@ -91,9 +107,15 @@ export class RadiologyService {
       throw new AppException('No file uploaded', ErrorCodes.BAD_REQUEST);
     }
 
-    if (!file.mimetype.startsWith('image/')) {
+    // Re-checked here, not only in the route's fileFilter: this method is a
+    // public service API and the next caller may not come through that route.
+    if (
+      !(RADIOLOGY_UPLOAD_MIME_TYPES as readonly string[]).includes(
+        file.mimetype,
+      )
+    ) {
       throw new AppException(
-        'Only image files are allowed',
+        `Unsupported file type "${file.mimetype}". Allowed types: ${RADIOLOGY_UPLOAD_MIME_TYPES.join(', ')}.`,
         ErrorCodes.VALIDATION_ERROR,
       );
     }
@@ -134,11 +156,16 @@ export class RadiologyService {
     }
     if (resource === 'orders') {
       return {
-        data: await this.getOrders(organizationId, query.status, query.urgency),
+        data: await this.getOrders(
+          organizationId,
+          query.status,
+          query.urgency,
+          query.patientId,
+        ),
       };
     }
     if (resource === 'reports') {
-      return { data: await this.getReports(query.orderId) };
+      return { data: await this.getReports(organizationId, query.orderId) };
     }
     if (resource === 'stats') {
       return { data: await this.getStats(organizationId) };
@@ -402,37 +429,105 @@ export class RadiologyService {
     return exam;
   }
 
+  /** One where-clause for both readers of this list, paginated or not. */
+  private buildOrderWhere(
+    organizationId: string,
+    filters: {
+      status?: string;
+      urgency?: string;
+      patientId?: string;
+      search?: string;
+    },
+  ): Prisma.RadiologyOrderWhereInput {
+    const where: Prisma.RadiologyOrderWhereInput = { organizationId };
+    if (filters.status) {
+      where.status = filters.status;
+    }
+    if (filters.urgency) {
+      where.urgency = filters.urgency;
+    }
+    if (filters.patientId) {
+      where.patientId = filters.patientId;
+    }
+    if (filters.search) {
+      where.OR = [
+        { orderNumber: { contains: filters.search, mode: 'insensitive' } },
+        {
+          patient: {
+            OR: [
+              { firstName: { contains: filters.search, mode: 'insensitive' } },
+              { lastName: { contains: filters.search, mode: 'insensitive' } },
+              { mrn: { contains: filters.search, mode: 'insensitive' } },
+            ],
+          },
+        },
+      ];
+    }
+    return where;
+  }
+
+  private static readonly ORDER_INCLUDE = {
+    patient: {
+      select: {
+        id: true,
+        mrn: true,
+        firstName: true,
+        lastName: true,
+        gender: true,
+        dateOfBirth: true,
+        phonePrimary: true,
+      },
+    },
+    exam: true,
+    report: true,
+  };
+
   async getOrders(
     organizationId: string,
     status?: string,
     urgency?: string,
+    patientId?: string,
+    search?: string,
   ): Promise<RadiologyOrder[]> {
-    const where: Record<string, unknown> = { organizationId };
-    if (status) {
-      where.status = status;
-    }
-    if (urgency) {
-      where.urgency = urgency;
-    }
-
-    return this.orderRepository.findMany(where, {
-      orderBy: { orderDate: 'desc' },
-      include: {
-        patient: {
-          select: {
-            id: true,
-            mrn: true,
-            firstName: true,
-            lastName: true,
-            gender: true,
-            dateOfBirth: true,
-            phonePrimary: true,
-          },
-        },
-        exam: true,
-        report: true,
+    return this.orderRepository.findMany(
+      this.buildOrderWhere(organizationId, {
+        status,
+        urgency,
+        patientId,
+        search,
+      }),
+      {
+        orderBy: { orderDate: 'desc' },
+        include: RadiologyService.ORDER_INCLUDE,
       },
-    });
+    );
+  }
+
+  async getOrdersPaginated(
+    organizationId: string,
+    options: {
+      status?: string;
+      urgency?: string;
+      patientId?: string;
+      search?: string;
+      page: number;
+      limit: number;
+    },
+  ): Promise<PaginatedResult<RadiologyOrder>> {
+    const { data, meta } = await this.orderRepository.paginate(
+      this.buildOrderWhere(organizationId, options),
+      {
+        page: options.page,
+        limit: options.limit,
+        orderBy: { orderDate: 'desc' },
+        include: RadiologyService.ORDER_INCLUDE,
+      },
+    );
+
+    return {
+      data,
+      meta: buildPaginationMeta(meta.total, meta.page, meta.limit),
+    };
   }
 
   async getOrderById(
@@ -557,8 +652,14 @@ export class RadiologyService {
     return order;
   }
 
-  async getReports(orderId?: string): Promise<RadiologyReport[]> {
-    const where: Record<string, unknown> = {};
+  async getReports(
+    organizationId: string,
+    orderId?: string,
+  ): Promise<RadiologyReport[]> {
+    // Scoped through the order for the same reason as lab results:
+    // `RadiologyReport.organizationId` is nullable, so a direct filter hides a
+    // hospital's own older reports while leaving every report readable by id.
+    const where: Record<string, unknown> = { order: { organizationId } };
     if (orderId) {
       where.orderId = orderId;
     }
@@ -572,9 +673,12 @@ export class RadiologyService {
     });
   }
 
-  async getReportById(id: string): Promise<RadiologyReport> {
+  async getReportById(
+    id: string,
+    organizationId: string,
+  ): Promise<RadiologyReport> {
     const report = await this.reportRepository.findOne(
-      { id },
+      { id, order: { organizationId } },
       { order: { include: { patient: true, exam: true } } },
     );
     if (!report) {
@@ -640,7 +744,7 @@ export class RadiologyService {
     organizationId: string,
     userId: string,
   ): Promise<RadiologyReport> {
-    const oldReport = await this.getReportById(id);
+    const oldReport = await this.getReportById(id, organizationId);
     const updates: Prisma.RadiologyReportUpdateInput = {
       technique: dto.technique,
       findings: dto.findings,

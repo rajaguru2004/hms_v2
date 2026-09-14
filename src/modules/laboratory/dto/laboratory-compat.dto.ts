@@ -8,8 +8,14 @@ import {
   IsBoolean,
   IsArray,
   ValidateNested,
+  IsIn,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import {
+  LAB_ORDER_PRIORITIES,
+  LAB_ORDER_STATUSES,
+  LAB_RESULT_FLAGS,
+} from '../../../common/enums/clinical-status.enum';
 
 export class LaboratoryQueryDto {
   @ApiPropertyOptional({
@@ -39,6 +45,14 @@ export class LaboratoryQueryDto {
   @IsOptional()
   @IsString()
   orderId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Restrict orders to one patient, for the mobile patient hub.',
+    example: 'patient-cuid',
+  })
+  @IsOptional()
+  @IsString()
+  patientId?: string;
 }
 
 export class OrderTestCompatItemDto {
@@ -173,9 +187,10 @@ export class LaboratoryPostCompatDto {
   @IsString()
   provisionalDiagnosis?: string;
 
-  @ApiPropertyOptional({ example: 'routine' })
+  @ApiPropertyOptional({ example: 'routine', enum: LAB_ORDER_PRIORITIES })
   @IsOptional()
   @IsString()
+  @IsIn(LAB_ORDER_PRIORITIES)
   priority?: string;
 
   @ApiPropertyOptional({ example: 'Some order notes' })
@@ -214,9 +229,10 @@ export class LaboratoryPostCompatDto {
   @IsBoolean()
   isCritical?: boolean;
 
-  @ApiPropertyOptional({ example: 'N' })
+  @ApiPropertyOptional({ example: 'N', enum: LAB_RESULT_FLAGS })
   @IsOptional()
   @IsString()
+  @IsIn(LAB_RESULT_FLAGS)
   flag?: string;
 
   @ApiPropertyOptional({ example: 'Normal CBC result' })
@@ -237,14 +253,16 @@ export class LaboratoryPatchCompatDto {
   id: string;
 
   // Flattened update fields
-  @ApiPropertyOptional({ example: 'completed' })
+  @ApiPropertyOptional({ example: 'completed', enum: LAB_ORDER_STATUSES })
   @IsOptional()
   @IsString()
+  @IsIn(LAB_ORDER_STATUSES)
   status?: string;
 
-  @ApiPropertyOptional({ example: 'routine' })
+  @ApiPropertyOptional({ example: 'routine', enum: LAB_ORDER_PRIORITIES })
   @IsOptional()
   @IsString()
+  @IsIn(LAB_ORDER_PRIORITIES)
   priority?: string;
 
   @ApiPropertyOptional({ example: '14.0' })
@@ -267,9 +285,10 @@ export class LaboratoryPatchCompatDto {
   @IsBoolean()
   isCritical?: boolean;
 
-  @ApiPropertyOptional({ example: 'N' })
+  @ApiPropertyOptional({ example: 'N', enum: LAB_RESULT_FLAGS })
   @IsOptional()
   @IsString()
+  @IsIn(LAB_RESULT_FLAGS)
   flag?: string;
 
   @ApiPropertyOptional({ example: 'Normal CBC result' })

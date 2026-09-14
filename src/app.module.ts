@@ -1,3 +1,6 @@
+// Must come first: decorators in the imports below read process.env.
+import './config/load-env';
+
 import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';

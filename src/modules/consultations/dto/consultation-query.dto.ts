@@ -26,4 +26,13 @@ export class ConsultationQueryDto extends PaginationDto {
   @IsOptional()
   @IsDateString()
   date?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "Case-insensitive match across the patient's first name, last name and MRN.",
+    example: 'abebe',
+  })
+  @IsOptional()
+  @IsString()
+  search?: string;
 }

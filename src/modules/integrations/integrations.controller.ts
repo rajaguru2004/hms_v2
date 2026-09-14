@@ -30,6 +30,26 @@ import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
 import { CreateMachineDto, UpdateMachineDto } from './dto/machine.dto';
 import { ResultsQueueQueryDto, MachineQueryDto } from './dto/results-queue.dto';
 import { resolveOrganizationId } from '../../common/utils/tenant.util';
+import { BadRequestException } from '../../common/exceptions/app.exception';
+import { ErrorCodes } from '../../common/exceptions/error-codes';
+
+/** Result files the parsers understand: CSV, Excel, HL7 and plain text. */
+const RESULTS_UPLOAD_MIME_TYPES = [
+  'text/csv',
+  'text/plain',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+];
+
+/**
+ * Analyser exports routinely arrive as `application/octet-stream` — the browser
+ * has no mapping for `.hl7`, and several instrument bridges send every file
+ * that way. Rejecting on MIME alone would block the machines this endpoint
+ * exists for, so for that one type the extension decides.
+ */
+const RESULTS_UPLOAD_EXTENSIONS = ['.csv', '.xls', '.xlsx', '.hl7', '.txt'];
+
+const RESULTS_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 
 @ApiTags('Integrations')
 @ApiBearerAuth()
@@ -122,7 +142,33 @@ export class IntegrationsController {
 
   @Post('results/upload')
   @Permissions(Permission.INTEGRATION_CREATE)
-  @UseInterceptors(FileInterceptor('file'))
+  // Unbounded before: the whole upload was buffered in memory before any
+  // parser saw it, so one oversized or unparseable file took the process with
+  // it rather than returning a 400.
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: RESULTS_UPLOAD_MAX_BYTES },
+      fileFilter: (_req, file, callback) => {
+        const name = (file.originalname || '').toLowerCase();
+        const accepted =
+          RESULTS_UPLOAD_MIME_TYPES.includes(file.mimetype) ||
+          (file.mimetype === 'application/octet-stream' &&
+            RESULTS_UPLOAD_EXTENSIONS.some((ext) => name.endsWith(ext)));
+
+        if (!accepted) {
+          callback(
+            new BadRequestException(
+              `Unsupported file type "${file.mimetype}". Allowed types: ${RESULTS_UPLOAD_MIME_TYPES.join(', ')}; application/octet-stream is accepted only for ${RESULTS_UPLOAD_EXTENSIONS.join(', ')} files.`,
+              ErrorCodes.VALIDATION_ERROR,
+            ),
+            false,
+          );
+          return;
+        }
+        callback(null, true);
+      },
+    }),
+  )
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {

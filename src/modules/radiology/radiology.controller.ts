@@ -6,7 +6,6 @@ import {
   Patch,
   Post,
   Query,
-  Req,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -21,7 +20,6 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { Request } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { Permission } from '../../common/enums/permission.enum';
@@ -48,7 +46,17 @@ import {
   RadiologyReportResponseDto,
   UpdateRadiologyReportDto,
 } from './dto/radiology-report.dto';
-import { RadiologyService } from './radiology.service';
+import {
+  RadiologyService,
+  RADIOLOGY_UPLOAD_MAX_BYTES,
+  RADIOLOGY_UPLOAD_MIME_TYPES,
+} from './radiology.service';
+import { RadiologyOrderListQueryDto } from './dto/radiology-order.dto';
+import { resolveOrganizationId } from '../../common/utils/tenant.util';
+import { PaginatedResult } from '../../common/types/paginated.type';
+import { RadiologyOrder } from '@prisma/client';
+import { BadRequestException } from '../../common/exceptions/app.exception';
+import { ErrorCodes } from '../../common/exceptions/error-codes';
 
 @ApiTags('Radiology')
 @ApiBearerAuth()
@@ -67,20 +75,13 @@ export class RadiologyController {
   async compatibilityGet(
     @Query() query: RadiologyQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<unknown> {
     const result = await this.radiologyService.compatibilityGet(
       query,
       currentUser.organizationId,
     );
 
-    return {
-      success: true,
-      message: result.message || 'Operation completed successfully',
-      data: result.data,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return result.data;
   }
 
   @Post()
@@ -93,21 +94,14 @@ export class RadiologyController {
   async compatibilityPost(
     @Body() dto: RadiologyPostCompatDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<unknown> {
     const result = await this.radiologyService.compatibilityPost(
       dto,
       currentUser.organizationId,
       currentUser.id,
     );
 
-    return {
-      success: true,
-      message: result.message || 'Operation completed successfully',
-      data: result.data,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return result.data;
   }
 
   @Patch()
@@ -120,21 +114,14 @@ export class RadiologyController {
   async compatibilityPatch(
     @Body() dto: RadiologyPatchCompatDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<unknown> {
     const result = await this.radiologyService.compatibilityPatch(
       dto,
       currentUser.organizationId,
       currentUser.id,
     );
 
-    return {
-      success: true,
-      message: result.message || 'Operation completed successfully',
-      data: result.data,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return result.data;
   }
 
   @Get('exams')
@@ -195,17 +182,35 @@ export class RadiologyController {
 
   @Get('orders')
   @Permissions(Permission.RADIOLOGY_READ)
-  @ApiOperation({ summary: 'List radiology orders' })
+  @ApiOperation({
+    summary: 'List radiology orders',
+    description:
+      'Returns a bare array. Send "page" to receive {data, meta} instead.',
+  })
   @ApiResponse({ status: 200, type: RadiologyOrderResponseDto, isArray: true })
   async listOrders(
-    @Query('status') status: string | undefined,
-    @Query('urgency') urgency: string | undefined,
+    @Query() query: RadiologyOrderListQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-  ): Promise<RadiologyOrderResponseDto[]> {
+  ): Promise<RadiologyOrder[] | PaginatedResult<RadiologyOrder>> {
+    const organizationId = resolveOrganizationId(currentUser);
+
+    if (query.isPaged) {
+      return this.radiologyService.getOrdersPaginated(organizationId, {
+        status: query.status,
+        urgency: query.urgency,
+        patientId: query.patientId,
+        search: query.search,
+        page: query.pageNumber,
+        limit: query.pageSize,
+      });
+    }
+
     return this.radiologyService.getOrders(
-      currentUser.organizationId,
-      status,
-      urgency,
+      organizationId,
+      query.status,
+      query.urgency,
+      query.patientId,
+      query.search,
     );
   }
 
@@ -259,9 +264,13 @@ export class RadiologyController {
   @ApiOperation({ summary: 'List radiology reports' })
   @ApiResponse({ status: 200, type: RadiologyReportResponseDto, isArray: true })
   async listReports(
+    @CurrentUser() currentUser: AuthenticatedUser,
     @Query('orderId') orderId?: string,
   ): Promise<RadiologyReportResponseDto[]> {
-    return this.radiologyService.getReports(orderId);
+    return this.radiologyService.getReports(
+      resolveOrganizationId(currentUser),
+      orderId,
+    );
   }
 
   @Get('reports/:id')
@@ -271,8 +280,12 @@ export class RadiologyController {
   @ApiResponse({ status: 200, type: RadiologyReportResponseDto })
   async getReport(
     @Param('id') id: string,
+    @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<RadiologyReportResponseDto> {
-    return this.radiologyService.getReportById(id);
+    return this.radiologyService.getReportById(
+      id,
+      resolveOrganizationId(currentUser),
+    );
   }
 
   @Post('reports')
@@ -310,7 +323,31 @@ export class RadiologyController {
 
   @Post('upload')
   @Permissions(Permission.RADIOLOGY_CREATE)
-  @UseInterceptors(FileInterceptor('file'))
+  // Unbounded before: Multer buffered the whole body in memory, so a single
+  // large POST — or a .zip renamed to .jpg — reached the S3 client and the
+  // process heap with nothing in between.
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: RADIOLOGY_UPLOAD_MAX_BYTES },
+      fileFilter: (_req, file, callback) => {
+        if (
+          !(RADIOLOGY_UPLOAD_MIME_TYPES as readonly string[]).includes(
+            file.mimetype,
+          )
+        ) {
+          callback(
+            new BadRequestException(
+              `Unsupported file type "${file.mimetype}". Allowed types: ${RADIOLOGY_UPLOAD_MIME_TYPES.join(', ')}.`,
+              ErrorCodes.VALIDATION_ERROR,
+            ),
+            false,
+          );
+          return;
+        }
+        callback(null, true);
+      },
+    }),
+  )
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {

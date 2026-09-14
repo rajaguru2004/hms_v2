@@ -102,6 +102,7 @@ describe('DashboardService', () => {
       expect(result.stats.pendingPrescriptions).toBe(8);
       expect(result.stats.todayRevenue).toBe(3500);
       expect(result.stats.occupiedBeds).toBe(20);
+      expect(result.stats.totalBeds).toBe(40);
       expect(result.stats.availableBeds).toBe(20); // 40 - 20
       expect(result.stats.queueWaiting).toBe(6);
       expect(result.stats.criticalAlerts).toBe(2);
@@ -165,6 +166,24 @@ describe('DashboardService', () => {
       const result = await service.getDashboardData(ORG);
 
       expect(result.stats.availableBeds).toBe(0);
+    });
+
+    it('should report ward capacity that occupied + available does not add up to', async () => {
+      // 40 beds, 20 occupied, 6 of the rest reserved or under maintenance.
+      // A client deriving capacity from occupied + available reads 34 and
+      // under-reports the ward by every bed that is neither.
+      repository.getMetrics.mockResolvedValue({
+        ...mockMetrics,
+        occupiedBeds: 20,
+        totalBeds: 40,
+      });
+
+      const result = await service.getDashboardData(ORG);
+
+      expect(result.stats.totalBeds).toBe(40);
+      expect(result.stats.totalBeds).toBeGreaterThanOrEqual(
+        result.stats.occupiedBeds + result.stats.availableBeds,
+      );
     });
 
     it('should call all repository methods in parallel', async () => {

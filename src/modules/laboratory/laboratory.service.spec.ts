@@ -205,13 +205,25 @@ describe('LaboratoryService', () => {
   describe('getResults', () => {
     it('should query and return results', async () => {
       labResultRepository.findMany.mockResolvedValue([mockResultRecord]);
-      const result = await service.getResults('order-1');
+      const result = await service.getResults('org-demo', 'order-1');
       expect(labResultRepository.findMany).toHaveBeenCalledWith(
-        { orderId: 'order-1' },
+        { orderId: 'order-1', order: { organizationId: 'org-demo' } },
         expect.any(Object),
       );
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe(mockResultRecord.id);
+    });
+
+    it('should scope results through the order, not the nullable result column', async () => {
+      // LabResult.organizationId is nullable, so filtering on it drops rows
+      // that predate the column while still letting another hospital's results
+      // through by id. The order's organizationId is NOT NULL.
+      labResultRepository.findMany.mockResolvedValue([]);
+      await service.getResults('org-demo');
+      expect(labResultRepository.findMany).toHaveBeenCalledWith(
+        { order: { organizationId: 'org-demo' } },
+        expect.any(Object),
+      );
     });
   });
 
@@ -285,7 +297,7 @@ describe('LaboratoryService', () => {
 
   describe('updateTest', () => {
     it('should update test and log audit', async () => {
-      labTestRepository.findById.mockResolvedValue(mockTestRecord);
+      labTestRepository.findOne.mockResolvedValue(mockTestRecord);
       labTestRepository.update.mockResolvedValue({
         ...mockTestRecord,
         price: 200.0,
@@ -297,13 +309,17 @@ describe('LaboratoryService', () => {
         'org-demo',
         'user-1',
       );
+      expect(labTestRepository.findOne).toHaveBeenCalledWith({
+        id: 'test-1',
+        organizationId: 'org-demo',
+      });
       expect(labTestRepository.update).toHaveBeenCalled();
       expect(auditService.log).toHaveBeenCalled();
       expect(result.price).toBe(200.0);
     });
 
     it('should throw NotFoundException if test does not exist', async () => {
-      labTestRepository.findById.mockResolvedValue(null);
+      labTestRepository.findOne.mockResolvedValue(null);
       await expect(
         service.updateTest('test-diff', { price: 200.0 }, 'org-demo', 'user-1'),
       ).rejects.toThrow(NotFoundException);
@@ -312,7 +328,7 @@ describe('LaboratoryService', () => {
 
   describe('updateResult', () => {
     it('should update result and log audit', async () => {
-      labResultRepository.findById.mockResolvedValue(mockResultRecord);
+      labResultRepository.findOne.mockResolvedValue(mockResultRecord);
       labResultRepository.update.mockResolvedValue({
         ...mockResultRecord,
         resultValue: '14.0',
@@ -330,7 +346,7 @@ describe('LaboratoryService', () => {
     });
 
     it('should verify result and trigger order completion check', async () => {
-      labResultRepository.findById.mockResolvedValue(mockResultRecord);
+      labResultRepository.findOne.mockResolvedValue(mockResultRecord);
       const verifiedResult = {
         ...mockResultRecord,
         verifiedAt: new Date(),
@@ -358,8 +374,9 @@ describe('LaboratoryService', () => {
 
   describe('updateOrder', () => {
     it('should generate a unique accession number when status becomes sample_collected', async () => {
-      labOrderRepository.findById.mockResolvedValue(mockOrderRecord);
-      labOrderRepository.findOne.mockResolvedValueOnce(null); // No existing order with generated accession
+      labOrderRepository.findOne
+        .mockResolvedValueOnce(mockOrderRecord) // getOrderById, now org-scoped
+        .mockResolvedValueOnce(null); // no existing order holds the generated accession
       labOrderRepository.update.mockImplementation((id, data) =>
         Promise.resolve({ ...mockOrderRecord, ...data } as LabOrder),
       );
@@ -382,8 +399,9 @@ describe('LaboratoryService', () => {
     });
 
     it('should ignore and delete custom accession number from client to prevent duplication', async () => {
-      labOrderRepository.findById.mockResolvedValue(mockOrderRecord);
-      labOrderRepository.findOne.mockResolvedValueOnce(null);
+      labOrderRepository.findOne
+        .mockResolvedValueOnce(mockOrderRecord) // getOrderById, now org-scoped
+        .mockResolvedValueOnce(null);
       labOrderRepository.update.mockImplementation((id, data) =>
         Promise.resolve({ ...mockOrderRecord, ...data } as LabOrder),
       );

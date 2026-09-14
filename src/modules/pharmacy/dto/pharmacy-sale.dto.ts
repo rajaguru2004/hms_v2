@@ -1,7 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  PAYMENT_METHODS,
+  PAYMENT_STATUSES,
+} from '../../../common/enums/clinical-status.enum';
+import {
   IsString,
   IsOptional,
+  IsIn,
   IsNumber,
   IsNotEmpty,
   Min,
@@ -59,14 +64,16 @@ export class CreatePharmacySaleDto {
   @Type(() => PharmacySaleItemDto)
   items: PharmacySaleItemDto[];
 
-  @ApiPropertyOptional({ example: 'cash' })
+  @ApiPropertyOptional({ example: 'cash', enum: PAYMENT_METHODS })
   @IsOptional()
   @IsString()
+  @IsIn(PAYMENT_METHODS)
   paymentMethod?: string;
 
-  @ApiPropertyOptional({ example: 'paid' })
+  @ApiPropertyOptional({ example: 'paid', enum: PAYMENT_STATUSES })
   @IsOptional()
   @IsString()
+  @IsIn(PAYMENT_STATUSES)
   paymentStatus?: string;
 }
 

@@ -1,5 +1,10 @@
 import { Injectable, Logger, HttpStatus } from '@nestjs/common';
-import { PharmacyDrug, Prescription, PharmacySale } from '@prisma/client';
+import {
+  PharmacyDrug,
+  Prescription,
+  PharmacySale,
+  Prisma,
+} from '@prisma/client';
 import { PharmacyDrugRepository } from './pharmacy-drug.repository';
 import { PharmacyBatchRepository } from './pharmacy-batch.repository';
 import { PrescriptionRepository } from './prescription.repository';
@@ -21,6 +26,8 @@ import {
   AppException,
 } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/exceptions/error-codes';
+import { PaginatedResult } from '../../common/types/paginated.type';
+import { buildPaginationMeta } from '../../common/utils/pagination.util';
 
 @Injectable()
 export class PharmacyService {
@@ -39,11 +46,12 @@ export class PharmacyService {
   // DRUGS
   // =========================================================================
 
-  async getDrugs(
+  /** One where-clause for both readers of this list, paginated or not. */
+  private buildDrugWhere(
     organizationId: string,
     category?: string,
     search?: string,
-  ): Promise<PharmacyDrug[]> {
+  ): Record<string, unknown> {
     const where: Record<string, unknown> = { organizationId, isActive: true };
     if (category) {
       where.drugCategory = category;
@@ -55,17 +63,53 @@ export class PharmacyService {
         { drugCode: { contains: search, mode: 'insensitive' } },
       ];
     }
+    return where;
+  }
+
+  async getDrugs(
+    organizationId: string,
+    category?: string,
+    search?: string,
+  ): Promise<PharmacyDrug[]> {
+    const where = this.buildDrugWhere(organizationId, category, search);
 
     return this.pharmacyDrugRepository.findMany(where, {
       orderBy: { drugName: 'asc' },
-      include: {
-        batches: {
-          where: { status: 'active' },
-          orderBy: { expiryDate: 'asc' },
-          take: 1,
-        },
-      },
+      include: PharmacyService.DRUG_INCLUDE,
     });
+  }
+
+  private static readonly DRUG_INCLUDE = {
+    batches: {
+      where: { status: 'active' },
+      orderBy: { expiryDate: 'asc' },
+      take: 1,
+    },
+  };
+
+  async getDrugsPaginated(
+    organizationId: string,
+    options: {
+      category?: string;
+      search?: string;
+      page: number;
+      limit: number;
+    },
+  ): Promise<PaginatedResult<PharmacyDrug>> {
+    const { data, meta } = await this.pharmacyDrugRepository.paginate(
+      this.buildDrugWhere(organizationId, options.category, options.search),
+      {
+        page: options.page,
+        limit: options.limit,
+        orderBy: { drugName: 'asc' },
+        include: PharmacyService.DRUG_INCLUDE,
+      },
+    );
+
+    return {
+      data,
+      meta: buildPaginationMeta(meta.total, meta.page, meta.limit),
+    };
   }
 
   async getDrugById(id: string, organizationId: string): Promise<PharmacyDrug> {
@@ -135,35 +179,91 @@ export class PharmacyService {
   // PRESCRIPTIONS
   // =========================================================================
 
+  /** One where-clause for both readers of this list, paginated or not. */
+  private buildPrescriptionWhere(
+    organizationId: string,
+    filters: { status?: string; patientId?: string; search?: string },
+  ): Prisma.PrescriptionWhereInput {
+    const where: Prisma.PrescriptionWhereInput = { organizationId };
+    if (filters.status) {
+      where.status = filters.status;
+    }
+    if (filters.patientId) {
+      where.patientId = filters.patientId;
+    }
+    if (filters.search) {
+      where.patient = {
+        OR: [
+          { firstName: { contains: filters.search, mode: 'insensitive' } },
+          { lastName: { contains: filters.search, mode: 'insensitive' } },
+          { mrn: { contains: filters.search, mode: 'insensitive' } },
+        ],
+      };
+    }
+    return where;
+  }
+
+  private static readonly PRESCRIPTION_INCLUDE = {
+    patient: {
+      select: {
+        id: true,
+        mrn: true,
+        firstName: true,
+        lastName: true,
+        phonePrimary: true,
+      },
+    },
+    doctor: {
+      select: {
+        id: true,
+        fullName: true,
+      },
+    },
+  };
+
   async getPrescriptions(
     organizationId: string,
     status?: string,
+    patientId?: string,
+    search?: string,
   ): Promise<Prescription[]> {
-    const where: Record<string, unknown> = { organizationId };
-    if (status) {
-      where.status = status;
-    }
-
-    return this.prescriptionRepository.findMany(where, {
-      orderBy: { prescriptionDate: 'desc' },
-      include: {
-        patient: {
-          select: {
-            id: true,
-            mrn: true,
-            firstName: true,
-            lastName: true,
-            phonePrimary: true,
-          },
-        },
-        doctor: {
-          select: {
-            id: true,
-            fullName: true,
-          },
-        },
+    return this.prescriptionRepository.findMany(
+      this.buildPrescriptionWhere(organizationId, {
+        status,
+        patientId,
+        search,
+      }),
+      {
+        orderBy: { prescriptionDate: 'desc' },
+        include: PharmacyService.PRESCRIPTION_INCLUDE,
       },
-    });
+    );
+  }
+
+  async getPrescriptionsPaginated(
+    organizationId: string,
+    options: {
+      status?: string;
+      patientId?: string;
+      search?: string;
+      page: number;
+      limit: number;
+    },
+  ): Promise<PaginatedResult<Prescription>> {
+    const { data, meta } = await this.prescriptionRepository.paginate(
+      this.buildPrescriptionWhere(organizationId, options),
+      {
+        page: options.page,
+        limit: options.limit,
+        orderBy: { prescriptionDate: 'desc' },
+        include: PharmacyService.PRESCRIPTION_INCLUDE,
+      },
+    );
+
+    return {
+      data,
+      meta: buildPaginationMeta(meta.total, meta.page, meta.limit),
+    };
   }
 
   async getPrescriptionById(

@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsString,
   IsOptional,
+  IsIn,
   IsNumber,
   IsArray,
   ValidateNested,
@@ -9,6 +10,11 @@ import {
   IsNotEmpty,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { OptionalPaginationDto } from '../../../common/dto/optional-pagination.dto';
+import {
+  INVOICE_PAYMENT_STATUSES,
+  INVOICE_STATUSES,
+} from '../../../common/enums/clinical-status.enum';
 
 export class CreateInvoiceItemDto {
   @ApiProperty({ example: 'service' })
@@ -95,14 +101,16 @@ export class CreateInvoiceDto {
 }
 
 export class UpdateInvoiceDto {
-  @ApiPropertyOptional({ example: 'sent' })
+  @ApiPropertyOptional({ example: 'sent', enum: INVOICE_STATUSES })
   @IsOptional()
   @IsString()
+  @IsIn(INVOICE_STATUSES)
   status?: string;
 
-  @ApiPropertyOptional({ example: 'paid' })
+  @ApiPropertyOptional({ example: 'paid', enum: INVOICE_PAYMENT_STATUSES })
   @IsOptional()
   @IsString()
+  @IsIn(INVOICE_PAYMENT_STATUSES)
   paymentStatus?: string;
 
   @ApiPropertyOptional({ example: 'Patient requested bill revision.' })
@@ -114,4 +122,16 @@ export class UpdateInvoiceDto {
   @IsOptional()
   @IsString()
   cancellationReason?: string;
+}
+
+export class InvoiceListQueryDto extends OptionalPaginationDto {
+  @ApiPropertyOptional({ example: 'draft' })
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  @ApiPropertyOptional({ example: 'patient-cuid' })
+  @IsOptional()
+  @IsString()
+  patientId?: string;
 }

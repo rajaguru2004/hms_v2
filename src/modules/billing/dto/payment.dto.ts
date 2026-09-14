@@ -1,7 +1,10 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { OptionalPaginationDto } from '../../../common/dto/optional-pagination.dto';
+import { PAYMENT_METHODS } from '../../../common/enums/clinical-status.enum';
 import {
   IsString,
   IsOptional,
+  IsIn,
   IsNumber,
   Min,
   IsNotEmpty,
@@ -26,6 +29,7 @@ export class CreatePaymentDto {
   @ApiProperty({ example: 'cash' })
   @IsString()
   @IsNotEmpty()
+  @IsIn(PAYMENT_METHODS)
   paymentMethod: string;
 
   @ApiPropertyOptional({ example: 'TXN-998877' })
@@ -52,4 +56,11 @@ export class CreatePaymentDto {
   @IsOptional()
   @IsString()
   notes?: string;
+}
+
+export class PaymentListQueryDto extends OptionalPaginationDto {
+  @ApiPropertyOptional({ example: 'invoice-cuid' })
+  @IsOptional()
+  @IsString()
+  invoiceId?: string;
 }

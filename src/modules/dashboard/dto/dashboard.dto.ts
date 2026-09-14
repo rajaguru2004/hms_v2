@@ -26,6 +26,13 @@ export class DashboardStatsDto {
   occupiedBeds!: number;
 
   @ApiProperty({
+    description:
+      'Total beds in the organization, including reserved and maintenance. Not occupiedBeds + availableBeds.',
+    example: 100,
+  })
+  totalBeds!: number;
+
+  @ApiProperty({
     description: 'Available beds for admission count',
     example: 15,
   })

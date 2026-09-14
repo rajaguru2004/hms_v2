@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsString,
   IsOptional,
+  IsIn,
   IsNumber,
   IsNotEmpty,
   Min,
@@ -9,6 +10,8 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { OptionalPaginationDto } from '../../../common/dto/optional-pagination.dto';
+import { PRESCRIPTION_STATUSES } from '../../../common/enums/clinical-status.enum';
 
 export class PrescriptionItemDto {
   @ApiProperty({ example: 'drug-id' })
@@ -76,9 +79,10 @@ export class CreatePrescriptionDto {
 }
 
 export class UpdatePrescriptionDto {
-  @ApiPropertyOptional({ example: 'pending' })
+  @ApiPropertyOptional({ example: 'pending', enum: PRESCRIPTION_STATUSES })
   @IsOptional()
   @IsString()
+  @IsIn(PRESCRIPTION_STATUSES)
   status?: string;
 
   @ApiPropertyOptional({ example: 'Updated notes' })
@@ -142,4 +146,20 @@ export class PrescriptionResponseDto {
 
   @ApiProperty()
   updatedAt: Date;
+}
+
+export class PrescriptionListQueryDto extends OptionalPaginationDto {
+  @ApiPropertyOptional({ example: 'pending' })
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Restrict prescriptions to one patient, for the mobile patient hub.',
+    example: 'patient-cuid',
+  })
+  @IsOptional()
+  @IsString()
+  patientId?: string;
 }

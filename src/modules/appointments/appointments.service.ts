@@ -165,6 +165,18 @@ export class AppointmentsService {
       where.patientId = query.patientId;
     }
 
+    if (query.search) {
+      // Same shape as LaboratoryService.getOrders: one nested patient OR, so
+      // the mobile app's single search box reaches name and MRN alike.
+      where.patient = {
+        OR: [
+          { firstName: { contains: query.search, mode: 'insensitive' } },
+          { lastName: { contains: query.search, mode: 'insensitive' } },
+          { mrn: { contains: query.search, mode: 'insensitive' } },
+        ],
+      };
+    }
+
     return this.appointmentRepository.paginate(where, {
       page: query.page,
       limit: query.limit,

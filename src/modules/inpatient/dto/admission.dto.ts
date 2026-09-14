@@ -4,7 +4,13 @@ import {
   IsNotEmpty,
   IsOptional,
   IsDateString,
+  IsIn,
 } from 'class-validator';
+import { OptionalPaginationDto } from '../../../common/dto/optional-pagination.dto';
+import {
+  ADMISSION_STATUSES,
+  ADMISSION_TYPES,
+} from '../../../common/enums/clinical-status.enum';
 
 export class CreateAdmissionDto {
   @ApiProperty({ example: 'patient-cuid' })
@@ -17,9 +23,10 @@ export class CreateAdmissionDto {
   @IsOptional()
   bedId?: string;
 
-  @ApiPropertyOptional({ example: 'emergency' })
+  @ApiPropertyOptional({ example: 'emergency', enum: ADMISSION_TYPES })
   @IsString()
   @IsOptional()
+  @IsIn(ADMISSION_TYPES)
   admissionType?: string;
 
   @ApiPropertyOptional({ example: 'Severe pneumonia' })
@@ -49,9 +56,10 @@ export class UpdateAdmissionDto {
   @IsOptional()
   bedId?: string;
 
-  @ApiPropertyOptional({ example: 'emergency' })
+  @ApiPropertyOptional({ example: 'emergency', enum: ADMISSION_TYPES })
   @IsString()
   @IsOptional()
+  @IsIn(ADMISSION_TYPES)
   admissionType?: string;
 
   @ApiPropertyOptional({ example: 'Severe pneumonia' })
@@ -69,9 +77,10 @@ export class UpdateAdmissionDto {
   @IsOptional()
   attendingDoctorId?: string;
 
-  @ApiPropertyOptional({ example: 'discharged' })
+  @ApiPropertyOptional({ example: 'discharged', enum: ADMISSION_STATUSES })
   @IsString()
   @IsOptional()
+  @IsIn(ADMISSION_STATUSES)
   status?: string;
 
   @ApiPropertyOptional()
@@ -159,4 +168,15 @@ export class AdmissionResponseDto {
 
   @ApiProperty()
   updatedAt: Date;
+}
+
+export class AdmissionListQueryDto extends OptionalPaginationDto {
+  @ApiPropertyOptional({
+    description:
+      'Filter by admission status. "all" is accepted as "no filter".',
+    example: 'admitted',
+  })
+  @IsOptional()
+  @IsString()
+  status?: string;
 }

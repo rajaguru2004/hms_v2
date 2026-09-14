@@ -34,4 +34,13 @@ export class AppointmentQueryDto extends PaginationDto {
   @IsOptional()
   @IsString()
   patientId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "Case-insensitive match across the patient's first name, last name and MRN.",
+    example: 'abebe',
+  })
+  @IsOptional()
+  @IsString()
+  search?: string;
 }

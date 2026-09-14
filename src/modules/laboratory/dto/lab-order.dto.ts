@@ -5,8 +5,13 @@ import {
   IsNotEmpty,
   IsArray,
   ValidateNested,
+  IsIn,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import {
+  LAB_ORDER_PRIORITIES,
+  LAB_ORDER_STATUSES,
+} from '../../../common/enums/clinical-status.enum';
 
 export class OrderTestItemDto {
   @ApiProperty({ example: 'test-id' })
@@ -52,9 +57,14 @@ export class CreateLabOrderDto {
   @IsString()
   provisionalDiagnosis?: string;
 
-  @ApiPropertyOptional({ example: 'routine', default: 'routine' })
+  @ApiPropertyOptional({
+    example: 'routine',
+    default: 'routine',
+    enum: LAB_ORDER_PRIORITIES,
+  })
   @IsOptional()
   @IsString()
+  @IsIn(LAB_ORDER_PRIORITIES)
   priority?: string;
 
   @ApiPropertyOptional({ example: 'Patient has history of fatigue' })
@@ -64,14 +74,19 @@ export class CreateLabOrderDto {
 }
 
 export class UpdateLabOrderDto {
-  @ApiPropertyOptional({ example: 'sample_collected' })
+  @ApiPropertyOptional({
+    example: 'sample_collected',
+    enum: LAB_ORDER_STATUSES,
+  })
   @IsOptional()
   @IsString()
+  @IsIn(LAB_ORDER_STATUSES)
   status?: string;
 
-  @ApiPropertyOptional({ example: 'urgent' })
+  @ApiPropertyOptional({ example: 'urgent', enum: LAB_ORDER_PRIORITIES })
   @IsOptional()
   @IsString()
+  @IsIn(LAB_ORDER_PRIORITIES)
   priority?: string;
 
   @ApiPropertyOptional({ example: '2024-01-01T10:00:00.000Z' })

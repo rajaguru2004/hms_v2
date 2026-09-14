@@ -1,7 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  PAYMENT_METHODS,
+  PAYMENT_STATUSES,
+  PRESCRIPTION_STATUSES,
+} from '../../../common/enums/clinical-status.enum';
+import {
   IsString,
   IsOptional,
+  IsIn,
   IsNumber,
   IsNotEmpty,
   Min,
@@ -37,6 +43,15 @@ export class PharmacyQueryDto {
   @IsOptional()
   @IsString()
   date?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Restrict prescriptions to one patient, for the mobile patient hub.',
+    example: 'patient-cuid',
+  })
+  @IsOptional()
+  @IsString()
+  patientId?: string;
 }
 
 export class PharmacyPostCompatDto {
@@ -172,14 +187,16 @@ export class PharmacyPostCompatDto {
   @IsString()
   prescriptionId?: string;
 
-  @ApiPropertyOptional({ example: 'cash' })
+  @ApiPropertyOptional({ example: 'cash', enum: PAYMENT_METHODS })
   @IsOptional()
   @IsString()
+  @IsIn(PAYMENT_METHODS)
   paymentMethod?: string;
 
-  @ApiPropertyOptional({ example: 'paid' })
+  @ApiPropertyOptional({ example: 'paid', enum: PAYMENT_STATUSES })
   @IsOptional()
   @IsString()
+  @IsIn(PAYMENT_STATUSES)
   paymentStatus?: string;
 }
 
@@ -210,9 +227,13 @@ export class PharmacyPatchCompatDto {
   @IsNumber()
   sellingPrice?: number;
 
-  @ApiPropertyOptional({ example: 'completed' })
+  @ApiPropertyOptional({
+    example: 'fully_dispensed',
+    enum: PRESCRIPTION_STATUSES,
+  })
   @IsOptional()
   @IsString()
+  @IsIn(PRESCRIPTION_STATUSES)
   status?: string;
 
   @ApiPropertyOptional({ example: 'Some prescription updates' })

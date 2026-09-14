@@ -11,6 +11,7 @@ import { CreateLabResultDto, UpdateLabResultDto } from './dto/lab-result.dto';
 import { NotFoundException } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/exceptions/error-codes';
 import { PrismaService } from '../../prisma/prisma.service';
+import { PaginatedResult } from '../../common/types/paginated.type';
 
 @Injectable()
 export class LaboratoryService {
@@ -42,8 +43,11 @@ export class LaboratoryService {
     });
   }
 
-  async getTestById(id: string): Promise<LabTest> {
-    const test = await this.labTestRepository.findById(id);
+  async getTestById(id: string, organizationId: string): Promise<LabTest> {
+    // Scoped by organisation, not just id: these ids are opaque but guessable
+    // enough that "GET /laboratory/tests/:id" was a cross-hospital read of
+    // another site's catalogue, and for results below, of their patients.
+    const test = await this.labTestRepository.findOne({ id, organizationId });
     if (!test) {
       throw new NotFoundException(
         `Lab test with ID ${id} not found`,
@@ -83,7 +87,7 @@ export class LaboratoryService {
     organizationId: string,
     userId: string,
   ): Promise<LabTest> {
-    const oldTest = await this.getTestById(id);
+    const oldTest = await this.getTestById(id, organizationId);
 
     const test = await this.labTestRepository.update(id, {
       ...dto,
@@ -107,7 +111,7 @@ export class LaboratoryService {
     organizationId: string,
     userId: string,
   ): Promise<LabTest> {
-    const oldTest = await this.getTestById(id);
+    const oldTest = await this.getTestById(id, organizationId);
 
     const test = await this.labTestRepository.update(id, {
       isActive: false,
@@ -134,7 +138,8 @@ export class LaboratoryService {
     search?: string,
     page: number = 1,
     limit: number = 10,
-  ): Promise<{ data: LabOrder[]; meta: any }> {
+    patientId?: string,
+  ): Promise<PaginatedResult<LabOrder>> {
     const where: Prisma.LabOrderWhereInput = { organizationId };
 
     if (status) {
@@ -142,6 +147,9 @@ export class LaboratoryService {
     }
     if (priority) {
       where.priority = priority;
+    }
+    if (patientId) {
+      where.patientId = patientId;
     }
     if (search) {
       where.OR = [
@@ -184,8 +192,8 @@ export class LaboratoryService {
     });
   }
 
-  async getOrderById(id: string): Promise<LabOrder> {
-    const order = await this.labOrderRepository.findById(id);
+  async getOrderById(id: string, organizationId: string): Promise<LabOrder> {
+    const order = await this.labOrderRepository.findOne({ id, organizationId });
     if (!order) {
       throw new NotFoundException(
         `Lab order with ID ${id} not found`,
@@ -248,7 +256,7 @@ export class LaboratoryService {
     organizationId: string,
     userId: string,
   ): Promise<LabOrder> {
-    const oldOrder = await this.getOrderById(id);
+    const oldOrder = await this.getOrderById(id, organizationId);
 
     const updates: Record<string, unknown> = { ...dto };
 
@@ -302,8 +310,15 @@ export class LaboratoryService {
   }
 
   // ── Results ──────────────────────────────────────────────────────────────
-  async getResults(orderId?: string): Promise<LabResult[]> {
-    const where: Record<string, unknown> = {};
+  async getResults(
+    organizationId: string,
+    orderId?: string,
+  ): Promise<LabResult[]> {
+    // Scoped through the order, never through `LabResult.organizationId`: that
+    // column is nullable, so rows written before it existed carry NULL and
+    // filtering on it directly drops real results from their own hospital's
+    // list while leaking nothing back. The order's column is NOT NULL.
+    const where: Record<string, unknown> = { order: { organizationId } };
     if (orderId) {
       where.orderId = orderId;
     }
@@ -320,8 +335,11 @@ export class LaboratoryService {
     });
   }
 
-  async getResultById(id: string): Promise<LabResult> {
-    const result = await this.labResultRepository.findById(id);
+  async getResultById(id: string, organizationId: string): Promise<LabResult> {
+    const result = await this.labResultRepository.findOne({
+      id,
+      order: { organizationId },
+    });
     if (!result) {
       throw new NotFoundException(
         `Lab result with ID ${id} not found`,
@@ -387,7 +405,7 @@ export class LaboratoryService {
     organizationId: string,
     userId: string,
   ): Promise<LabResult> {
-    const oldResult = await this.getResultById(id);
+    const oldResult = await this.getResultById(id, organizationId);
 
     const updates: Record<string, unknown> = { ...dto };
 

@@ -7,7 +7,6 @@ import {
   Param,
   Query,
   UseGuards,
-  Req,
   BadRequestException,
 } from '@nestjs/common';
 import {
@@ -17,7 +16,6 @@ import {
   ApiParam,
   ApiResponse,
 } from '@nestjs/swagger';
-import { Request } from 'express';
 import { PharmacyService } from './pharmacy.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -25,6 +23,9 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { Permission } from '../../common/enums/permission.enum';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
+import { resolveOrganizationId } from '../../common/utils/tenant.util';
+import { PaginatedResult } from '../../common/types/paginated.type';
+import { PharmacyDrug, Prescription } from '@prisma/client';
 import {
   PharmacyQueryDto,
   PharmacyPostCompatDto,
@@ -34,12 +35,14 @@ import {
   CreatePharmacyDrugDto,
   UpdatePharmacyDrugDto,
   PharmacyDrugResponseDto,
+  DrugListQueryDto,
 } from './dto/pharmacy-drug.dto';
 import {
   CreatePrescriptionDto,
   UpdatePrescriptionDto,
   PrescriptionResponseDto,
   PrescriptionItemDto,
+  PrescriptionListQueryDto,
 } from './dto/prescription.dto';
 import {
   CreatePharmacySaleDto,
@@ -68,7 +71,6 @@ export class PharmacyController {
   async compatibilityGet(
     @Query() query: PharmacyQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     const resource = query.resource || 'drugs';
     let resultData: unknown;
@@ -83,6 +85,7 @@ export class PharmacyController {
       resultData = await this.pharmacyService.getPrescriptions(
         currentUser.organizationId,
         query.status,
+        query.patientId,
       );
     } else if (resource === 'sales') {
       resultData = await this.pharmacyService.getSales(
@@ -97,12 +100,7 @@ export class PharmacyController {
       throw new BadRequestException('Invalid resource specified');
     }
 
-    return {
-      success: true,
-      data: resultData,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return resultData;
   }
 
   @Post()
@@ -114,7 +112,6 @@ export class PharmacyController {
   async compatibilityPost(
     @Body() dto: PharmacyPostCompatDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     const resource = dto.resource || 'drug';
 
@@ -143,13 +140,7 @@ export class PharmacyController {
         },
         currentUser.id,
       );
-      return {
-        success: true,
-        data: drug,
-        message: 'Drug added successfully',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
+      return drug;
     }
 
     if (resource === 'prescription') {
@@ -174,13 +165,7 @@ export class PharmacyController {
         },
         currentUser.id,
       );
-      return {
-        success: true,
-        data: prescription,
-        message: 'Prescription created',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
+      return prescription;
     }
 
     if (resource === 'sale') {
@@ -200,13 +185,7 @@ export class PharmacyController {
         },
         currentUser.id,
       );
-      return {
-        success: true,
-        data: sale,
-        message: 'Sale completed',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
+      return sale;
     }
 
     throw new BadRequestException('Invalid resource specified');
@@ -221,7 +200,6 @@ export class PharmacyController {
   async compatibilityPatch(
     @Body() dto: PharmacyPatchCompatDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     let updated: unknown;
 
@@ -250,12 +228,7 @@ export class PharmacyController {
       throw new BadRequestException('Invalid resource specified');
     }
 
-    return {
-      success: true,
-      data: updated,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return updated;
   }
 
   // =========================================================================
@@ -264,17 +237,31 @@ export class PharmacyController {
 
   @Get('drugs')
   @Permissions(Permission.PHARMACY_READ)
-  @ApiOperation({ summary: 'Get active drugs catalog' })
+  @ApiOperation({
+    summary: 'Get active drugs catalog',
+    description:
+      'Returns a bare array. Send "page" to receive {data, meta} instead.',
+  })
   @ApiResponse({ status: 200, type: [PharmacyDrugResponseDto] })
   async getDrugs(
-    @Query('category') category: string,
-    @Query('search') search: string,
+    @Query() query: DrugListQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-  ) {
+  ): Promise<PharmacyDrug[] | PaginatedResult<PharmacyDrug>> {
+    const organizationId = resolveOrganizationId(currentUser);
+
+    if (query.isPaged) {
+      return this.pharmacyService.getDrugsPaginated(organizationId, {
+        category: query.category,
+        search: query.search,
+        page: query.pageNumber,
+        limit: query.pageSize,
+      });
+    }
+
     return this.pharmacyService.getDrugs(
-      currentUser.organizationId,
-      category,
-      search,
+      organizationId,
+      query.category,
+      query.search,
     );
   }
 
@@ -313,15 +300,33 @@ export class PharmacyController {
 
   @Get('prescriptions')
   @Permissions(Permission.PHARMACY_READ)
-  @ApiOperation({ summary: 'Get prescriptions' })
+  @ApiOperation({
+    summary: 'Get prescriptions',
+    description:
+      'Returns a bare array. Send "page" to receive {data, meta} instead.',
+  })
   @ApiResponse({ status: 200, type: [PrescriptionResponseDto] })
   async getPrescriptions(
-    @Query('status') status: string,
+    @Query() query: PrescriptionListQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-  ) {
+  ): Promise<Prescription[] | PaginatedResult<Prescription>> {
+    const organizationId = resolveOrganizationId(currentUser);
+
+    if (query.isPaged) {
+      return this.pharmacyService.getPrescriptionsPaginated(organizationId, {
+        status: query.status,
+        patientId: query.patientId,
+        search: query.search,
+        page: query.pageNumber,
+        limit: query.pageSize,
+      });
+    }
+
     return this.pharmacyService.getPrescriptions(
-      currentUser.organizationId,
-      status,
+      organizationId,
+      query.status,
+      query.patientId,
+      query.search,
     );
   }
 

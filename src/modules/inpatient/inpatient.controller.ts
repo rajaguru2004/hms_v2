@@ -7,7 +7,6 @@ import {
   Param,
   Query,
   UseGuards,
-  Req,
   BadRequestException,
 } from '@nestjs/common';
 import {
@@ -17,7 +16,6 @@ import {
   ApiParam,
   ApiResponse,
 } from '@nestjs/swagger';
-import { Request } from 'express';
 import { InpatientService, InpatientStats } from './inpatient.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -25,6 +23,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { Permission } from '../../common/enums/permission.enum';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
+import { resolveOrganizationId } from '../../common/utils/tenant.util';
 import {
   InpatientQueryDto,
   InpatientPostCompatDto,
@@ -33,10 +32,13 @@ import {
 import { CreateWardDto, UpdateWardDto, WardResponseDto } from './dto/ward.dto';
 import { CreateBedDto, UpdateBedDto, BedResponseDto } from './dto/bed.dto';
 import {
+  AdmissionListQueryDto,
   CreateAdmissionDto,
   UpdateAdmissionDto,
   AdmissionResponseDto,
 } from './dto/admission.dto';
+import { PaginatedResult } from '../../common/types/paginated.type';
+import { Admission } from '@prisma/client';
 
 @ApiTags('Inpatient')
 @ApiBearerAuth()
@@ -59,7 +61,6 @@ export class InpatientController {
   async compatibilityGet(
     @Query() query: InpatientQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     const resource = query.resource || 'wards';
     let resultData: unknown;
@@ -87,12 +88,7 @@ export class InpatientController {
       throw new BadRequestException('Invalid resource specified');
     }
 
-    return {
-      success: true,
-      data: resultData,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return resultData;
   }
 
   @Post()
@@ -104,7 +100,6 @@ export class InpatientController {
   async compatibilityPost(
     @Body() dto: InpatientPostCompatDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     const resource = dto.resource || 'ward';
 
@@ -123,13 +118,7 @@ export class InpatientController {
         currentUser.organizationId,
         currentUser.id,
       );
-      return {
-        success: true,
-        data: ward,
-        message: 'Ward created successfully',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
+      return ward;
     }
 
     if (resource === 'bed') {
@@ -148,13 +137,7 @@ export class InpatientController {
         currentUser.organizationId,
         currentUser.id,
       );
-      return {
-        success: true,
-        data: bed,
-        message: 'Bed created successfully',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
+      return bed;
     }
 
     if (resource === 'admission') {
@@ -175,13 +158,7 @@ export class InpatientController {
         currentUser.organizationId,
         currentUser.id,
       );
-      return {
-        success: true,
-        data: admission,
-        message: 'Patient admitted successfully',
-        timestamp: new Date().toISOString(),
-        path: req.originalUrl || req.url,
-      };
+      return admission;
     }
 
     throw new BadRequestException('Invalid resource specified');
@@ -196,7 +173,6 @@ export class InpatientController {
   async compatibilityPatch(
     @Body() dto: InpatientPatchCompatDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-    @Req() req: Request,
   ) {
     let updated: unknown;
 
@@ -252,12 +228,7 @@ export class InpatientController {
       throw new BadRequestException('Invalid resource specified');
     }
 
-    return {
-      success: true,
-      data: updated,
-      timestamp: new Date().toISOString(),
-      path: req.originalUrl || req.url,
-    };
+    return updated;
   }
 
   // =========================================================================
@@ -356,15 +327,31 @@ export class InpatientController {
 
   @Get('admissions')
   @Permissions(Permission.INPATIENT_READ)
-  @ApiOperation({ summary: 'Get patient admissions' })
+  @ApiOperation({
+    summary: 'Get patient admissions',
+    description:
+      'Returns a bare array. Send "page" to receive {data, meta} instead.',
+  })
   @ApiResponse({ status: 200, type: [AdmissionResponseDto] })
   async getAdmissions(
-    @Query('status') status: string,
+    @Query() query: AdmissionListQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
-  ) {
+  ): Promise<Admission[] | PaginatedResult<Admission>> {
+    const organizationId = resolveOrganizationId(currentUser);
+
+    if (query.isPaged) {
+      return this.inpatientService.getAdmissionsPaginated(organizationId, {
+        status: query.status,
+        search: query.search,
+        page: query.pageNumber,
+        limit: query.pageSize,
+      });
+    }
+
     return this.inpatientService.getAdmissions(
-      currentUser.organizationId,
-      status,
+      organizationId,
+      query.status,
+      query.search,
     );
   }
 

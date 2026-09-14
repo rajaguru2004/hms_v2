@@ -1,5 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsOptional, IsBoolean, IsNotEmpty } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  IsBoolean,
+  IsNotEmpty,
+  IsIn,
+} from 'class-validator';
+import { LAB_RESULT_FLAGS } from '../../../common/enums/clinical-status.enum';
 
 export class CreateLabResultDto {
   @ApiProperty({ example: 'order-cuid' })
@@ -32,9 +39,10 @@ export class CreateLabResultDto {
   @IsBoolean()
   isCritical?: boolean;
 
-  @ApiPropertyOptional({ example: 'N' })
+  @ApiPropertyOptional({ example: 'N', enum: LAB_RESULT_FLAGS })
   @IsOptional()
   @IsString()
+  @IsIn(LAB_RESULT_FLAGS)
   flag?: string;
 
   @ApiPropertyOptional({ example: 'Normal CBC result' })
@@ -64,9 +72,10 @@ export class UpdateLabResultDto {
   @IsBoolean()
   isCritical?: boolean;
 
-  @ApiPropertyOptional({ example: 'N' })
+  @ApiPropertyOptional({ example: 'N', enum: LAB_RESULT_FLAGS })
   @IsOptional()
   @IsString()
+  @IsIn(LAB_RESULT_FLAGS)
   flag?: string;
 
   @ApiPropertyOptional({ example: 'Normal CBC result' })

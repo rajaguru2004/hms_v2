@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { OptionalPaginationDto } from '../../../common/dto/optional-pagination.dto';
 import {
   IsString,
   IsOptional,
@@ -235,4 +236,11 @@ export class PharmacyDrugResponseDto {
 
   @ApiProperty()
   updatedAt: Date;
+}
+
+export class DrugListQueryDto extends OptionalPaginationDto {
+  @ApiPropertyOptional({ example: 'antibiotic' })
+  @IsOptional()
+  @IsString()
+  category?: string;
 }

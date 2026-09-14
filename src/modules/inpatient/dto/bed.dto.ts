@@ -1,5 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNotEmpty, IsOptional } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsIn } from 'class-validator';
+import {
+  BED_STATUSES,
+  BED_TYPES,
+} from '../../../common/enums/clinical-status.enum';
 
 export class CreateBedDto {
   @ApiProperty({ example: 'ward-cuid' })
@@ -12,14 +16,20 @@ export class CreateBedDto {
   @IsNotEmpty()
   bedNumber: string;
 
-  @ApiPropertyOptional({ example: 'standard' })
+  @ApiPropertyOptional({ example: 'standard', enum: BED_TYPES })
   @IsString()
   @IsOptional()
+  @IsIn(BED_TYPES)
   type?: string;
 
-  @ApiPropertyOptional({ example: 'available', default: 'available' })
+  @ApiPropertyOptional({
+    example: 'available',
+    default: 'available',
+    enum: BED_STATUSES,
+  })
   @IsString()
   @IsOptional()
+  @IsIn(BED_STATUSES)
   status?: string;
 }
 
@@ -34,14 +44,16 @@ export class UpdateBedDto {
   @IsOptional()
   bedNumber?: string;
 
-  @ApiPropertyOptional({ example: 'standard' })
+  @ApiPropertyOptional({ example: 'standard', enum: BED_TYPES })
   @IsString()
   @IsOptional()
+  @IsIn(BED_TYPES)
   type?: string;
 
-  @ApiPropertyOptional({ example: 'occupied' })
+  @ApiPropertyOptional({ example: 'occupied', enum: BED_STATUSES })
   @IsString()
   @IsOptional()
+  @IsIn(BED_STATUSES)
   status?: string;
 
   @ApiPropertyOptional({ example: 'patient-cuid' })
