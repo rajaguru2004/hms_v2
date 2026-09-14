@@ -71,6 +71,13 @@ export interface RenderedItem {
   readonly confidence?: number;
   readonly verification?: VerificationStatus;
   readonly documentId?: string;
+  /**
+   * The fact this item was rendered from, so a correction can name it.
+   *
+   * Absent for an outstanding question — there is no row yet to supersede, and
+   * correcting something nobody has said is answering it.
+   */
+  readonly factId?: string;
   /** True when this question still applies and has not been answered (§36). */
   readonly outstanding: boolean;
 }
@@ -139,6 +146,7 @@ export function renderItem(
       confidence: reading.provenance.confidence,
       verification: reading.provenance.verification,
       documentId: reading.provenance.documentId,
+      factId: reading.provenance.factId,
       outstanding: false,
     };
   }
@@ -153,6 +161,7 @@ export function renderItem(
     confidence: reading.provenance?.confidence,
     verification: reading.provenance?.verification,
     documentId: reading.provenance?.documentId,
+    factId: reading.provenance?.factId,
     outstanding: options?.outstanding ?? reading.presence === 'not_assessed',
   };
 }

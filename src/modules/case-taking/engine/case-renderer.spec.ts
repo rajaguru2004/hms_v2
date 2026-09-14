@@ -154,6 +154,28 @@ describe('provenance travels with the value', () => {
     expect(item.verification).toBeUndefined();
   });
 
+  /**
+   * A review without fact ids is a page of statements with no handle on any of
+   * them: the client can read "Amlodipine 5 mg" and has no way to name the row
+   * when the patient says it is 10. The mobile client had to route a first
+   * correction through a turn to discover an id, which is a hop that exists
+   * only because this field was missing.
+   */
+  it('carries the id of the fact it rendered, so a correction can name it', () => {
+    const field = findField(createClinicalState(), 'chief_complaint.symptom')!;
+    const item = renderItem(
+      field,
+      recorded('chest pain', { ...fromReport, factId: 'fact-123' }),
+    );
+    expect(item.factId).toBe('fact-123');
+  });
+
+  it('carries no fact id for an outstanding question', () => {
+    // There is no row to supersede. Correcting something nobody has said is
+    // answering it, which is a turn, not a correction.
+    expect(renderItem(allergyField, NOT_ASSESSED).factId).toBeUndefined();
+  });
+
   it('shows low confidence in the text output for §31 verification', () => {
     const text = renderCaseText(
       renderCase(

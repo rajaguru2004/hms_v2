@@ -220,6 +220,7 @@ function provenanceFromRow(row: CaseFact): FactProvenance {
       : {}),
     recordedAt: row.createdAt.toISOString(),
     ...(row.sourceRef ? { note: `turn:${row.sourceRef}` } : {}),
+    factId: row.id,
   };
 }
 

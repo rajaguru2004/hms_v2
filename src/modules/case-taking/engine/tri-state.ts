@@ -133,6 +133,17 @@ export interface FactProvenance {
   readonly documentId?: string;
   readonly page?: number;
   readonly note?: string;
+  /**
+   * The row that asserted this, when the fact came out of storage.
+   *
+   * Provenance rather than plumbing: "which record makes this claim" is the
+   * same kind of question as "who said it" and "which document it came from".
+   * The engine never reads it — nothing here may behave differently because a
+   * fact has been persisted — but a reader who wants to correct one value needs
+   * to be able to name it, and a review rendered without it is a page of
+   * statements with no handle on any of them.
+   */
+  readonly factId?: string;
 }
 
 /** The only shape that carries a value. */
