@@ -200,13 +200,23 @@ export class UserService {
   }
 
   /**
-   * List users with pagination.
+   * List users with pagination, scoped to one organisation.
+   *
+   * The scope is not optional. This route had no `where` clause at all, so an
+   * administrator of one hospital paging the staff directory was handed every
+   * other hospital's staff — names, emails, phone numbers and employee ids —
+   * by a route their own role legitimately grants them.
+   *
+   * `organizationId` comes from the caller's token via `resolveOrganizationId`,
+   * which is the only way a cross-tenant read can be asked for and the only
+   * account that may ask is a SUPER_ADMIN naming the organisation explicitly.
    */
   async findAll(
     pagination: PaginationDto,
+    organizationId?: string,
   ): Promise<PaginatedResult<Omit<User, 'password'>>> {
     const result = await this.userRepository.paginate(
-      {},
+      organizationId ? { organizationId } : {},
       {
         page: pagination.page,
         limit: pagination.take,

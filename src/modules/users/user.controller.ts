@@ -82,8 +82,14 @@ export class UserController {
   @Roles(SystemRole.SUPER_ADMIN, SystemRole.ADMIN)
   @Permissions(Permission.USER_READ)
   @ApiOperation({ summary: 'List all users with pagination' })
-  async findAll(@Query() pagination: PaginationDto) {
-    return this.userService.findAll(pagination);
+  async findAll(
+    @Query() pagination: PaginationDto,
+    @CurrentUser() currentUser?: AuthenticatedUser,
+  ) {
+    return this.userService.findAll(
+      pagination,
+      resolveOrganizationId(currentUser),
+    );
   }
 
   @Get(':id')
