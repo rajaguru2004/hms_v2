@@ -15,7 +15,7 @@ export class AppointmentRepository extends BaseRepository<
 
   override async softDelete(
     id: string,
-    deletedBy?: string,
+    _deletedBy?: string,
   ): Promise<Appointment> {
     return this.prisma.appointment.update({
       where: { id },

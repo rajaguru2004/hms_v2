@@ -62,5 +62,9 @@ def speak(text: str, language: str = "en") -> bytes:
     voice = _get_voice(language)
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
-        voice.synthesize(text, wav)
+        # `synthesize_wav`, not `synthesize`: the latter is a per-sentence chunk
+        # generator and leaves the WAV header unwritten, which surfaces later as
+        # `wave.Error: # channels not specified` rather than as a bad call.
+        # `set_wav_format` lets the voice declare its own rate and width.
+        voice.synthesize_wav(text, wav, set_wav_format=True)
     return buffer.getvalue()

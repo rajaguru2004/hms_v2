@@ -1,3 +1,8 @@
+// Jest mocks here are deliberate partial doubles, cast rather than built whole:
+// a test that constructs a complete Patient and User to prove an appointment
+// is refused says less about the refusal and more about the constructor.
+/* eslint-disable @typescript-eslint/unbound-method */
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
 import { Test, TestingModule } from '@nestjs/testing';
 import { AppointmentsService } from './appointments.service';
 import { AppointmentRepository } from './appointments.repository';
@@ -234,12 +239,7 @@ describe('AppointmentsService', () => {
         checkedInAt: new Date(),
       });
 
-      const result = await service.update(
-        'appt-1',
-        updateDto,
-        'org-1',
-        'user-1',
-      );
+      await service.update('appt-1', updateDto, 'org-1', 'user-1');
 
       expect(repository.findOne).toHaveBeenCalled();
       expect(repository.update).toHaveBeenCalled();

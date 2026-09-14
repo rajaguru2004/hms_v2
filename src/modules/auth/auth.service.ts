@@ -311,6 +311,43 @@ export class AuthService {
   }
 
   /**
+   * Issue a token pair for a user whose credentials were proven some other way.
+   *
+   * Patient portal activation is the one such path: the caller proved who they
+   * are with a claim token rather than a password, and is then signed in on the
+   * spot. It goes through here rather than building its own payload so a portal
+   * session is the *same* session a staff login produces — same claims, same
+   * refresh row, same rotation — and so `patientId` is resolved by the one
+   * method that resolves it.
+   */
+  async issueTokensForUser(
+    userId: string,
+    ipAddress?: string,
+    userAgent?: string,
+  ): Promise<TokenResponseDto> {
+    const user = await this.userRepository.findById(userId);
+
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException(
+        'Your account no longer exists.',
+        ErrorCodes.INVALID_CREDENTIALS,
+      );
+    }
+
+    const { roles, permissions } = await this.loadRolesAndPermissions(userId);
+
+    return this.generateTokenPair(
+      user.id,
+      user.email,
+      roles,
+      permissions,
+      user.organizationId,
+      ipAddress,
+      userAgent,
+    );
+  }
+
+  /**
    * Generate access + refresh token pair.
    * Stores hashed refresh token in DB.
    */
@@ -323,6 +360,17 @@ export class AuthService {
     ipAddress?: string,
     userAgent?: string,
   ): Promise<TokenResponseDto> {
+    // Resolved here rather than at the call sites, for the same reason
+    // `loadRolesAndPermissions` is: login and refresh must not be able to
+    // disagree. A token minted at sign-in that carries `patientId` and one
+    // minted an hour later that does not would log the patient out of their own
+    // record halfway through a session, and the guard would report it as a
+    // permissions problem.
+    const patientRecord = await this.prisma.patient.findUnique({
+      where: { userId },
+      select: { id: true },
+    });
+
     const accessPayload: JwtPayload = {
       sub: userId,
       email,
@@ -330,6 +378,7 @@ export class AuthService {
       permissions,
       organizationId,
       type: 'access',
+      ...(patientRecord && { patientId: patientRecord.id }),
     };
 
     const accessToken = this.jwtService.sign(accessPayload, {

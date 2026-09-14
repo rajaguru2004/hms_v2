@@ -44,10 +44,20 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       );
     }
 
+    // Taken from the signed payload rather than re-read per request: it is
+    // resolved once in `AuthService.generateTokenPair`, and a patient's link to
+    // their record does not change during the fifteen minutes a token lives.
+    const { patientId } = payload;
+
     const cacheKey = AppCacheService.buildKey('auth:user', payload.sub);
     const cachedUser = await this.cacheService.get<AuthenticatedUser>(cacheKey);
     if (cachedUser) {
-      return cachedUser;
+      // The cached entry may predate the patient link — it is keyed by user id
+      // and lives for five minutes, so an account that claimed its record in
+      // that window would be served an `AuthenticatedUser` with no `patientId`
+      // and then refused by `PatientSelfGuard` on its own data. The token is
+      // signed, so preferring its claim over a stale blank is safe.
+      return { ...cachedUser, patientId: cachedUser.patientId ?? patientId };
     }
 
     const user = await this.userRepository.findByIdWithRolesAndPermissions(
@@ -77,6 +87,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       roles,
       permissions,
       organizationId: user.organizationId,
+      patientId,
     };
 
     // Cache authenticated user details for 5 minutes (300s)

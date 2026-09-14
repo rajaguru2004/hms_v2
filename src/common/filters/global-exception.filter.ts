@@ -94,7 +94,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
 
     // Log all non-500s at warn, 500s at error
     const logMeta = { correlationId, path: request.url, status };
-    if (status >= 500) {
+    if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
       this.logger.error(`[${status}] ${message}`, logMeta);
     } else {
       this.logger.warn(`[${status}] ${message}`, logMeta);

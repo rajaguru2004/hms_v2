@@ -388,6 +388,45 @@ async function main(): Promise<void> {
       action: 'update',
       description: 'Update system settings',
     },
+    // Patient portal. `resource` becomes the permission's category, which is
+    // what `/auth/me/access` keys its module map by — so these strings are the
+    // names the portal client reads its own capabilities under.
+    {
+      name: 'CASE_TAKING_CREATE',
+      resource: 'case-taking',
+      action: 'create',
+      description: 'Create case taking records',
+    },
+    {
+      name: 'CASE_TAKING_READ',
+      resource: 'case-taking',
+      action: 'read',
+      description: 'Read case taking records',
+    },
+    {
+      name: 'CASE_TAKING_UPDATE',
+      resource: 'case-taking',
+      action: 'update',
+      description: 'Update case taking records',
+    },
+    {
+      name: 'PATIENT_DOCUMENT_CREATE',
+      resource: 'patient-documents',
+      action: 'create',
+      description: 'Upload patient documents',
+    },
+    {
+      name: 'PATIENT_DOCUMENT_READ',
+      resource: 'patient-documents',
+      action: 'read',
+      description: 'Read patient documents',
+    },
+    {
+      name: 'PATIENT_DOCUMENT_UPDATE',
+      resource: 'patient-documents',
+      action: 'update',
+      description: 'Update patient documents',
+    },
   ];
 
   for (const perm of permissions) {
@@ -567,6 +606,13 @@ async function main(): Promise<void> {
       'QUEUE_READ',
       'QUEUE_UPDATE',
       'QUEUE_DELETE',
+      // Read-only on both: the intake is the patient's own account of why they
+      // came, and the documents are what they brought. A clinician records
+      // their own findings in a consultation, so there is nothing here for them
+      // to edit — and an intake a clinician can rewrite stops being evidence of
+      // what the patient said.
+      'CASE_TAKING_READ',
+      'PATIENT_DOCUMENT_READ',
       'DASHBOARD_READ',
     ],
     NURSE: [
@@ -582,6 +628,8 @@ async function main(): Promise<void> {
       'QUEUE_CREATE',
       'QUEUE_READ',
       'QUEUE_UPDATE',
+      'CASE_TAKING_READ',
+      'PATIENT_DOCUMENT_READ',
       'DASHBOARD_READ',
     ],
     RECEPTIONIST: [
@@ -631,7 +679,21 @@ async function main(): Promise<void> {
       'PATIENT_READ',
       'DASHBOARD_READ',
     ],
-    PATIENT: ['APPOINTMENT_CREATE', 'APPOINTMENT_READ', 'DASHBOARD_READ'],
+    // The portal's own surface. Create and update on both, because filling in
+    // an intake and correcting it before the consultation is the patient doing
+    // their own work — but no DELETE: once a clinician may have read a document
+    // or an intake, removing it is not the patient's call.
+    PATIENT: [
+      'APPOINTMENT_CREATE',
+      'APPOINTMENT_READ',
+      'CASE_TAKING_CREATE',
+      'CASE_TAKING_READ',
+      'CASE_TAKING_UPDATE',
+      'PATIENT_DOCUMENT_CREATE',
+      'PATIENT_DOCUMENT_READ',
+      'PATIENT_DOCUMENT_UPDATE',
+      'DASHBOARD_READ',
+    ],
   };
 
   for (const [roleName, permNames] of Object.entries(rolePermissionsMap)) {
@@ -859,6 +921,43 @@ async function main(): Promise<void> {
     }
     console.log(
       `✅ Default ${demoUser.roleName.toLowerCase()} user: ${demoUser.email}`,
+    );
+  }
+
+  // ── 5b. Patient portal demo account ───────────────────────────────────────
+  //
+  // `patient@hms.local` has existed since the first seed, but a PATIENT user
+  // with no `Patient.userId` cannot resolve which record it is, so every
+  // patient-scoped route refused it and the role was untestable. Linking it to
+  // a real record is what makes `npm run db:reset:demo` produce a portal
+  // account somebody can actually sign into.
+  //
+  // The MRN and date of birth are fixed rather than generated: they are the two
+  // things `POST /patient-auth/claim` asks for, so they have to be quotable in
+  // a README and identical on every machine.
+  const portalDemoUser = await prisma.user.findUnique({
+    where: { email: 'patient@hms.local' },
+  });
+
+  if (portalDemoUser) {
+    const demoPatient = await prisma.patient.upsert({
+      where: { mrn: 'MRN-PORTAL-0001' },
+      update: { userId: portalDemoUser.id },
+      create: {
+        organizationId: defaultOrg.id,
+        mrn: 'MRN-PORTAL-0001',
+        userId: portalDemoUser.id,
+        firstName: 'Patient',
+        lastName: 'Self',
+        dateOfBirth: new Date('1990-05-17'),
+        gender: 'female',
+        phonePrimary: '+251911000001',
+        email: 'patient@hms.local',
+        isActive: true,
+      },
+    });
+    console.log(
+      `✅ Portal account linked: patient@hms.local → ${demoPatient.mrn} (DOB 1990-05-17)`,
     );
   }
 

@@ -101,4 +101,19 @@ export enum Permission {
 
   // Dashboard
   DASHBOARD_READ = 'DASHBOARD_READ',
+
+  // Case taking — the structured history a patient fills in before the
+  // consultation. Patients hold create/read/update on their own; clinicians
+  // read what was submitted rather than editing it, so the intake stays the
+  // patient's own words.
+  CASE_TAKING_CREATE = 'CASE_TAKING_CREATE',
+  CASE_TAKING_READ = 'CASE_TAKING_READ',
+  CASE_TAKING_UPDATE = 'CASE_TAKING_UPDATE',
+
+  // Patient documents — referrals, prior results and scans the patient brings
+  // with them. No DELETE: a document another clinician may have already read is
+  // not the patient's to remove from the record.
+  PATIENT_DOCUMENT_CREATE = 'PATIENT_DOCUMENT_CREATE',
+  PATIENT_DOCUMENT_READ = 'PATIENT_DOCUMENT_READ',
+  PATIENT_DOCUMENT_UPDATE = 'PATIENT_DOCUMENT_UPDATE',
 }

@@ -20,6 +20,7 @@ import { AuditModule } from './audit/audit.module';
 import { AppCacheModule } from './cache/cache.module';
 import { StorageModule } from './storage/storage.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { PatientAuthModule } from './modules/patient-auth/patient-auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { HealthModule } from './modules/health/health.module';
 import { PatientsModule } from './modules/patients/patients.module';
@@ -113,6 +114,7 @@ import { envFilePaths } from '../prisma/env-paths';
 
     // Feature modules
     AuthModule,
+    PatientAuthModule,
     UsersModule,
     HealthModule,
     PatientsModule,

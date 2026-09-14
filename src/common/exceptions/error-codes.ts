@@ -102,6 +102,20 @@ export const ErrorCodes = {
   // Settings
   DEPARTMENT_NOT_FOUND: 'DEPARTMENT_NOT_FOUND',
   ORGANIZATION_NOT_FOUND: 'ORGANIZATION_NOT_FOUND',
+
+  // Patient portal
+  //
+  // Nothing here is reachable from `POST /patient-auth/claim`: that route
+  // answers identically whether or not the MRN exists, so an error code is
+  // itself a signal it must not send. Every code below is raised only against a
+  // claim token the caller already holds.
+  PATIENT_PORTAL_CLAIM_INVALID: 'PATIENT_PORTAL_CLAIM_INVALID',
+  PATIENT_PORTAL_CLAIM_EXPIRED: 'PATIENT_PORTAL_CLAIM_EXPIRED',
+  PATIENT_PORTAL_CLAIM_CONSUMED: 'PATIENT_PORTAL_CLAIM_CONSUMED',
+  PATIENT_PORTAL_CLAIM_LOCKED: 'PATIENT_PORTAL_CLAIM_LOCKED',
+  PATIENT_PORTAL_ALREADY_CLAIMED: 'PATIENT_PORTAL_ALREADY_CLAIMED',
+  PATIENT_PORTAL_EMAIL_REQUIRED: 'PATIENT_PORTAL_EMAIL_REQUIRED',
+  PATIENT_PORTAL_NOT_LINKED: 'PATIENT_PORTAL_NOT_LINKED',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];

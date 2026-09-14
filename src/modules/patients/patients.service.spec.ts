@@ -24,6 +24,9 @@ describe('PatientsService', () => {
     organizationId: 'org-1',
     mrn: 'MRN202606090001',
     externalId: null,
+    // Unclaimed: the portal account column added with the patient portal, null
+    // for every record nobody has signed in as.
+    userId: null,
     firstName: 'Abebe',
     middleName: 'Kebede',
     lastName: 'Assefa',
