@@ -77,6 +77,10 @@ model Organization {
   deathCertificates   DeathCertificate[]
   machineIntegrations MachineIntegration[]
   machineResultsQueue MachineResultsQueue[]
+  patientPortalClaims PatientPortalClaim[]
+  caseSessions        CaseSession[]
+  patientDocuments    PatientDocument[]
+  caseSubmissions     CaseSubmission[]
   roles               Role[]
 
   // eAPTS Relations
@@ -113,15 +117,15 @@ model User {
   lastLoginAt     DateTime?
   preferences     String? // JSON string for UI preferences
   defaultCalendar String    @default("ethiopian") // 'ethiopian' or 'gregorian'
-  
+
   // Invitation System
   invitationToken     String?   @unique
   invitationExpiresAt DateTime?
   invitedById         String?
 
   // Soft delete
-  isDeleted   Boolean   @default(false)
-  deletedAt   DateTime?
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
 
   // Audit fields
   createdAt   DateTime @default(now())
@@ -157,16 +161,21 @@ model User {
   queueAssigned              QueueManagement[]  @relation("QueueAssignedTo")
   deathCertificatesCertified DeathCertificate[] @relation("CertifiedBy")
   deathCertificatesIssued    DeathCertificate[] @relation("IssuedBy")
-  
+
   // User Management Relations
-  invitedBy              User?             @relation("UserInvitations", fields: [invitedById], references: [id])
-  invitedUsers           User[]            @relation("UserInvitations")
-  userInvitations        UserInvitation[]  @relation("InvitationsSent")
-  userActivities         UserActivity[]
+  invitedBy       User?            @relation("UserInvitations", fields: [invitedById], references: [id])
+  invitedUsers    User[]           @relation("UserInvitations")
+  userInvitations UserInvitation[] @relation("InvitationsSent")
+  userActivities  UserActivity[]
 
   // Auth/RBAC Upgrades
-  userRoles              UserRole[]
-  refreshTokens          RefreshToken[]
+  userRoles     UserRole[]
+  refreshTokens RefreshToken[]
+
+  // Patient portal. Null for every staff account; set for the one User that
+  // is a patient signing in as themselves.
+  patientRecord       Patient?             @relation("PatientPortalAccount")
+  patientPortalClaims PatientPortalClaim[]
 
   @@index([organizationId])
   @@index([isActive])
@@ -200,6 +209,12 @@ model Patient {
   // Identification
   mrn        String  @unique // Medical Record Number
   externalId String?
+
+  // The portal login for this record, once the patient has claimed it.
+  // Unique because one record is one person: two Users pointing at one Patient
+  // is two people answering as the same patient, which the self-scoping guard
+  // would then be unable to tell apart.
+  userId String? @unique
 
   // Personal Information
   firstName   String
@@ -261,6 +276,7 @@ model Patient {
 
   // Relations
   organization        Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  portalUser          User?                 @relation("PatientPortalAccount", fields: [userId], references: [id])
   appointments        Appointment[]
   consultations       Consultation[]
   preTriages          PreTriage[]
@@ -275,6 +291,10 @@ model Patient {
   admissions          Admission[]
   deathCertificates   DeathCertificate[]
   machineResultsQueue MachineResultsQueue[]
+  portalClaims        PatientPortalClaim[]
+  caseSessions        CaseSession[]
+  patientDocuments    PatientDocument[]
+  caseSubmissions     CaseSubmission[]
 
   @@index([organizationId])
   @@index([mrn])
@@ -282,6 +302,56 @@ model Patient {
   @@index([phonePrimary])
   // Composite: dashboard patient count (organizationId + isActive + isDeleted)
   @@index([organizationId, isActive, isDeleted])
+}
+
+/// Patient portal claim — the proof that an MRN belongs to whoever is holding
+/// the phone.
+///
+/// A patient's record already exists; what does not exist is any way for them
+/// to prove it is theirs. They enter the MRN printed on their card plus their
+/// date of birth, and if those match they get a short-lived token that lets
+/// them set a password once.
+///
+/// Every attempt is recorded, successful or not. A row per attempt is what
+/// turns "somebody is walking the MRN space" from an invisible event into a
+/// query, and it is why `mrnAttempted` is stored even when it matched nothing.
+model PatientPortalClaim {
+  id             String @id @default(cuid())
+  organizationId String
+
+  /// Null when the MRN and date of birth matched no record. The claim is still
+  /// written: a failure is the interesting row.
+  patientId String?
+
+  /// SHA-256 of the token handed to the client, never the token. The same
+  /// argument `RefreshToken` already makes — a readable credential in a
+  /// database is a credential.
+  tokenHash String @unique
+
+  /// What was typed. Kept so a run of failures is visible; it is an identifier,
+  /// so it never reaches a log.
+  mrnAttempted String
+
+  attempts Int    @default(0)
+  status   String @default("issued") // issued, consumed, expired, locked
+
+  expiresAt  DateTime
+  consumedAt DateTime?
+
+  /// Set when the claim is spent and the account exists.
+  userId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  patient      Patient?     @relation(fields: [patientId], references: [id])
+  user         User?        @relation(fields: [userId], references: [id])
+
+  @@index([organizationId])
+  @@index([mrnAttempted])
+  @@index([status])
+  @@index([expiresAt])
 }
 
 /// Pre-Triage (Ethiopian workflow - screening before main triage)
@@ -382,8 +452,8 @@ model QueueManagement {
   // Digital Display
   displayMessage String?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
   createdBy String?
   updatedBy String?
   isDeleted Boolean   @default(false)
@@ -400,6 +470,10 @@ model QueueManagement {
   @@index([isDeleted])
   // Composite: dashboard queue count (organizationId + status + joinedQueueAt + isDeleted)
   @@index([organizationId, status, joinedQueueAt, isDeleted])
+  // Declared here because migration 20260914120000 created it in raw SQL and
+  // the model never caught up — which made every later diff propose dropping
+  // it. It is the index the board sorts on: acuity first, then arrival.
+  @@index([priorityRank, joinedQueueAt])
 }
 
 /// Triage Assessment (Ethiopian multi-type triage)
@@ -524,8 +598,8 @@ model Appointment {
   createdById String?
 
   // Soft delete
-  isDeleted   Boolean   @default(false)
-  deletedAt   DateTime?
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
 
   // Relations
   organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -593,8 +667,8 @@ model Consultation {
   createdById String?
 
   // Soft delete
-  isDeleted   Boolean   @default(false)
-  deletedAt   DateTime?
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
 
   // Relations
   organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -1583,27 +1657,27 @@ enum LogType {
 
 /// User Invitation
 model UserInvitation {
-  id             String   @id @default(cuid())
+  id             String @id @default(cuid())
   organizationId String
-  
+
   // Invitation Details
-  email          String
-  role           String
-  departmentIds  String?  // JSON array of department IDs
-  token          String   @unique
-  expiresAt      DateTime
-  
+  email         String
+  role          String
+  departmentIds String? // JSON array of department IDs
+  token         String   @unique
+  expiresAt     DateTime
+
   // Status
-  status         InvitationStatus @default(pending)
-  acceptedAt     DateTime?
-  
+  status     InvitationStatus @default(pending)
+  acceptedAt DateTime?
+
   // Metadata
-  createdAt      DateTime @default(now())
-  sentById       String
-  
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  sentBy         User         @relation("InvitationsSent", fields: [sentById], references: [id])
-  
+  createdAt DateTime @default(now())
+  sentById  String
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sentBy       User         @relation("InvitationsSent", fields: [sentById], references: [id])
+
   @@index([organizationId])
   @@index([email])
   @@index([token])
@@ -1619,25 +1693,25 @@ enum InvitationStatus {
 
 /// Permission
 model Permission {
-  id          String   @id @default(cuid())
-  
+  id String @id @default(cuid())
+
   // Both systems unified:
-  name        String   @unique  // e.g., "USER_CREATE" (NestJS identifier)
-  code        String?  @unique  // e.g., "patients:create" (Next.js key)
+  name        String  @unique // e.g., "USER_CREATE" (NestJS identifier)
+  code        String? @unique // e.g., "patients:create" (Next.js key)
   description String?
-  resource    String?           // e.g. "users"
-  action      String?           // e.g. "create"
-  category    String?           // e.g., "patients"
+  resource    String? // e.g. "users"
+  action      String? // e.g. "create"
+  category    String? // e.g., "patients"
 
   // Soft delete
-  isDeleted   Boolean  @default(false)
-  deletedAt   DateTime?
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
 
   // Audit fields
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  createdBy   String?
-  updatedBy   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?
+  updatedBy String?
 
   rolePermissions RolePermission[]
 
@@ -1648,25 +1722,25 @@ model Permission {
 
 /// Role Definition
 model Role {
-  id             String           @id @default(cuid())
-  name           String           @unique
+  id             String  @id @default(cuid())
+  name           String  @unique
   description    String?
-  isSystem       Boolean          @default(false)
+  isSystem       Boolean @default(false)
   organizationId String?
 
   // Soft delete
-  isDeleted      Boolean          @default(false)
-  deletedAt      DateTime?
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
 
   // Audit fields
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
-  createdBy      String?
-  updatedBy      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?
+  updatedBy String?
 
   // Relations
-  organization   Organization?    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  userRoles      UserRole[]
+  organization    Organization?    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userRoles       UserRole[]
   rolePermissions RolePermission[]
 
   @@index([name])
@@ -1692,19 +1766,19 @@ model UserRole {
 
 /// Role Permission Mapping
 model RolePermission {
-  id           String   @id @default(cuid())
+  id           String  @id @default(cuid())
   roleId       String
   permissionId String
-  roleName     String?  @map("role") // Maps to 'role' in Next.js
+  roleName     String? @map("role") // Maps to 'role' in Next.js
 
-  assignedAt   DateTime @default(now())
-  assignedBy   String?
+  assignedAt DateTime @default(now())
+  assignedBy String?
 
   // Granular permissions for Next.js
-  canCreate    Boolean @default(false)
-  canRead      Boolean @default(false)
-  canUpdate    Boolean @default(false)
-  canDelete    Boolean @default(false)
+  canCreate Boolean @default(false)
+  canRead   Boolean @default(false)
+  canUpdate Boolean @default(false)
+  canDelete Boolean @default(false)
 
   // Relations
   role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
@@ -1717,15 +1791,15 @@ model RolePermission {
 
 /// Session Refresh Tokens
 model RefreshToken {
-  id          String   @id @default(cuid())
-  userId      String
-  token       String   @unique
-  expiresAt   DateTime
-  isRevoked   Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  revokedAt   DateTime?
-  deviceInfo  String?
-  ipAddress   String?
+  id         String    @id @default(cuid())
+  userId     String
+  token      String    @unique
+  expiresAt  DateTime
+  isRevoked  Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+  revokedAt  DateTime?
+  deviceInfo String?
+  ipAddress  String?
 
   // Relations
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -1736,23 +1810,23 @@ model RefreshToken {
 
 /// User Activity Log
 model UserActivity {
-  id             String   @id @default(cuid())
+  id             String  @id @default(cuid())
   organizationId String?
   userId         String
-  
+
   // Activity Details
-  action         String   // login, logout, create_patient, update_prescription, etc.
-  entityType     String?  // patient, prescription, lab_order, etc.
-  entityId       String?
-  details        String?  // JSON: additional context
-  
+  action     String // login, logout, create_patient, update_prescription, etc.
+  entityType String? // patient, prescription, lab_order, etc.
+  entityId   String?
+  details    String? // JSON: additional context
+
   // Metadata
-  ipAddress      String?
-  userAgent      String?
-  timestamp      DateTime @default(now())
-  
-  user           User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
+  ipAddress String?
+  userAgent String?
+  timestamp DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@index([userId])
   @@index([action])
   @@index([timestamp])
@@ -1760,39 +1834,39 @@ model UserActivity {
 
 /// Audit Log
 model AuditLog {
-  id             String   @id @default(cuid())
+  id             String  @id @default(cuid())
   organizationId String?
 
   // User & Action
-  userId         String?
-  userEmail      String?
-  userRole       String?
+  userId    String?
+  userEmail String?
+  userRole  String?
 
   // Action Details
-  action         String   // e.g. create, update, delete, view, login, logout
-  entityName     String?  // From NestJS (e.g. "User")
-  entityType     String?  // From NextJS (e.g. "patient", "prescription")
-  entityId       String?
+  action     String // e.g. create, update, delete, view, login, logout
+  entityName String? // From NestJS (e.g. "User")
+  entityType String? // From NextJS (e.g. "patient", "prescription")
+  entityId   String?
 
   // Changes
-  oldValues      Json?
-  newValues      Json?
+  oldValues Json?
+  newValues Json?
 
   // Context
-  ipAddress      String?
-  userAgent      String?
-  metadata       Json?
+  ipAddress String?
+  userAgent String?
+  metadata  Json?
 
   // Timestamps
-  performedAt    DateTime @default(now())
-  createdAt      DateTime @default(now())
+  performedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
 
   // Additional
-  description    String?
+  description String?
 
   // Relations
-  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  user           User?        @relation("AuditLogsByUser", fields: [userId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?         @relation("AuditLogsByUser", fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([organizationId])
   @@index([userId])
@@ -1936,4 +2010,300 @@ model EaptsTransaction {
   @@index([transactionType])
   @@index([status])
   @@index([transactionDate])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Patient case taking
+//
+// The patient tells their story before they meet a doctor. These six models
+// hold that story, everything extracted from the documents they uploaded, and
+// — this is the part that matters — where every single fact came from.
+//
+// They break one codebase convention on purpose. Everywhere else in this schema
+// a JSON payload is stored in a `String` column. Here it is `Json`, because a
+// `String` column accepts malformed JSON silently, and what is being stored is
+// a clinical history a doctor will read. A corrupt `Consultation.attachments`
+// loses a file URL. A corrupt `clinicalState` loses a patient's history.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One patient's case-taking session. Resumable by design: they will be
+/// interrupted, and a half-told history that cannot be picked up again is a
+/// history that gets abandoned and retold badly.
+model CaseSession {
+  id             String  @id @default(cuid())
+  organizationId String
+  patientId      String
+  appointmentId  String?
+
+  kind String @default("new_consultation") // new_consultation, follow_up
+
+  /// Carried end to end — chosen by the patient, sent on every model call,
+  /// stored on the case. Only `en` is offered today; the field is real from the
+  /// start so turning on more is a value change and not a migration.
+  language String @default("en")
+
+  status String @default("in_progress") // in_progress, review, submitted, abandoned
+
+  /// Consent is a moment, not a flag: which version of the wording they agreed
+  /// to matters as much as that they agreed.
+  consentGivenAt DateTime?
+  consentVersion String?
+
+  currentSection  String?
+  progressPercent Int     @default(0)
+
+  /// The accumulated structured history, and per-section completion.
+  clinicalState Json?
+  sectionStatus Json?
+
+  startedAt    DateTime  @default(now())
+  lastActiveAt DateTime  @default(now())
+  submittedAt  DateTime?
+
+  updatedAt DateTime  @default(now()) @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  patient      Patient           @relation(fields: [patientId], references: [id])
+  turns        CaseTurn[]
+  facts        CaseFact[]
+  redFlags     CaseRedFlag[]
+  documents    PatientDocument[]
+  submission   CaseSubmission?
+
+  @@index([organizationId])
+  @@index([patientId])
+  @@index([status])
+  @@index([isDeleted])
+  @@index([patientId, status])
+}
+
+/// Every exchange, in order. Append-only: the interview is evidence, and an
+/// interview you can edit afterwards is not.
+model CaseTurn {
+  id        String @id @default(cuid())
+  sessionId String
+  sequence  Int
+
+  role    String // assistant, patient
+  section String?
+
+  /// Which registry field this turn was about. Null for an opening or a
+  /// free-text turn that belongs to no single field.
+  fieldKey String?
+
+  questionText String?
+  answerRaw    String?
+
+  /// How they answered. A tapped answer and a spoken one carry different
+  /// confidence, and the case has to be able to say which it was.
+  answerModality String? // voice, text, touch
+
+  transcriptConfidence Float?
+
+  /// Where the recording lives, when they spoke. Kept so a doubtful
+  /// transcription can be checked against what was actually said.
+  audioKey String?
+
+  llmModel  String?
+  latencyMs Int?
+
+  createdAt DateTime @default(now())
+
+  session CaseSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, sequence])
+  @@index([sessionId])
+  @@index([fieldKey])
+}
+
+/// One asserted fact, and where it came from.
+///
+/// **Append-only.** A correction never mutates a row; it writes a new fact and
+/// sets `supersededById` on the old one. The current value is the newest
+/// unsuperseded row for a path. That is what turns "the patient said no
+/// diabetes, the document said diabetes, the patient then corrected it" into a
+/// readable history rather than a lost one.
+model CaseFact {
+  id        String @id @default(cuid())
+  sessionId String
+  patientId String
+
+  section   String
+  fieldPath String
+
+  /// Only meaningful when `presence` is `recorded`.
+  valueJson Json?
+
+  /// recorded, none, unknown, not_applicable, not_assessed, declined
+  ///
+  /// Six states that must never collapse into each other. `none` is an
+  /// asserted negative — the patient said no. The absence of a row is
+  /// `not_assessed`. Turning "nobody asked" into "no" fabricates a negative
+  /// clinical finding, which is the most dangerous thing this feature could do.
+  presence String
+
+  /// patient_voice, patient_text, patient_choice, document, existing_record,
+  /// patient_correction
+  sourceType String
+
+  /// The turn or document this came from.
+  sourceRef String?
+
+  confidence Float?
+
+  /// pending, patient_confirmed, patient_corrected, patient_unsure
+  verification String @default("pending")
+
+  supersededById String?   @unique
+  supersededAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  session      CaseSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  supersededBy CaseFact?   @relation("FactSupersession", fields: [supersededById], references: [id])
+  supersedes   CaseFact?   @relation("FactSupersession")
+
+  @@index([sessionId])
+  @@index([patientId])
+  @@index([sessionId, fieldPath])
+  @@index([verification])
+}
+
+/// A safety rule that fired, and the facts that fired it.
+///
+/// `ruleId` + `ruleVersion` together, because the rules are versioned data: a
+/// flag raised last month must stay explicable after the rule is edited.
+model CaseRedFlag {
+  id        String @id @default(cuid())
+  sessionId String
+
+  ruleId      String
+  ruleVersion Int
+  severity    String // critical, urgent
+
+  /// The facts that satisfied the rule, so the flag can be explained rather
+  /// than merely asserted.
+  matchedFacts Json?
+
+  /// What the patient was shown. Stored because it is what they read, and
+  /// because it must never have contained a diagnosis.
+  message String
+
+  triggeredAt    DateTime  @default(now())
+  acknowledgedAt DateTime?
+  escalatedAt    DateTime?
+  escalationRef  String?
+
+  session CaseSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([severity])
+  @@index([ruleId])
+}
+
+/// A prescription, lab report or discharge summary the patient photographed.
+///
+/// The original is kept forever-ish and never replaced by what was read out of
+/// it. Extraction is a claim about the document; the document is the evidence.
+model PatientDocument {
+  id             String  @id @default(cuid())
+  organizationId String
+  patientId      String
+  sessionId      String?
+
+  fileKey   String
+  mimeType  String
+  byteSize  Int
+  pageCount Int    @default(1)
+
+  /// Exact-duplicate detection, before anything expensive runs. Text
+  /// similarity catches the re-photographed page; this catches the re-sent file.
+  sha256 String
+
+  /// uploaded, processing, extracted, needs_review, verified, failed,
+  /// rejected_quality
+  status String @default("uploaded")
+
+  /// prescription, laboratory_report, discharge_summary, imaging_report,
+  /// referral_letter, consultation_note, other, unknown
+  docType           String?
+  docTypeConfidence Float?
+
+  ocrEngine     String?
+  ocrConfidence Float?
+
+  /// The raw read. Text, not structure — so it stays a `String`, unlike the
+  /// extraction beside it.
+  ocrText String? @db.Text
+
+  /// Per-block text with coordinates and confidence, so an extracted value can
+  /// point at the pixels it came from.
+  ocrBlocks Json?
+
+  extraction           Json?
+  extractionConfidence Float?
+
+  /// Whether the page had to go to the vision model because OCR could not read
+  /// it. Worth knowing when judging the result.
+  visionFallbackUsed Boolean @default(false)
+
+  /// Set when this is the same document as one already held. The row is kept
+  /// rather than refused, so the patient is told rather than silently ignored.
+  duplicateOfId String?
+
+  /// Written in the app's voice — it is shown to a patient.
+  failureReason String?
+
+  uploadedAt  DateTime  @default(now())
+  processedAt DateTime?
+  verifiedAt  DateTime?
+
+  updatedAt DateTime  @default(now()) @updatedAt
+  isDeleted Boolean   @default(false)
+  deletedAt DateTime?
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  patient      Patient           @relation(fields: [patientId], references: [id])
+  session      CaseSession?      @relation(fields: [sessionId], references: [id])
+  duplicateOf  PatientDocument?  @relation("DocumentDuplicates", fields: [duplicateOfId], references: [id])
+  duplicates   PatientDocument[] @relation("DocumentDuplicates")
+
+  @@index([organizationId])
+  @@index([patientId])
+  @@index([sessionId])
+  @@index([sha256])
+  @@index([status])
+  @@index([isDeleted])
+}
+
+/// The finished case, as it was handed to the clinical workflow.
+///
+/// Stored whole and separately from the session that produced it: the session
+/// keeps moving (a patient can correct something afterwards), and what the
+/// doctor opened must stay exactly what the doctor opened.
+model CaseSubmission {
+  id             String @id @default(cuid())
+  organizationId String
+  sessionId      String @unique
+  patientId      String
+
+  structuredCase Json
+
+  /// Where it landed. Null until the workflow picks it up — submitting a case
+  /// does not invent a consultation nobody opened.
+  consultationId String?
+  preTriageId    String?
+  queueId        String?
+
+  submittedAt DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  session      CaseSession  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  patient      Patient      @relation(fields: [patientId], references: [id])
+
+  @@index([organizationId])
+  @@index([patientId])
+  @@index([submittedAt])
 }
