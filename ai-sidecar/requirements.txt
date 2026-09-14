@@ -1,0 +1,24 @@
+# MediHive AI sidecar — pinned to what this box can actually resolve.
+#
+# Python 3.12, not the host's 3.14: paddlepaddle publishes no 3.14 wheel, and
+# faster-whisper's ctranslate2 lags the newest interpreter by a release or two.
+# The venv pins the interpreter so a host upgrade cannot silently break OCR.
+fastapi
+uvicorn[standard]
+python-multipart
+httpx
+
+# Images and PDFs on the way into OCR.
+pillow
+numpy
+pypdfium2
+
+# OCR. PP-OCRv5 weights, ONNX runtime, CPU. The spec names PaddleOCR; this is
+# the same detection and recognition models without the paddlepaddle runtime.
+rapidocr-onnxruntime
+
+# Speech to text. Held on CPU on purpose — see stt.py.
+faster-whisper
+
+# Text to speech. Voice files are downloaded separately; see tts.py.
+piper-tts
