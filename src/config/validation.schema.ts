@@ -50,6 +50,24 @@ export const validationSchema = Joi.object({
   S3_BUCKET: Joi.string().optional().default('hmsbucket'),
   S3_ACCESS_KEY: Joi.string().optional(),
   S3_SECRET_KEY: Joi.string().optional(),
+
+  // Local AI — every one of these is optional with a default, on purpose.
+  //
+  // Nothing in the case-taking feature requires a model to be reachable: the
+  // question selector is pure and synchronous, the safety engine is versioned
+  // data, and presence is derived by code. A box with no Ollama and no sidecar
+  // runs the interview as a plain questionnaire with typed answers, which is
+  // §42's offline mode and is a degradation rather than a failure. Making any
+  // of these required would turn "the model is not installed here" into "the
+  // hospital API will not boot".
+  OLLAMA_URL: Joi.string().optional().default('http://127.0.0.1:11434'),
+  OLLAMA_MODEL: Joi.string().optional().default('gemma3:4b'),
+  AI_SIDECAR_URL: Joi.string().optional().default('http://127.0.0.1:8801'),
+  AI_ENABLED: Joi.string().valid('true', 'false').default('true'),
+  // Generous by web standards and tight by this model's: a long extraction
+  // measured twenty seconds warm, seventy-four cold. It exists so a wedged
+  // model releases the request, not to make the call fast.
+  AI_TIMEOUT_MS: Joi.number().default(90000),
 });
 
 export const validationOptions = {

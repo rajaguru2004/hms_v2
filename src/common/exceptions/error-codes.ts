@@ -116,6 +116,44 @@ export const ErrorCodes = {
   PATIENT_PORTAL_ALREADY_CLAIMED: 'PATIENT_PORTAL_ALREADY_CLAIMED',
   PATIENT_PORTAL_EMAIL_REQUIRED: 'PATIENT_PORTAL_EMAIL_REQUIRED',
   PATIENT_PORTAL_NOT_LINKED: 'PATIENT_PORTAL_NOT_LINKED',
+
+  // Patient documents
+  //
+  // Nothing here reaches a patient as-is: the message beside the code is what
+  // they read, and Documents §27 is explicit that it must be a sentence rather
+  // than an engine's own words. The codes exist for the client to branch on —
+  // a retake prompt looks different from a "wrong file type" prompt.
+  PATIENT_DOCUMENT_NOT_FOUND: 'PATIENT_DOCUMENT_NOT_FOUND',
+  PATIENT_DOCUMENT_UNSUPPORTED_TYPE: 'PATIENT_DOCUMENT_UNSUPPORTED_TYPE',
+  PATIENT_DOCUMENT_UNREADABLE: 'PATIENT_DOCUMENT_UNREADABLE',
+  PATIENT_DOCUMENT_PATIENT_REQUIRED: 'PATIENT_DOCUMENT_PATIENT_REQUIRED',
+  PATIENT_DOCUMENT_SESSION_NOT_FOUND: 'PATIENT_DOCUMENT_SESSION_NOT_FOUND',
+  PATIENT_DOCUMENT_NOT_READY: 'PATIENT_DOCUMENT_NOT_READY',
+
+  // Object storage
+  S3_SIGN_FAILED: 'S3_SIGN_FAILED',
+
+  // Patient case taking
+  //
+  // `CASE_SESSION_NOT_FOUND` is returned both for a session that does not exist
+  // and for one belonging to somebody else, for the same reason the portal
+  // claim answers identically either way: two distinguishable answers make the
+  // route an existence oracle.
+  CASE_SESSION_NOT_FOUND: 'CASE_SESSION_NOT_FOUND',
+  CASE_SESSION_NOT_IN_PROGRESS: 'CASE_SESSION_NOT_IN_PROGRESS',
+  CASE_SESSION_CONSENT_REQUIRED: 'CASE_SESSION_CONSENT_REQUIRED',
+  CASE_SESSION_ALREADY_SUBMITTED: 'CASE_SESSION_ALREADY_SUBMITTED',
+  CASE_FACT_NOT_FOUND: 'CASE_FACT_NOT_FOUND',
+  CASE_FACT_ALREADY_SUPERSEDED: 'CASE_FACT_ALREADY_SUPERSEDED',
+  CASE_FIELD_UNKNOWN: 'CASE_FIELD_UNKNOWN',
+  CASE_ANSWER_NOT_UNDERSTOOD: 'CASE_ANSWER_NOT_UNDERSTOOD',
+
+  // Local AI
+  //
+  // One code for every sidecar capability, because the caller's move is the
+  // same in each case: fall back to the path that does not need it. Which
+  // capability failed is in the message, which is written to be shown.
+  AI_SIDECAR_UNAVAILABLE: 'AI_SIDECAR_UNAVAILABLE',
 } as const;
 
 export type ErrorCode = (typeof ErrorCodes)[keyof typeof ErrorCodes];

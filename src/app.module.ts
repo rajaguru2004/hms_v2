@@ -32,6 +32,9 @@ import { IntegrationsModule } from './modules/integrations/integrations.module';
 import { LaboratoryModule } from './modules/laboratory/laboratory.module';
 import { PharmacyModule } from './modules/pharmacy/pharmacy.module';
 import { PreTriageModule } from './modules/pre-triage/pre-triage.module';
+import { AiModule } from './modules/ai/ai.module';
+import { CaseTakingModule } from './modules/case-taking/case-taking.module';
+import { PatientDocumentsModule } from './modules/patient-documents/patient-documents.module';
 import { QueueModule } from './modules/queue/queue.module';
 import { RadiologyModule } from './modules/radiology/radiology.module';
 import { SettingsModule } from './modules/settings/settings.module';
@@ -126,6 +129,13 @@ import { envFilePaths } from '../prisma/env-paths';
     LaboratoryModule,
     PharmacyModule,
     PreTriageModule,
+    // The local models, and the patient-facing intake built on them. AiModule
+    // is listed in its own right as well as imported by CaseTakingModule so
+    // that a second consumer — the medical-document stream — shares the one
+    // sidecar circuit breaker rather than opening its own.
+    AiModule,
+    CaseTakingModule,
+    PatientDocumentsModule,
     QueueModule,
     RadiologyModule,
     SettingsModule,
