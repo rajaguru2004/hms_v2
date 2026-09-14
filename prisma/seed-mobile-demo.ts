@@ -468,6 +468,22 @@ async function main(): Promise<void> {
   }
   const organizationId = org.id;
 
+  // The schema ships `inpatient: false`, which is right for a site that has no
+  // beds and wrong for this demo — it admits thirty-nine patients below, and a
+  // site with a switched-off ward module hides the ward board while the
+  // dashboard counts occupied beds. The demo owns the demo's shape.
+  const enabledModules = {
+    ...(JSON.parse(org.modulesEnabled || '{}') as Record<string, boolean>),
+    inpatient: true,
+    laboratory: true,
+    radiology: true,
+    pharmacy: true,
+  };
+  await prisma.organization.update({
+    where: { id: organizationId },
+    data: { modulesEnabled: JSON.stringify(enabledModules) },
+  });
+
   const [dept, ward, bed, labTest, exam, service, drug] = await Promise.all([
     prisma.department.findUnique({ where: { id: 'dept-opd' } }),
     prisma.ward.findUnique({ where: { id: 'ward-general' } }),
@@ -2607,7 +2623,14 @@ async function main(): Promise<void> {
       `\n   ${'beds occupied'.padEnd(18)} ${occupiedBeds} / ${occupiedBeds + availableBeds + RESERVED_BEDS.length + MAINTENANCE_BEDS.length}` +
       `\n   ${'critical alerts'.padEnd(18)} ${criticalUnverified}` +
       `\n   ${"today's revenue".padEnd(18)} ${inr(money(todayRevenue))}` +
-      '\n\n   Logins: triage-nurse@hms.local / ward-clerk@hms.local — Demo@HMS2024!',
+      '\n\n   Logins: triage-nurse@hms.local / ward-clerk@hms.local — Demo@HMS2024!' +
+      // This seed writes through Prisma, so the API's own cache invalidation
+      // never runs. The organisation block is cached for five minutes, and a
+      // demo that opens on the shape the site had *before* the seed is a
+      // demo nobody trusts.
+      '\n   Then: docker exec hms_v2_redis_local redis-cli FLUSHDB' +
+      '\n         (this seed writes straight to Postgres, so the API still' +
+      ' holds the old organisation for five minutes)',
   );
 }
 
