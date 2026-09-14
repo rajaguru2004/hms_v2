@@ -2098,7 +2098,11 @@ model CaseTurn {
 
   /// How they answered. A tapped answer and a spoken one carry different
   /// confidence, and the case has to be able to say which it was.
-  answerModality String? // voice, text, touch
+  // voice, text, choice, skip, no_answer, uploaded_document, existing_record,
+  // correction — the vocabulary is `ANSWER_MODALITIES` in the engine's
+  // tri-state.ts, and nowhere else. A tapped answer is `choice`, not `touch`:
+  // two spellings of one concept is two spellings somebody has to map.
+  answerModality String?
 
   transcriptConfidence Float?
 
