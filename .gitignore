@@ -35,7 +35,13 @@ coverage/
 Thumbs.db
 
 # Prisma
-prisma/migrations/
+# prisma/migrations/ is deliberately NOT ignored.
+#
+# It was, which meant a fresh clone had no migrations at all: `prisma migrate
+# deploy` had nothing to apply and the only way to get a schema was
+# `migrate dev`, which silently authors new migration files that then vanish
+# into the ignore rule. The migration history is part of the schema, not build
+# output.
 
 # Docker
 .docker/

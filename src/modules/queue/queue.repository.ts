@@ -2,6 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { Prisma, QueueManagement } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { BaseRepository } from '../../prisma/repositories/base.repository';
+import {
+  buildCompatPaginationMeta,
+  type CompatPaginationMeta,
+} from '../../common/utils/pagination.util';
 
 export const QUEUE_PATIENT_INCLUDE = {
   patient: {
@@ -36,14 +40,14 @@ export type QueueWithPatient = Prisma.QueueManagementGetPayload<{
 
 export interface QueuePaginatedResult {
   data: QueueWithPatient[];
-  meta: {
-    total: number;
-    lastPage: number;
-    currentPage: number;
-    perPage: number;
-    prev: number | null;
-    next: number | null;
-  };
+  /**
+   * The standard meta plus the queue's legacy keys.
+   *
+   * The console reads `currentPage`/`perPage`/`lastPage`; every other endpoint
+   * answers `page`/`limit`/`totalPages`. Both ship until the console is
+   * switched over, then the legacy half goes.
+   */
+  meta: CompatPaginationMeta;
 }
 
 @Injectable()
@@ -73,10 +77,14 @@ export class QueueRepository extends BaseRepository<
     const limit = options?.limit ?? 50;
     const skip = (page - 1) * limit;
     const orderDir = options?.orderDir ?? 'asc';
+    // Acuity, then arrival. Ordering used to be on the priority *string*,
+    // which is alphabetical: "routine" sorted above "normal", and the p1–p5
+    // codes scrambled it completely. `priorityRank` is the ladder both
+    // vocabularies map onto, and it is indexed alongside joinedQueueAt.
     const orderBy =
       options?.orderBy === 'priority'
-        ? [{ priority: orderDir }, { joinedQueueAt: 'asc' as const }]
-        : [{ priority: 'desc' as const }, { joinedQueueAt: 'asc' as const }];
+        ? [{ priorityRank: orderDir }, { joinedQueueAt: 'asc' as const }]
+        : [{ priorityRank: 'asc' as const }, { joinedQueueAt: 'asc' as const }];
 
     const baseWhere: Prisma.QueueManagementWhereInput = {
       ...where,
@@ -94,19 +102,7 @@ export class QueueRepository extends BaseRepository<
       }),
     ]);
 
-    const lastPage = Math.ceil(total / limit);
-
-    return {
-      data,
-      meta: {
-        total,
-        lastPage,
-        currentPage: page,
-        perPage: limit,
-        prev: page > 1 ? page - 1 : null,
-        next: page < lastPage ? page + 1 : null,
-      },
-    };
+    return { data, meta: buildCompatPaginationMeta(total, page, limit) };
   }
 
   async findQueueById(

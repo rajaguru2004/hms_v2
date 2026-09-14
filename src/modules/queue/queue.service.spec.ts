@@ -10,6 +10,7 @@ import {
   QueuePaginatedResult,
 } from './queue.repository';
 import { QueueService } from './queue.service';
+import { buildCompatPaginationMeta } from '../../common/utils/pagination.util';
 
 describe('QueueService', () => {
   let service: QueueService;
@@ -123,14 +124,9 @@ describe('QueueService', () => {
   it('should list queue entries with filters and wait time', async () => {
     const paginatedResult: QueuePaginatedResult = {
       data: [mockQueueItem],
-      meta: {
-        total: 1,
-        lastPage: 1,
-        currentPage: 1,
-        perPage: 50,
-        prev: null,
-        next: null,
-      },
+      // Both dialects: the standard keys every other endpoint answers with,
+      // plus the legacy ones the web console still reads.
+      meta: buildCompatPaginationMeta(1, 1, 50),
     };
     repository.findQueue.mockResolvedValue(paginatedResult);
 

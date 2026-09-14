@@ -353,7 +353,15 @@ model QueueManagement {
 
   // Queue Information
   queueNumber String @unique
-  priority    String @default("normal") // urgent, normal, low
+  priority    String @default("normal") // p1-p5, emergency/urgent/high/normal/low/routine
+
+  /// Sort order for the board: lower is more urgent, 99 is unknown.
+  ///
+  /// Derived from `priority` on write. The board used to ORDER BY the priority
+  /// *string*, which is alphabetical and not clinical — "routine" sorted above
+  /// "normal", and once the p1–p5 codes were accepted the ladder scrambled
+  /// entirely. With server-side pagination that puts a P1 patient on page two.
+  priorityRank Int @default(99)
 
   // Assignment
   assignedToId String?

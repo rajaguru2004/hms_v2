@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/exceptions/error-codes';
-import { CreateQueueDto } from './dto/create-queue.dto';
+import { CreateQueueDto, queuePriorityRank } from './dto/create-queue.dto';
 import { QueueQueryDto } from './dto/queue-query.dto';
 import {
   PaginatedQueueResponseDto,
@@ -128,6 +128,9 @@ export class QueueService {
           serviceArea: dto.serviceArea,
           serviceType: dto.serviceType,
           priority: dto.priority ?? 'normal',
+          // Derived, never supplied by a client: the board orders on this and
+          // a rank that disagreed with its priority would be invisible.
+          priorityRank: queuePriorityRank(dto.priority ?? 'normal'),
           assignedTo: dto.assignedToId
             ? { connect: { id: dto.assignedToId } }
             : undefined,
@@ -185,6 +188,9 @@ export class QueueService {
     const updateData: Prisma.QueueManagementUpdateInput = {
       status: dto.status,
       priority: dto.priority,
+      ...(dto.priority !== undefined && {
+        priorityRank: queuePriorityRank(dto.priority),
+      }),
       serviceArea: dto.serviceArea,
       serviceType: dto.serviceType,
       assignedTo: dto.assignedToId
