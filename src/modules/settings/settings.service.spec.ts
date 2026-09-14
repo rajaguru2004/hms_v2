@@ -18,6 +18,13 @@ import {
   Organization,
   User,
 } from '@prisma/client';
+import { AuthCacheService } from '../../cache/auth-cache.service';
+
+// Identity cache — every write that changes who a user is must clear it.
+const mockAuthCache = {
+  invalidateUser: jest.fn().mockResolvedValue(undefined),
+  invalidateUsers: jest.fn().mockResolvedValue(undefined),
+};
 
 describe('SettingsService', () => {
   let service: SettingsService;
@@ -194,6 +201,7 @@ describe('SettingsService', () => {
         },
         { provide: AuditService, useValue: mockAudit },
         { provide: AppCacheService, useValue: mockCache },
+        { provide: AuthCacheService, useValue: mockAuthCache },
         { provide: PrismaService, useValue: mockPrisma },
       ],
     }).compile();
@@ -274,32 +282,56 @@ describe('SettingsService', () => {
   });
 
   describe('users', () => {
+    const newUser = {
+      fullName: 'Alice Smith',
+      email: 'alice@hospital.com',
+      role: 'DOCTOR',
+      password: 'Str0ng@Passw0rd',
+    };
+
     it('should create a settings user if email is free', async () => {
       (prismaService.user.findUnique as jest.Mock).mockResolvedValue(null);
       userRepo.create.mockResolvedValue(mockUser);
-      const result = await service.createUser(
-        {
-          fullName: 'Alice Smith',
-          email: 'alice@hospital.com',
-          role: 'DOCTOR',
-        },
-        'user-1',
-      );
+      const result = await service.createUser('org-demo', newUser, 'user-1');
       expect(userRepo.create).toHaveBeenCalled();
       expect(result.id).toBe('user-1');
+    });
+
+    it('should hash the initial password and never store it in the clear', async () => {
+      (prismaService.user.findUnique as jest.Mock).mockResolvedValue(null);
+      userRepo.create.mockResolvedValue(mockUser);
+      await service.createUser('org-demo', newUser, 'user-1');
+
+      const created = userRepo.create.mock.calls[0][0] as {
+        password?: string;
+      };
+      expect(created.password).toBeDefined();
+      expect(created.password).not.toBe(newUser.password);
+      expect(created.password).toMatch(/^\$2[aby]\$/);
+    });
+
+    it('should never return the password hash', async () => {
+      // The staff directory used to hand back the raw Prisma row.
+      (prismaService.user.findUnique as jest.Mock).mockResolvedValue(null);
+      userRepo.create.mockResolvedValue({ ...mockUser, password: 'hashed' });
+      const result = await service.createUser('org-demo', newUser, 'user-1');
+      expect((result as Record<string, unknown>).password).toBeUndefined();
+    });
+
+    it('should refuse an account with no password rather than creating one nobody can use', async () => {
+      // Such a user exists but can never sign in, and there is no invitation
+      // flow to rescue them.
+      (prismaService.user.findUnique as jest.Mock).mockResolvedValue(null);
+      const { password: _omitted, ...noPassword } = newUser;
+      await expect(
+        service.createUser('org-demo', noPassword, 'user-1'),
+      ).rejects.toThrow(/initial password/i);
     });
 
     it('should throw ConflictException if email is taken', async () => {
       (prismaService.user.findUnique as jest.Mock).mockResolvedValue(mockUser);
       await expect(
-        service.createUser(
-          {
-            fullName: 'Alice Smith',
-            email: 'alice@hospital.com',
-            role: 'DOCTOR',
-          },
-          'user-1',
-        ),
+        service.createUser('org-demo', newUser, 'user-1'),
       ).rejects.toThrow(ConflictException);
     });
   });

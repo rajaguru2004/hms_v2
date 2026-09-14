@@ -1,0 +1,72 @@
+# Local development stack.
+#
+# `docker-compose.yml` is the deployed topology: it pulls the published API
+# image and attaches to an external reverse-proxy network that only exists on
+# the server. Neither is true on a developer machine, so this file stands up
+# the two backing services the API needs and nothing else — the API itself runs
+# from source with `npm run start:dev`, which is what makes a debugger and a
+# watch loop possible.
+#
+#   docker compose -f docker-compose.local.yml up -d postgres redis
+#   docker compose -f docker-compose.local.yml --profile test up -d postgres_test
+#
+# The database name is `hms_v2_dev`, which is what `.env.local` must point at.
+# It is deliberately NOT `hms_v2_prod`: a local database that shares a name with
+# the production one is a database somebody eventually drops the wrong copy of.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hms_v2_postgres_local
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: db_user
+      POSTGRES_PASSWORD: db_password
+      POSTGRES_DB: hms_v2_dev
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data_local:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U db_user -d hms_v2_dev']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: hms_v2_redis_local
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # The e2e database `.env.test` expects: port 5433, user hms_user, db
+  # hms_v2_test. `tmpfs` rather than a volume because the suite truncates every
+  # table on each run — there is nothing here worth keeping across a restart,
+  # and a disposable data directory is one less way to lose the dev database by
+  # pointing the wrong URL at it.
+  postgres_test:
+    image: postgres:16-alpine
+    container_name: hms_v2_postgres_test
+    profiles: ['test']
+    environment:
+      POSTGRES_USER: hms_user
+      POSTGRES_PASSWORD: hms_password
+      POSTGRES_DB: hms_v2_test
+    ports:
+      - '5433:5432'
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U hms_user -d hms_v2_test']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data_local:

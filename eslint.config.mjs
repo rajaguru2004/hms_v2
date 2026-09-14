@@ -30,6 +30,22 @@ export default tseslint.config(
       '@typescript-eslint/no-floating-promises': 'warn',
       '@typescript-eslint/no-unsafe-argument': 'warn',
       "prettier/prettier": ["error", { endOfLine: "auto" }],
+
+      // A leading underscore is how this codebase already says "bound on
+      // purpose, never read" — destructuring a password out of a row, or
+      // ignoring a body field the JWT now supplies. Without these patterns the
+      // convention is an error, so the alternative is either a lint-disable
+      // comment on every such line or keeping the value in scope.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+          destructuredArrayIgnorePattern: '^_',
+          ignoreRestSiblings: true,
+        },
+      ],
     },
   },
 );

@@ -3,6 +3,7 @@ import { Prisma, User } from '@prisma/client';
 import { UserRepository } from './user.repository';
 import { AuditService } from '../../audit/audit.service';
 import { AppCacheService } from '../../cache/cache.service';
+import { AuthCacheService } from '../../cache/auth-cache.service';
 import { CreateUserDto, UpdateUserDto } from './dto/user.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
@@ -31,6 +32,7 @@ import { PaginatedResult } from '../../common/types/paginated.type';
 @Injectable()
 export class UserService {
   constructor(
+    private readonly authCache: AuthCacheService,
     private readonly userRepository: UserRepository,
     private readonly auditService: AuditService,
     private readonly cacheService: AppCacheService,
@@ -276,6 +278,7 @@ export class UserService {
     await this.cacheService.del(
       AppCacheService.buildKey(this.CACHE_PREFIX, id),
     );
+    await this.authCache.invalidateUser(id);
 
     // Audit: record changes
     void this.auditService.log({
@@ -313,6 +316,7 @@ export class UserService {
     await this.cacheService.del(
       AppCacheService.buildKey(this.CACHE_PREFIX, id),
     );
+    await this.authCache.invalidateUser(id);
 
     // Audit
     void this.auditService.log({
@@ -328,7 +332,6 @@ export class UserService {
    * NEVER return password hash to client, even in internal APIs.
    */
   private sanitize(user: User): Omit<User, 'password'> {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { password: _, ...sanitized } = user;
     return sanitized;
   }

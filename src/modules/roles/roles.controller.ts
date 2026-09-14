@@ -25,23 +25,30 @@ import {
   AssignUserRoleDto,
 } from './dto/roles.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { Roles } from '../../common/decorators/roles.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
-import { SystemRole } from '../../common/enums/role.enum';
 import { Permission } from '../../common/enums/permission.enum';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
 
 @ApiTags('Roles')
 @ApiBearerAuth()
 @UseGuards(RolesGuard, PermissionsGuard)
+/**
+ * Authorisation here is by permission, not by role name.
+ *
+ * These routes used to carry `@Roles(SUPER_ADMIN)` *and* a `ROLE_*` permission,
+ * so an administrator whose access map said they could read roles still got a
+ * 403 — the product lets a hospital define its own roles, and a check on a
+ * hard-coded role name is a check that cannot follow them. The permission
+ * decorators below are the real gate, and `RolesService` still refuses to
+ * modify a system role whoever is asking.
+ */
 @Controller('roles')
 export class RolesController {
   constructor(private readonly rolesService: RolesService) {}
 
   @Get()
-  @Roles(SystemRole.SUPER_ADMIN)
   @Permissions(Permission.ROLE_READ)
   @ApiOperation({ summary: 'List all roles (System + Organization specific)' })
   async findAll(@CurrentUser() currentUser: AuthenticatedUser) {
@@ -49,7 +56,6 @@ export class RolesController {
   }
 
   @Get(':id')
-  @Roles(SystemRole.SUPER_ADMIN)
   @Permissions(Permission.ROLE_READ)
   @ApiOperation({ summary: 'Get a specific role by ID with permissions' })
   @ApiParam({ name: 'id', type: String })
@@ -58,7 +64,6 @@ export class RolesController {
   }
 
   @Post()
-  @Roles(SystemRole.SUPER_ADMIN)
   @Permissions(Permission.ROLE_CREATE)
   @ApiOperation({ summary: 'Create a new custom organization-specific role' })
   async create(
@@ -71,7 +76,6 @@ export class RolesController {
   }
 
   @Patch(':id')
-  @Roles(SystemRole.SUPER_ADMIN)
   @Permissions(Permission.ROLE_UPDATE)
   @ApiOperation({ summary: 'Update custom role name or description' })
   @ApiParam({ name: 'id', type: String })
@@ -84,7 +88,6 @@ export class RolesController {
   }
 
   @Delete(':id')
-  @Roles(SystemRole.SUPER_ADMIN)
   @Permissions(Permission.ROLE_DELETE)
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({ summary: 'Soft delete a custom role' })
@@ -97,7 +100,6 @@ export class RolesController {
   }
 
   @Put(':id/permissions')
-  @Roles(SystemRole.SUPER_ADMIN)
   @Permissions(Permission.ROLE_UPDATE)
   @ApiOperation({ summary: 'Assign permissions to a custom role' })
   @ApiParam({ name: 'id', type: String })
@@ -111,7 +113,6 @@ export class RolesController {
   }
 
   @Post(':id/users')
-  @Roles(SystemRole.SUPER_ADMIN)
   @Permissions(Permission.ROLE_UPDATE)
   @ApiOperation({ summary: 'Assign a user to a role' })
   @ApiParam({ name: 'id', type: String })
@@ -125,7 +126,6 @@ export class RolesController {
   }
 
   @Delete(':id/users/:userId')
-  @Roles(SystemRole.SUPER_ADMIN)
   @Permissions(Permission.ROLE_UPDATE)
   @ApiOperation({ summary: 'Remove a user from a role' })
   @ApiParam({ name: 'id', type: String })

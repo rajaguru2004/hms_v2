@@ -30,6 +30,7 @@ import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { SystemRole } from '../../common/enums/role.enum';
 import { Permission } from '../../common/enums/permission.enum';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
+import { resolveOrganizationId } from '../../common/utils/tenant.util';
 
 /**
  * UserController — REST API for user management.
@@ -74,8 +75,7 @@ export class UserController {
     @Query('role') role?: string,
     @CurrentUser() currentUser?: AuthenticatedUser,
   ) {
-    const organizationId = currentUser?.organizationId ?? 'org-demo';
-    return this.userService.findStaff(organizationId, role);
+    return this.userService.findStaff(resolveOrganizationId(currentUser), role);
   }
 
   @Get()

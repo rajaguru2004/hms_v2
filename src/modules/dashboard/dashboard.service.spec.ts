@@ -5,17 +5,20 @@ import { DashboardRepository } from './dashboard.repository';
 
 const ORG = 'org-demo';
 
-const mockMetrics = [
-  150, // totalPatients
-  12, // todayAppointments
-  5, // pendingLabOrders
-  8, // pendingPrescriptions
-  { _sum: { amount: 3500 } }, // todayPayments
-  20, // occupiedBeds
-  40, // totalBeds
-  6, // waitingQueue
-  2, // criticalLabResults
-];
+// `getMetrics` returns one object from a single SQL aggregate. It used to
+// return a tuple of nine parallel query results, and this fixture was still
+// that tuple — so every `metrics.totalPatients` read came back undefined.
+const mockMetrics = {
+  totalPatients: 150,
+  todayAppointments: 12,
+  pendingLabOrders: 5,
+  pendingPrescriptions: 8,
+  todayRevenue: 3500,
+  occupiedBeds: 20,
+  totalBeds: 40,
+  waitingQueue: 6,
+  criticalLabResults: 2,
+};
 
 const mockStatuses = [
   { status: 'scheduled', _count: 5 },
@@ -79,11 +82,7 @@ describe('DashboardService', () => {
 
   describe('getDashboardData', () => {
     beforeEach(() => {
-      repository.getMetrics.mockResolvedValue(
-        mockMetrics as unknown as Awaited<
-          ReturnType<DashboardRepository['getMetrics']>
-        >,
-      );
+      repository.getMetrics.mockResolvedValue(mockMetrics);
       repository.getAppointmentStatusBreakdown.mockResolvedValue(mockStatuses);
       repository.getQueueByService.mockResolvedValue(mockQueueByService);
       repository.getRecentPatients.mockResolvedValue(mockRecentPatients);
@@ -140,16 +139,32 @@ describe('DashboardService', () => {
       expect(result.upcomingAppointments[0].patient.mrn).toBe('MRN001');
     });
 
-    it('should handle zero revenue (null _sum) gracefully', async () => {
-      repository.getMetrics.mockResolvedValue([
-        ...mockMetrics.slice(0, 4),
-        { _sum: { amount: null } },
-        ...mockMetrics.slice(5),
-      ] as unknown as Awaited<ReturnType<DashboardRepository['getMetrics']>>);
+    it('should handle a day with no revenue gracefully', async () => {
+      // SUM() over no rows is NULL, which must render as 0 and not as a blank
+      // tile on the board.
+      repository.getMetrics.mockResolvedValue({
+        ...mockMetrics,
+        todayRevenue: null,
+      });
 
       const result = await service.getDashboardData(ORG);
 
       expect(result.stats.todayRevenue).toBe(0);
+    });
+
+    it('should never report negative available beds', async () => {
+      // Reserved and blocked beds are counted as occupied by this query, so
+      // occupied can exceed the ward total; a negative bed count on a board is
+      // worse than a zero.
+      repository.getMetrics.mockResolvedValue({
+        ...mockMetrics,
+        occupiedBeds: 45,
+        totalBeds: 40,
+      });
+
+      const result = await service.getDashboardData(ORG);
+
+      expect(result.stats.availableBeds).toBe(0);
     });
 
     it('should call all repository methods in parallel', async () => {

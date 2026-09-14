@@ -7,6 +7,19 @@ import { ConfigService } from '@nestjs/config';
 import { AuditService } from '../../audit/audit.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppCacheService } from '../../cache/cache.service';
+import { AuthCacheService } from '../../cache/auth-cache.service';
+import { SettingsService } from '../settings/settings.service';
+
+// Identity cache — every write that changes who a user is must clear it.
+const mockAuthCache = {
+  invalidateUser: jest.fn().mockResolvedValue(undefined),
+  invalidateUsers: jest.fn().mockResolvedValue(undefined),
+};
+
+// The bootstrap reads the organisation; only findOrganizationById is used.
+const mockSettings = {
+  findOrganizationById: jest.fn(),
+};
 
 describe('AuthService (getMyAccess)', () => {
   let service: AuthService;
@@ -44,6 +57,8 @@ describe('AuthService (getMyAccess)', () => {
         { provide: AuditService, useValue: mockAudit },
         { provide: AppCacheService, useValue: mockCache },
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: SettingsService, useValue: mockSettings },
+        { provide: AuthCacheService, useValue: mockAuthCache },
       ],
     }).compile();
 

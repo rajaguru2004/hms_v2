@@ -29,6 +29,7 @@ import { Permission } from '../../common/enums/permission.enum';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
 import { CreateMachineDto, UpdateMachineDto } from './dto/machine.dto';
 import { ResultsQueueQueryDto, MachineQueryDto } from './dto/results-queue.dto';
+import { resolveOrganizationId } from '../../common/utils/tenant.util';
 
 @ApiTags('Integrations')
 @ApiBearerAuth()
@@ -146,7 +147,7 @@ export class IntegrationsController {
     @Body('machineIntegrationId') machineIntegrationId?: string,
     @CurrentUser() currentUser?: AuthenticatedUser,
   ) {
-    const orgId = organizationId || currentUser?.organizationId || 'org-demo';
+    const orgId = resolveOrganizationId(currentUser, organizationId);
     return this.integrationsService.uploadResultsFile(
       file?.buffer,
       file?.originalname || 'upload.csv',

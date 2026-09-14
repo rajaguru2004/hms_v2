@@ -7,9 +7,11 @@ import { LabResultRepository } from './lab-result.repository';
 import { AuditService } from '../../audit/audit.service';
 import { LabTest, LabOrder, LabResult } from '@prisma/client';
 import { NotFoundException } from '../../common/exceptions/app.exception';
+import { PrismaService } from '../../prisma/prisma.service';
 
 describe('LaboratoryService', () => {
   let service: LaboratoryService;
+  let prisma: jest.Mocked<PrismaService>;
   let labTestRepository: jest.Mocked<LabTestRepository>;
   let labOrderRepository: jest.Mocked<LabOrderRepository>;
   let labResultRepository: jest.Mocked<LabResultRepository>;
@@ -133,6 +135,8 @@ describe('LaboratoryService', () => {
       log: jest.fn(),
     };
 
+    const mockPrisma = { $queryRaw: jest.fn().mockResolvedValue([]) };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         LaboratoryService,
@@ -140,10 +144,14 @@ describe('LaboratoryService', () => {
         { provide: LabOrderRepository, useValue: mockOrderRepo },
         { provide: LabResultRepository, useValue: mockResultRepo },
         { provide: AuditService, useValue: mockAudit },
+        // getStats runs one raw SQL aggregate; the rest of the service goes
+        // through repositories.
+        { provide: PrismaService, useValue: mockPrisma },
       ],
     }).compile();
 
     service = module.get<LaboratoryService>(LaboratoryService);
+    prisma = module.get(PrismaService);
     labTestRepository = module.get(LabTestRepository);
     labOrderRepository = module.get(LabOrderRepository);
     labResultRepository = module.get(LabResultRepository);
@@ -394,13 +402,20 @@ describe('LaboratoryService', () => {
   });
 
   describe('getStats', () => {
+    // getStats is one raw SQL aggregate, not six repository counts — the spec
+    // predated that change and was asserting against an implementation that no
+    // longer existed.
     it('should calculate laboratory statistics', async () => {
-      labOrderRepository.count.mockResolvedValueOnce(5); // pending
-      labOrderRepository.count.mockResolvedValueOnce(3); // sampleCollected
-      labOrderRepository.count.mockResolvedValueOnce(2); // inProgress
-      labOrderRepository.count.mockResolvedValueOnce(4); // completedToday
-      labResultRepository.count.mockResolvedValue(1); // criticalResults
-      labTestRepository.count.mockResolvedValue(20); // totalTests
+      (prisma.$queryRaw as jest.Mock).mockResolvedValue([
+        {
+          pending: BigInt(5),
+          sample_collected: BigInt(3),
+          in_progress: BigInt(2),
+          completed_today: BigInt(4),
+          critical_results: BigInt(1),
+          total_tests: BigInt(20),
+        },
+      ]);
 
       const stats = await service.getStats('org-demo');
       expect(stats.pending).toBe(5);
@@ -409,6 +424,25 @@ describe('LaboratoryService', () => {
       expect(stats.completedToday).toBe(4);
       expect(stats.criticalResults).toBe(1);
       expect(stats.totalTests).toBe(20);
+    });
+
+    it('should count Postgres bigints as numbers, not strings', async () => {
+      // COUNT(*) comes back as BigInt; a missing Number() would surface as
+      // "5" on a dashboard tile and break every comparison against it.
+      (prisma.$queryRaw as jest.Mock).mockResolvedValue([
+        {
+          pending: BigInt(0),
+          sample_collected: BigInt(0),
+          in_progress: BigInt(0),
+          completed_today: BigInt(0),
+          critical_results: BigInt(0),
+          total_tests: BigInt(0),
+        },
+      ]);
+
+      const stats = await service.getStats('org-demo');
+      expect(typeof stats.pending).toBe('number');
+      expect(stats.pending).toBe(0);
     });
   });
 });

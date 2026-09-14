@@ -23,6 +23,7 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { Permission } from '../../common/enums/permission.enum';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
+import { resolveOrganizationId } from '../../common/utils/tenant.util';
 import {
   CreateDepartmentDto,
   UpdateDepartmentDto,
@@ -41,14 +42,39 @@ import {
 export class SettingsController {
   constructor(private readonly settingsService: SettingsService) {}
 
+  // ── SITE ───────────────────────────────────────────────────────────────────
+
+  /**
+   * The site map every signed-in client reads to render itself.
+   *
+   * No `@Permissions` by design: currency, clock format, triage vocabulary and
+   * the wait-breach threshold are things a screen obeys, not things a user
+   * administers. Gating it behind SETTINGS_READ is why every clinician got a
+   * 403 here and silently fell back to defaults that were not their hospital's.
+   */
+  @Get()
+  @ApiOperation({ summary: "The signed-in user's site configuration" })
+  async getSiteSettings(
+    @CurrentUser() currentUser: AuthenticatedUser,
+  ): Promise<Record<string, string>> {
+    return this.settingsService.getSiteSettings(
+      resolveOrganizationId(currentUser),
+    );
+  }
+
   // ── DEPARTMENTS ────────────────────────────────────────────────────────────
 
   @Get('departments')
   @Permissions(Permission.SETTINGS_READ)
   @ApiOperation({ summary: 'Get all departments for an organization' })
-  @ApiQuery({ name: 'organizationId', required: true, type: String })
-  async getDepartments(@Query('organizationId') organizationId: string) {
-    return this.settingsService.findAllDepartments(organizationId);
+  @ApiQuery({ name: 'organizationId', required: false, type: String })
+  async getDepartments(
+    @CurrentUser() currentUser: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.settingsService.findAllDepartments(
+      resolveOrganizationId(currentUser, organizationId),
+    );
   }
 
   @Get('departments/:id')
@@ -98,9 +124,14 @@ export class SettingsController {
   @Get('integrations')
   @Permissions(Permission.SETTINGS_READ)
   @ApiOperation({ summary: 'Get all machine integrations for an organization' })
-  @ApiQuery({ name: 'organizationId', required: true, type: String })
-  async getIntegrations(@Query('organizationId') organizationId: string) {
-    return this.settingsService.findAllIntegrations(organizationId);
+  @ApiQuery({ name: 'organizationId', required: false, type: String })
+  async getIntegrations(
+    @CurrentUser() currentUser: AuthenticatedUser,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    return this.settingsService.findAllIntegrations(
+      resolveOrganizationId(currentUser, organizationId),
+    );
   }
 
   @Get('integrations/:id')
@@ -176,12 +207,20 @@ export class SettingsController {
 
   @Get('organization')
   @Permissions(Permission.SETTINGS_READ)
-  @ApiOperation({ summary: 'Get organization details by ID' })
-  @ApiQuery({ name: 'id', required: true, type: String })
+  @ApiOperation({ summary: "Get the signed-in user's organization" })
+  @ApiQuery({
+    name: 'id',
+    required: false,
+    type: String,
+    description: 'SUPER_ADMIN only; everyone else gets their own organisation',
+  })
   async getOrganization(
-    @Query('id') id: string,
+    @CurrentUser() currentUser: AuthenticatedUser,
+    @Query('id') id?: string,
   ): Promise<OrganizationWithModules> {
-    return this.settingsService.findOrganizationById(id);
+    return this.settingsService.findOrganizationById(
+      resolveOrganizationId(currentUser, id),
+    );
   }
 
   @Put('organization')
@@ -191,7 +230,11 @@ export class SettingsController {
     @Body() dto: UpdateOrganizationDto,
     @CurrentUser() currentUser: AuthenticatedUser,
   ): Promise<OrganizationWithModules> {
-    return this.settingsService.updateOrganization(dto, currentUser.id);
+    return this.settingsService.updateOrganization(
+      resolveOrganizationId(currentUser, dto.id),
+      dto,
+      currentUser.id,
+    );
   }
 
   // ── USERS ──────────────────────────────────────────────────────────────────
@@ -208,8 +251,10 @@ export class SettingsController {
     @Query('role') role?: string,
     @CurrentUser() currentUser?: AuthenticatedUser,
   ) {
-    const orgId = organizationId || currentUser?.organizationId || 'org-demo';
-    return this.settingsService.findAllUsers(orgId, role);
+    return this.settingsService.findAllUsers(
+      resolveOrganizationId(currentUser, organizationId),
+      role,
+    );
   }
 
   @Get('users/:id')
@@ -220,18 +265,27 @@ export class SettingsController {
     return this.settingsService.findUserById(id);
   }
 
+  /**
+   * Creating a staff account is user administration, so it needs USER_CREATE as
+   * well as SETTINGS_UPDATE. Without that, anyone who could edit the hospital's
+   * address could also mint accounts and assign them roles.
+   */
   @Post('users')
-  @Permissions(Permission.SETTINGS_UPDATE)
+  @Permissions(Permission.SETTINGS_UPDATE, Permission.USER_CREATE)
   @ApiOperation({ summary: 'Create a new user' })
   async createUser(
     @Body() dto: CreateSettingsUserDto,
     @CurrentUser() currentUser: AuthenticatedUser,
   ) {
-    return this.settingsService.createUser(dto, currentUser.id);
+    return this.settingsService.createUser(
+      resolveOrganizationId(currentUser, dto.organizationId),
+      dto,
+      currentUser.id,
+    );
   }
 
   @Put('users/:id')
-  @Permissions(Permission.SETTINGS_UPDATE)
+  @Permissions(Permission.SETTINGS_UPDATE, Permission.USER_UPDATE)
   @ApiOperation({ summary: 'Update user settings by ID' })
   @ApiParam({ name: 'id', type: String })
   async updateUser(
@@ -243,7 +297,7 @@ export class SettingsController {
   }
 
   @Delete('users/:id')
-  @Permissions(Permission.SETTINGS_UPDATE)
+  @Permissions(Permission.SETTINGS_UPDATE, Permission.USER_DELETE)
   @ApiOperation({ summary: 'Soft delete user by ID' })
   @ApiParam({ name: 'id', type: String })
   async deleteUser(

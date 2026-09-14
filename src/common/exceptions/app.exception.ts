@@ -30,6 +30,19 @@ export class NotFoundException extends AppException {
   }
 }
 
+/**
+ * A request the server understood and refuses on its own terms.
+ *
+ * Distinct from a validation failure: the shape was right, the meaning was not
+ * (creating an account with no password, paying more than an invoice's
+ * balance). The message is shown to a person, so it says what to do next.
+ */
+export class BadRequestException extends AppException {
+  constructor(message: string, errorCode: ErrorCode) {
+    super(message, errorCode, HttpStatus.BAD_REQUEST);
+  }
+}
+
 export class ConflictException extends AppException {
   constructor(message: string, errorCode: ErrorCode) {
     super(message, errorCode, HttpStatus.CONFLICT);

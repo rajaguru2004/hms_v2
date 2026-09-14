@@ -6,12 +6,22 @@ import { UserRepository } from '../users/user.repository';
 import { MachineIntegrationRepository } from '../integrations/machine-integration.repository';
 import { AuditService } from '../../audit/audit.service';
 import { AppCacheService } from '../../cache/cache.service';
+import { AuthCacheService } from '../../cache/auth-cache.service';
+import {
+  mergeOrganizationSettings,
+  resolveOrganizationSettings,
+  toSiteSettingsMap,
+  type OrganizationSettings,
+  type OrganizationSettingsPatch,
+} from './organization-settings';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditAction } from '../../common/enums/action.enum';
 import {
   NotFoundException,
   ConflictException,
+  BadRequestException,
 } from '../../common/exceptions/app.exception';
+import { hashPassword } from '../../common/utils/hash.util';
 import { ErrorCodes } from '../../common/exceptions/error-codes';
 import {
   CreateDepartmentDto,
@@ -23,6 +33,22 @@ import {
   CreateSettingsUserDto,
   UpdateSettingsUserDto,
 } from './dto/settings.dto';
+
+/**
+ * A user row with the password hash removed.
+ *
+ * These endpoints returned the raw Prisma row, hash included, to anyone who
+ * could read the staff directory. Nothing needed it; it was simply never
+ * stripped.
+ */
+export type SafeUser = Omit<User, 'password'>;
+
+function stripPassword<T extends { password?: string | null }>(
+  user: T,
+): Omit<T, 'password'> {
+  const { password: _password, ...rest } = user;
+  return rest;
+}
 
 export interface OrganizationWithModules {
   id: string;
@@ -38,7 +64,8 @@ export interface OrganizationWithModules {
   city: string | null;
   region: string | null;
   country: string;
-  settings: Record<string, unknown>;
+  /** Always complete: defaults deep-merged with whatever the site stored. */
+  settings: OrganizationSettings;
   subscriptionTier: string;
   subscriptionStatus: string;
   subscriptionStartedAt: Date | null;
@@ -69,6 +96,7 @@ export interface FormattedDepartment {
 @Injectable()
 export class SettingsService {
   constructor(
+    private readonly authCache: AuthCacheService,
     private readonly departmentRepository: DepartmentRepository,
     private readonly organizationRepository: OrganizationRepository,
     private readonly userRepository: UserRepository,
@@ -492,7 +520,7 @@ export class SettingsService {
         string,
         unknown
       >,
-      settings: JSON.parse(updated.settings || '{}') as Record<string, unknown>,
+      settings: resolveOrganizationSettings(updated.settings),
     };
   }
 
@@ -534,10 +562,7 @@ export class SettingsService {
       createdAt: organization.createdAt,
       updatedAt: organization.updatedAt,
       createdById: organization.createdById,
-      settings: JSON.parse(organization.settings || '{}') as Record<
-        string,
-        unknown
-      >,
+      settings: resolveOrganizationSettings(organization.settings),
       modulesEnabled: JSON.parse(organization.modulesEnabled || '{}') as Record<
         string,
         unknown
@@ -548,11 +573,43 @@ export class SettingsService {
     return response;
   }
 
+  /**
+   * @param organizationId resolved from the JWT by the controller, not from
+   * the body — `dto.id` is advisory and honoured only for a SUPER_ADMIN.
+   */
+  /**
+   * The site's configuration as the flat map `GET /api/settings` serves.
+   *
+   * Deliberately not permission-gated at the controller: a nurse needs the
+   * currency, the clock format and the wait-breach threshold to render a
+   * screen, and none of that is administrative. `SETTINGS_READ` guards
+   * *editing* the configuration, not obeying it — gating this is why every
+   * clinician used to get a 403 fetching the branding and fell back to
+   * defaults that did not match their hospital.
+   */
+  async getSiteSettings(
+    organizationId: string,
+  ): Promise<Record<string, string>> {
+    const organization = await this.findOrganizationById(organizationId);
+
+    return toSiteSettingsMap(
+      {
+        name: organization.name,
+        logoUrl: organization.logoUrl,
+        logoTextUrl: organization.logoTextUrl,
+        primaryColor: organization.primaryColor,
+        secondaryColor: organization.secondaryColor,
+      },
+      organization.settings,
+    );
+  }
+
   async updateOrganization(
+    organizationId: string,
     dto: UpdateOrganizationDto,
     userId?: string,
   ): Promise<OrganizationWithModules> {
-    const existing = await this.organizationRepository.findById(dto.id);
+    const existing = await this.organizationRepository.findById(organizationId);
     if (!existing) {
       throw new NotFoundException(
         'Organization not found',
@@ -560,13 +617,22 @@ export class SettingsService {
       );
     }
 
-    const { id, settings, modulesEnabled, ...updateData } = dto;
+    const { id: _ignoredId, settings, modulesEnabled, ...updateData } = dto;
+    const id = organizationId;
     const updatePayload: Record<string, string | boolean | undefined> = {
       ...updateData,
     };
 
     if (settings !== undefined) {
-      updatePayload.settings = JSON.stringify(settings);
+      // Merge, never replace. `PUT` writes the whole column, so a phone saving
+      // one switch would otherwise wipe every key it did not send — including
+      // ones set from the web console minutes earlier.
+      updatePayload.settings = JSON.stringify(
+        mergeOrganizationSettings(
+          existing.settings,
+          settings as OrganizationSettingsPatch,
+        ),
+      );
     }
     if (modulesEnabled !== undefined) {
       updatePayload.modulesEnabled = JSON.stringify(modulesEnabled);
@@ -619,7 +685,7 @@ export class SettingsService {
       createdAt: updated.createdAt,
       updatedAt: updated.updatedAt,
       createdById: updated.createdById,
-      settings: JSON.parse(updated.settings || '{}') as Record<string, unknown>,
+      settings: resolveOrganizationSettings(updated.settings),
       modulesEnabled: JSON.parse(updated.modulesEnabled || '{}') as Record<
         string,
         unknown
@@ -629,13 +695,16 @@ export class SettingsService {
 
   // ── USERS ──────────────────────────────────────────────────────────────────
 
-  async findAllUsers(organizationId: string, role?: string): Promise<User[]> {
+  async findAllUsers(
+    organizationId: string,
+    role?: string,
+  ): Promise<SafeUser[]> {
     const where: Record<string, string> = { organizationId };
     if (role) {
       where.role = role;
     }
 
-    return this.userRepository.findMany(where, {
+    const users = await this.userRepository.findMany(where, {
       include: {
         department: {
           select: { id: true, name: true },
@@ -643,11 +712,13 @@ export class SettingsService {
       },
       orderBy: { createdAt: 'desc' },
     });
+
+    return users.map(stripPassword);
   }
 
-  async findUserById(id: string): Promise<User> {
+  async findUserById(id: string): Promise<SafeUser> {
     const cacheKey = AppCacheService.buildKey(this.USER_CACHE_PREFIX, id);
-    const cached = await this.cacheService.get<User>(cacheKey);
+    const cached = await this.cacheService.get<SafeUser>(cacheKey);
     if (cached) return cached;
 
     const user = await this.userRepository.findOne(
@@ -663,11 +734,19 @@ export class SettingsService {
       throw new NotFoundException('User not found', ErrorCodes.USER_NOT_FOUND);
     }
 
-    await this.cacheService.set(cacheKey, user, 300);
-    return user;
+    const safe = stripPassword(user);
+    await this.cacheService.set(cacheKey, safe, 300);
+    return safe;
   }
 
-  async createUser(dto: CreateSettingsUserDto, userId?: string): Promise<User> {
+  /**
+   * @param organizationId resolved from the JWT, not from the body.
+   */
+  async createUser(
+    organizationId: string,
+    dto: CreateSettingsUserDto,
+    userId?: string,
+  ): Promise<SafeUser> {
     const existing = await this.prisma.user.findUnique({
       where: { email: dto.email },
     });
@@ -678,12 +757,21 @@ export class SettingsService {
       );
     }
 
-    const organizationId = dto.organizationId || 'org-demo';
+    if (!dto.password) {
+      // Without this, the row is created and the person can never sign in:
+      // login refuses a user with no password hash and points at an invitation
+      // flow that does not exist. Failing here names the actual problem.
+      throw new BadRequestException(
+        'Set an initial password for this account. Emailed invitations are not implemented.',
+        ErrorCodes.INVITATION_NOT_IMPLEMENTED,
+      );
+    }
 
     const user = await this.userRepository.create({
       organization: { connect: { id: organizationId } },
       fullName: dto.fullName,
       email: dto.email,
+      password: await hashPassword(dto.password),
       phone: dto.phone,
       employeeId: dto.employeeId,
       role: dto.role,
@@ -724,14 +812,14 @@ export class SettingsService {
       metadata: { organizationId },
     });
 
-    return user;
+    return stripPassword(user);
   }
 
   async updateUser(
     id: string,
     dto: UpdateSettingsUserDto,
     userId?: string,
-  ): Promise<User> {
+  ): Promise<SafeUser> {
     const existing = await this.userRepository.findById(id);
     if (!existing) {
       throw new NotFoundException('User not found', ErrorCodes.USER_NOT_FOUND);
@@ -786,6 +874,10 @@ export class SettingsService {
     await this.cacheService.del(
       AppCacheService.buildKey(this.USER_CACHE_PREFIX, id),
     );
+    // A role change or a deactivation from the staff directory has to reach the
+    // JWT strategy's identity cache too, or the old access map stays live for
+    // five more minutes.
+    await this.authCache.invalidateUser(id);
 
     void this.auditService.log({
       userId,
@@ -803,7 +895,7 @@ export class SettingsService {
       metadata: { organizationId: existing.organizationId },
     });
 
-    return updated;
+    return stripPassword(updated);
   }
 
   async deleteUser(id: string, userId?: string): Promise<void> {
@@ -819,6 +911,10 @@ export class SettingsService {
     await this.cacheService.del(
       AppCacheService.buildKey(this.USER_CACHE_PREFIX, id),
     );
+    // A role change or a deactivation from the staff directory has to reach the
+    // JWT strategy's identity cache too, or the old access map stays live for
+    // five more minutes.
+    await this.authCache.invalidateUser(id);
 
     void this.auditService.log({
       userId,

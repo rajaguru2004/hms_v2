@@ -1,6 +1,6 @@
 import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 
 import appConfig from './config/app.config';
@@ -40,6 +40,7 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter';
+import { envFilePaths } from '../prisma/env-paths';
 
 /**
  * AppModule — root module.
@@ -58,14 +59,9 @@ import { GlobalExceptionFilter } from './common/filters/global-exception.filter'
     // Config — must be first
     ConfigModule.forRoot({
       isGlobal: true,
-      // Explicit load order — first file to define a key wins.
-      // Without this, Nest falls back to `.env` alone, which points at a remote
-      // production host. Keep in sync with prisma.config.ts and prisma/load-env.ts.
-      envFilePath: [
-        '.env.local',
-        `.env.${process.env.NODE_ENV ?? 'development'}`,
-        '.env',
-      ],
+      // The order is shared with prisma.config.ts and prisma/load-env.ts so
+      // the API and the Prisma tooling can never resolve different databases.
+      envFilePath: envFilePaths(),
       load: [appConfig, databaseConfig, jwtConfig, redisConfig],
       validationSchema,
       validationOptions,
@@ -140,6 +136,12 @@ import { GlobalExceptionFilter } from './common/filters/global-exception.filter'
 
     // Global logging interceptor — logs all requests
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
+
+    // Rate limiting, registered BEFORE the auth guard so an unauthenticated
+    // flood is rejected before it reaches bcrypt. This was configured but never
+    // registered, so there was no rate limiting anywhere — including unlimited
+    // password attempts on /auth/login.
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
 
     // Global JWT guard — all routes require auth unless @Public()
     { provide: APP_GUARD, useClass: JwtAuthGuard },

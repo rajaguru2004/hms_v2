@@ -8,6 +8,12 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 
+import {
+  assertLocalDatabaseUrl,
+  assertTruncatableDatabaseUrl,
+  describeDatabaseUrl,
+} from '../common/utils/database-url.util';
+
 /**
  * PrismaService — enterprise-grade Prisma client wrapper.
  *
@@ -57,22 +63,37 @@ export class PrismaService
   }
 
   private getDbConnectionInfo(): string {
-    const connectionString = process.env.DATABASE_URL;
-    if (!connectionString) {
-      return 'unknown';
+    return describeDatabaseUrl(process.env.DATABASE_URL).label;
+  }
+
+  /**
+   * Refuses to start against a database that is not local.
+   *
+   * The seeds have had this guard for a while; the server did not, so
+   * `npm run start:dev` with a missing `.env.local` fell through the env chain
+   * to the tracked `.env` and connected to production — quietly, because a
+   * successful connection looks exactly like a correct one.
+   *
+   * Production is exempt (that is where a remote host is the point), and
+   * ALLOW_REMOTE_DB=1 is the deliberate override.
+   */
+  private assertSafeTarget(): void {
+    if (process.env.NODE_ENV === 'production') {
+      return;
     }
-    try {
-      const url = new URL(connectionString);
-      const host = url.hostname;
-      const port = url.port || '5432';
-      const database = url.pathname.replace(/^\//, '');
-      return `${host}:${port}/${database}`;
-    } catch {
-      return 'custom-url';
-    }
+
+    assertLocalDatabaseUrl(process.env.DATABASE_URL, {
+      operation: 'the API server',
+      onBypass: (target) =>
+        this.logger.warn(
+          `ALLOW_REMOTE_DB=1 — connecting to the non-local database ${target.label} deliberately.`,
+        ),
+    });
   }
 
   async onModuleInit(): Promise<void> {
+    this.assertSafeTarget();
+
     const dbInfo = this.getDbConnectionInfo();
     this.logger.log(
       `Connecting to PostgreSQL database (${dbInfo}) via Prisma...`,
@@ -113,14 +134,19 @@ export class PrismaService
   }
 
   /**
-   * cleanDatabase — used in testing only.
-   * Truncates all tables in dependency order.
-   * Never call in production.
+   * cleanDatabase — used in testing only. Truncates every table.
+   *
+   * Three checks, not one. NODE_ENV alone was not enough: the env loaders used
+   * to resolve `.env.local` ahead of `.env.test`, so a suite that set
+   * NODE_ENV=test still opened the *development* database and truncated it.
+   * The database name is the check that actually separates the two.
    */
   async cleanDatabase(): Promise<void> {
     if (process.env.NODE_ENV !== 'test') {
       throw new Error('cleanDatabase can only be called in test environment');
     }
+
+    assertTruncatableDatabaseUrl(process.env.DATABASE_URL);
 
     const tablenames = await this.$queryRaw<{ tablename: string }[]>`
       SELECT tablename FROM pg_tables

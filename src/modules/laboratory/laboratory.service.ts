@@ -471,8 +471,15 @@ export class LaboratoryService {
             AND "resultsReportedAt" >= ${todayStart}
             AND "resultsReportedAt" <= ${todayEnd}
         ) AS completed_today,
-        (SELECT COUNT(*) FROM "LabResult"
-          WHERE "isCritical" = true AND "verifiedAt" IS NULL
+        -- Joined through the order: LabResult.organizationId is nullable, so
+        -- filtering on it directly would silently drop rows. Without the join
+        -- this counted every hospital's unverified critical results, and a
+        -- clinician saw a number that was not about their patients.
+        (SELECT COUNT(*) FROM "LabResult" r
+          JOIN "LabOrder" o ON o."id" = r."orderId"
+          WHERE r."isCritical" = true
+            AND r."verifiedAt" IS NULL
+            AND o."organizationId" = ${organizationId}
         ) AS critical_results,
         (SELECT COUNT(*) FROM "LabTest"
           WHERE "organizationId" = ${organizationId} AND "isActive" = true

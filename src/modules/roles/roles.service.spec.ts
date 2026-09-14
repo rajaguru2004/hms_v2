@@ -11,13 +11,19 @@ import {
   ForbiddenException,
 } from '../../common/exceptions/app.exception';
 import { Role, User } from '@prisma/client';
+import { AuthCacheService } from '../../cache/auth-cache.service';
+
+// Identity cache — every write that changes who a user is must clear it.
+const mockAuthCache = {
+  invalidateUser: jest.fn().mockResolvedValue(undefined),
+  invalidateUsers: jest.fn().mockResolvedValue(undefined),
+};
 
 describe('RolesService', () => {
   let service: RolesService;
   let rolesRepo: jest.Mocked<RolesRepository>;
   let userRepo: jest.Mocked<UserRepository>;
   let auditService: jest.Mocked<AuditService>;
-  let cacheService: jest.Mocked<AppCacheService>;
   let prismaService: jest.Mocked<PrismaService>;
 
   const mockCustomRole: Role = {
@@ -130,6 +136,7 @@ describe('RolesService', () => {
         { provide: UserRepository, useValue: mockUserRepository },
         { provide: AuditService, useValue: mockAudit },
         { provide: AppCacheService, useValue: mockCache },
+        { provide: AuthCacheService, useValue: mockAuthCache },
         {
           provide: PrismaService,
           useValue: mockPrisma as PrismaService,
@@ -141,7 +148,6 @@ describe('RolesService', () => {
     rolesRepo = module.get(RolesRepository);
     userRepo = module.get(UserRepository);
     auditService = module.get(AuditService);
-    cacheService = module.get(AppCacheService);
     prismaService = module.get(PrismaService);
   });
 
@@ -239,7 +245,9 @@ describe('RolesService', () => {
         'role-custom-1',
         'user-admin',
       );
-      expect(cacheService.del).toHaveBeenCalledWith('auth:user:user-1');
+      // Deleting a role changes what its holders may do, so their cached
+      // identity AND access map have to go — not just the user key.
+      expect(mockAuthCache.invalidateUsers).toHaveBeenCalledWith(['user-1']);
     });
 
     it('should throw ForbiddenException if trying to delete a system role', async () => {
@@ -290,7 +298,7 @@ describe('RolesService', () => {
       );
 
       expect(prismaService.$transaction).toHaveBeenCalled();
-      expect(cacheService.del).toHaveBeenCalledWith('auth:user:user-1');
+      expect(mockAuthCache.invalidateUsers).toHaveBeenCalledWith(['user-1']);
     });
   });
 
@@ -303,7 +311,7 @@ describe('RolesService', () => {
       await service.assignUserToRole('role-custom-1', 'user-1', 'user-admin');
 
       expect(prismaService.userRole.create).toHaveBeenCalled();
-      expect(cacheService.del).toHaveBeenCalledWith('auth:user:user-1');
+      expect(mockAuthCache.invalidateUser).toHaveBeenCalledWith('user-1');
     });
   });
 });

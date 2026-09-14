@@ -1,3 +1,4 @@
+import { SkipThrottle } from '@nestjs/throttler';
 import { Controller, Get } from '@nestjs/common';
 import {
   HealthCheck,
@@ -22,6 +23,9 @@ import { AppCacheService } from '../../cache/cache.service';
  * Do NOT add sensitive data to health responses.
  */
 @ApiTags('Health')
+// Liveness and readiness are polled continuously by Docker and any
+// orchestrator; rate-limiting them would report a healthy service as down.
+@SkipThrottle()
 @Controller('health')
 export class HealthController {
   constructor(

@@ -4,6 +4,7 @@ import { RolesRepository } from './roles.repository';
 import { UserRepository } from '../users/user.repository';
 import { AuditService } from '../../audit/audit.service';
 import { AppCacheService } from '../../cache/cache.service';
+import { AuthCacheService } from '../../cache/auth-cache.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuditAction } from '../../common/enums/action.enum';
 import {
@@ -21,6 +22,7 @@ import {
 @Injectable()
 export class RolesService {
   constructor(
+    private readonly authCache: AuthCacheService,
     private readonly rolesRepository: RolesRepository,
     private readonly userRepository: UserRepository,
     private readonly auditService: AuditService,
@@ -154,11 +156,7 @@ export class RolesService {
 
     // Also bust cache for any users assigned this role since their roles list changes
     const assignedUsers = await this.rolesRepository.findUsersOfRole(id);
-    await Promise.all(
-      assignedUsers.map((ur) =>
-        this.cacheService.del(AppCacheService.buildKey('auth:user', ur.userId)),
-      ),
-    );
+    await this.authCache.invalidateUsers(assignedUsers.map((ur) => ur.userId));
 
     void this.auditService.log({
       userId,
@@ -230,11 +228,7 @@ export class RolesService {
     // Targeted Cache Invalidation:
     // Find all users assigned this role, then invalidate their jwt/auth cache
     const assignedUsers = await this.rolesRepository.findUsersOfRole(roleId);
-    await Promise.all(
-      assignedUsers.map((ur) =>
-        this.cacheService.del(AppCacheService.buildKey('auth:user', ur.userId)),
-      ),
-    );
+    await this.authCache.invalidateUsers(assignedUsers.map((ur) => ur.userId));
 
     void this.auditService.log({
       userId,
@@ -283,9 +277,7 @@ export class RolesService {
     }
 
     // Invalidate the target user's auth cache
-    await this.cacheService.del(
-      AppCacheService.buildKey('auth:user', targetUserId),
-    );
+    await this.authCache.invalidateUser(targetUserId);
 
     void this.auditService.log({
       userId,
@@ -330,9 +322,7 @@ export class RolesService {
     }
 
     // Invalidate the target user's auth cache
-    await this.cacheService.del(
-      AppCacheService.buildKey('auth:user', targetUserId),
-    );
+    await this.authCache.invalidateUser(targetUserId);
 
     void this.auditService.log({
       userId,

@@ -9,7 +9,11 @@ import {
   IsObject,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
+import { MaxLength, MinLength, ValidateNested } from 'class-validator';
 import { MachineType, ConnectionType, ConnectionStatus } from '@prisma/client';
+
+import { OrganizationSettingsDto } from './organization-settings.dto';
 
 // ── DEPARTMENTS DTOs ─────────────────────────────────────────────────────────
 
@@ -226,10 +230,17 @@ export class UpdateModulesDto {
 // ── ORGANIZATION DTO ──────────────────────────────────────────────────────────
 
 export class UpdateOrganizationDto {
-  @ApiProperty({ example: 'org-demo' })
+  /**
+   * Optional, and ignored for everyone but a SUPER_ADMIN.
+   *
+   * The organisation is taken from the JWT. It used to be taken from here,
+   * which let any holder of SETTINGS_UPDATE write another hospital's
+   * configuration by changing one string.
+   */
+  @ApiPropertyOptional({ description: 'SUPER_ADMIN only; otherwise ignored' })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  id: string;
+  id?: string;
 
   @ApiPropertyOptional({ example: 'General Hospital' })
   @IsOptional()
@@ -292,11 +303,14 @@ export class UpdateOrganizationDto {
   isActive?: boolean;
 
   @ApiPropertyOptional({
-    example: { currency: 'ETB', timezone: 'Africa/Addis_Ababa' },
+    type: OrganizationSettingsDto,
+    description:
+      'Partial. Groups and leaves not sent are preserved, never overwritten.',
   })
   @IsOptional()
-  @IsObject()
-  settings?: Record<string, any>;
+  @ValidateNested()
+  @Type(() => OrganizationSettingsDto)
+  settings?: OrganizationSettingsDto;
 
   @ApiPropertyOptional({ example: { pharmacy: true, laboratory: true } })
   @IsOptional()
@@ -321,6 +335,21 @@ export class CreateSettingsUserDto {
   @IsEmail()
   @IsNotEmpty()
   email: string;
+
+  /**
+   * The account's first password.
+   *
+   * Required in practice: this endpoint used to create users with no password
+   * at all, who could then never sign in — login answers "Password not set.
+   * Please accept your invitation first", and no invitation flow exists to
+   * accept. Optional in the type only so the error can name the problem.
+   */
+  @ApiPropertyOptional({ example: 'Str0ng@Passw0rd', minLength: 8 })
+  @IsOptional()
+  @IsString()
+  @MinLength(8)
+  @MaxLength(100)
+  password?: string;
 
   @ApiPropertyOptional({ example: '+919876543210' })
   @IsOptional()
