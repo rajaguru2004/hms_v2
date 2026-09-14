@@ -77,7 +77,7 @@ export class PatientDocumentResponseDto {
   @ApiPropertyOptional() verifiedAt?: Date | null;
 }
 
-/** The answer to `GET /patient-documents/:id/original`. */
+/** The answer to `GET /patient-documents/:documentId/original`. */
 export class PatientDocumentOriginalDto {
   @ApiProperty({ description: 'A signed URL that reads the stored original' })
   url: string;

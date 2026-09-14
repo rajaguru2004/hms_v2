@@ -54,9 +54,19 @@ import { UNSUPPORTED_FILE } from './pipeline/messages';
  *
  * Every route is behind `PatientSelfGuard`, so a PATIENT caller's own id is
  * substituted for whatever id the request carried. That is what makes
- * `GET /:id` on somebody else's document a 404 rather than a leak: the query
- * the service runs is scoped to the caller's patient, so the row is not there
- * to return.
+ * `GET /:documentId` on somebody else's document a 404 rather than a leak: the
+ * query the service runs is scoped to the caller's patient, so the row is not
+ * there to return.
+ *
+ * ── Why the route parameter is `:documentId` and not `:id`
+ *
+ * `PatientSelfGuard` rewrites `params.id` to the caller's own patient id — it
+ * is keyed on the *name*, and `id` is one of the two spellings a patient id
+ * arrives under. A document id named `:id` was therefore overwritten with a
+ * patient id before this controller ever saw it, and every one of these routes
+ * answered its own owner with "That document could not be found." The URL shape
+ * is unchanged; only the parameter's name is, which is the same fix and the
+ * same reason `CaseTakingController` names its parameter `:sessionId`.
  */
 @ApiTags('Patient Documents')
 @ApiBearerAuth()
@@ -118,7 +128,7 @@ export class PatientDocumentsController {
     summary: 'Upload a medical document for reading',
     description:
       'Returns immediately. The document is read in the background; poll ' +
-      'GET /patient-documents/{id} until the status leaves "processing". ' +
+      'GET /patient-documents/{documentId} until the status leaves "processing". ' +
       'Nothing extracted is ever written to the medical record without ' +
       'confirmation.',
   })
@@ -150,9 +160,9 @@ export class PatientDocumentsController {
     );
   }
 
-  @Get(':id')
+  @Get(':documentId')
   @Permissions(Permission.PATIENT_DOCUMENT_READ)
-  @ApiParam({ name: 'id', type: String })
+  @ApiParam({ name: 'documentId', type: String })
   @ApiOperation({
     summary: 'One document, with everything extracted from it',
     description:
@@ -162,7 +172,7 @@ export class PatientDocumentsController {
   })
   @ApiResponse({ status: 200, type: PatientDocumentResponseDto })
   async findOne(
-    @Param('id') id: string,
+    @Param('documentId') id: string,
     @CurrentUser() currentUser: AuthenticatedUser,
     @PatientScope() scopedPatientId: string | undefined,
   ): Promise<PatientDocumentResponse> {
@@ -179,13 +189,13 @@ export class PatientDocumentsController {
    * look at is filing. The bucket is private, so what comes back is a signed
    * URL with an expiry rather than a permanent address.
    */
-  @Get(':id/original')
+  @Get(':documentId/original')
   @Permissions(Permission.PATIENT_DOCUMENT_READ)
-  @ApiParam({ name: 'id', type: String })
+  @ApiParam({ name: 'documentId', type: String })
   @ApiOperation({ summary: 'A signed, expiring link to the original file' })
   @ApiResponse({ status: 200, type: PatientDocumentOriginalDto })
   async getOriginal(
-    @Param('id') id: string,
+    @Param('documentId') id: string,
     @CurrentUser() currentUser: AuthenticatedUser,
     @PatientScope() scopedPatientId: string | undefined,
   ): Promise<PatientDocumentOriginalDto> {
@@ -195,10 +205,10 @@ export class PatientDocumentsController {
     );
   }
 
-  @Post(':id/verify')
+  @Post(':documentId/verify')
   @HttpCode(HttpStatus.OK)
   @Permissions(Permission.PATIENT_DOCUMENT_UPDATE)
-  @ApiParam({ name: 'id', type: String })
+  @ApiParam({ name: 'documentId', type: String })
   @ApiOperation({
     summary: 'Confirm that what was extracted from this document is correct',
     description:
@@ -207,7 +217,7 @@ export class PatientDocumentsController {
   })
   @ApiResponse({ status: 200, type: PatientDocumentResponseDto })
   async verify(
-    @Param('id') id: string,
+    @Param('documentId') id: string,
     @CurrentUser() currentUser: AuthenticatedUser,
     @PatientScope() scopedPatientId: string | undefined,
   ): Promise<PatientDocumentResponse> {
