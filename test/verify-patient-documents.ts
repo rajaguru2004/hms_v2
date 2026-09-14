@@ -28,7 +28,7 @@ import { Pool } from 'pg';
  * allergy section, so "not found must never become no" can be watched rather
  * than argued about.
  *
- * Seven things are on trial:
+ * Nine things are on trial:
  *
  *   1. A prescription is read, structured, and stopped at `needs_review`.
  *   2. A laboratory report comes back as investigations, not prose.
@@ -41,6 +41,10 @@ import { Pool } from 'pg';
  *   6. The original is retrievable by its owner and by nobody else.
  *   7. OCR confidence and extraction confidence stay two numbers, and neither
  *      of them is the model's opinion of itself.
+ *   8. Nothing reaches `verified` without a person saying so.
+ *   9. A patient who spots a misreading can say what it should be — and the
+ *      extraction is byte-identical afterwards, because §22's evidence chain
+ *      needs "the model read X" to survive "the patient said Y".
  */
 
 const BASE = process.env.API_BASE_URL ?? 'http://localhost:3000/api';
@@ -177,9 +181,28 @@ interface ExtractionEnvelope {
   verificationStatus: string;
 }
 
+interface CorrectionView {
+  path: string;
+  kind: string;
+  originalValue: string | null;
+  patientValue: string | null;
+  presence: string;
+  presenceReason: string;
+  note: string | null;
+  correctedByUserId: string;
+  correctedAt: string;
+  target: string;
+  documentOnlyReason: string | null;
+  caseFieldPath: string | null;
+  caseFactId: string | null;
+  supersededFactId: string | null;
+  acknowledgedAt: string | null;
+}
+
 interface DocumentView {
   id: string;
   patientId: string;
+  sessionId: string | null;
   mimeType: string;
   byteSize: number;
   pageCount: number;
@@ -190,6 +213,8 @@ interface DocumentView {
   ocrConfidence: number | null;
   extractionConfidence: number | null;
   extraction: ExtractionEnvelope | null;
+  corrections: CorrectionView[];
+  hasOutstandingCorrections: boolean;
   visionFallbackUsed: boolean;
   isDuplicate: boolean;
   duplicateOfId: string | null;
@@ -197,6 +222,15 @@ interface DocumentView {
   uploadedAt: string;
   processedAt: string | null;
   verifiedAt: string | null;
+}
+
+interface CorrectionResult {
+  correction: CorrectionView;
+  document: DocumentView;
+}
+
+interface SessionView {
+  id: string;
 }
 
 interface OriginalView {
@@ -376,6 +410,7 @@ const MIME: Record<string, string> = {
 async function upload(
   token: string,
   filename: string,
+  sessionId?: string,
 ): Promise<Res<DocumentView>> {
   const bytes = readFileSync(join(FIXTURES, filename));
   const extension = filename.split('.').pop() ?? 'png';
@@ -387,8 +422,55 @@ async function upload(
     }),
     filename,
   );
+  if (sessionId) form.append('sessionId', sessionId);
 
   return call<DocumentView>('POST', '/patient-documents', { token, form });
+}
+
+/** `PATCH /patient-documents/:documentId/extraction` — §18's three buttons. */
+async function correct(
+  token: string,
+  id: string,
+  body: Record<string, unknown>,
+): Promise<Res<CorrectionResult>> {
+  return call<CorrectionResult>(
+    'PATCH',
+    `/patient-documents/${id}/extraction`,
+    { token, body },
+  );
+}
+
+/**
+ * A path on the first medication that the model actually filled in, and what it
+ * put there.
+ *
+ * Chosen from the extraction rather than hard-coded because the local model's
+ * output varies run to run — it reads the strengths off this prescription most
+ * of the time and not all of it. Correcting a slot the model happened to leave
+ * empty would prove the weaker half of what is on trial here: what matters is
+ * that a value the page *did* carry survives being disagreed with. `name` is
+ * last because the schema requires it, so it is the one field guaranteed to be
+ * there.
+ */
+function correctableValue(
+  medication: Medication,
+): [path: string, original: string | null] {
+  for (const field of ['strength', 'frequency', 'dose', 'name'] as const) {
+    const value = medication[field];
+    if (typeof value === 'string' && value.length > 0) {
+      return [`medications[0].${field}`, value];
+    }
+  }
+  return ['medications[0].strength', medication.strength];
+}
+
+/** The extraction exactly as the column holds it, for a byte-for-byte compare. */
+async function storedExtraction(id: string): Promise<string> {
+  const row = await prisma.patientDocument.findUnique({
+    where: { id },
+    select: { extraction: true },
+  });
+  return JSON.stringify(row?.extraction ?? null);
 }
 
 /**
@@ -1070,6 +1152,418 @@ async function main(): Promise<void> {
     'and another patient cannot confirm this one’s documents',
     strangerVerifies.status === 404,
     `${strangerVerifies.status} ${String(strangerVerifies.body.errorCode)}`,
+  );
+
+  // ── 9. The patient corrects a misreading ──────────────────────────────────
+  //
+  // §18: "The patient should be able to correct the information." The rule the
+  // whole thing turns on is one column down from that: `extraction` is what the
+  // model claimed about the page, and §22's chain — original → OCR → extracted
+  // data → patient verification → clinical record — needs that claim to still
+  // be there after the patient disagrees with it. So every assertion below is
+  // really one assertion twice: the correction is kept, and the thing it
+  // corrects is kept too.
+  section('a misread value can be corrected, and the misreading survives');
+
+  const [strengthPath, originalAtPath] = correctableValue(
+    extraction.medications[0],
+  );
+  const extractionBefore = await storedExtraction(prescriptionId);
+  note(
+    `correcting ${strengthPath}, which the page was read as "${String(
+      originalAtPath,
+    )}"`,
+  );
+
+  const corrected = await correct(owner.token, prescriptionId, {
+    path: strengthPath,
+    kind: 'correct',
+    value: '850 mg',
+    note: 'The pharmacist gave me the 850.',
+  });
+  check(
+    'the owner can say what one value should have said',
+    corrected.status === 200 && Boolean(corrected.body.data?.correction),
+    `${corrected.status} ${String(corrected.body.message)}`,
+  );
+  if (!corrected.body.data) return;
+
+  const correction = corrected.body.data.correction;
+  check(
+    'the correction keeps the value the model read as well as the one the patient gave',
+    correction.originalValue === originalAtPath &&
+      correction.patientValue === '850 mg' &&
+      correction.presence === 'recorded',
+    `"${String(correction.originalValue)}" → "${String(correction.patientValue)}" (${correction.presence})`,
+  );
+  check(
+    'it says who corrected it and when',
+    Boolean(correction.correctedByUserId) &&
+      !Number.isNaN(Date.parse(correction.correctedAt)),
+    `${correction.correctedByUserId} at ${correction.correctedAt}`,
+  );
+  check(
+    'and says where it went, so the client is not left guessing',
+    correction.target === 'document_only' &&
+      correction.documentOnlyReason === 'no_session' &&
+      correction.caseFactId === null,
+    `${correction.target} / ${String(correction.documentOnlyReason)}`,
+  );
+
+  // The point of the exercise. Not "the extraction still has a strength" —
+  // byte-identical, because anything less means the model's claim was edited.
+  const extractionAfter = await storedExtraction(prescriptionId);
+  check(
+    'the extraction is byte-identical afterwards — nothing was overwritten',
+    extractionAfter === extractionBefore,
+    `${extractionBefore.length} vs ${extractionAfter.length} characters`,
+  );
+
+  const reread = await call<DocumentView>(
+    'GET',
+    `/patient-documents/${prescriptionId}`,
+    { token: owner.token },
+  );
+  const rereadDocument = reread.body.data;
+  check(
+    'reading the document back returns the correction beside the extraction',
+    (rereadDocument?.corrections ?? []).length === 1 &&
+      rereadDocument?.corrections[0].patientValue === '850 mg',
+    `${String(rereadDocument?.corrections.length)} corrections`,
+  );
+  const rereadOriginal = rereadDocument?.extraction
+    ? correctableValue(rereadDocument.extraction.medications[0])[1]
+    : undefined;
+  check(
+    'and the page still says what the page said, so both can be shown at once',
+    rereadOriginal === originalAtPath &&
+      JSON.stringify(rereadDocument?.extraction) === extractionBefore,
+    `extraction still reads "${String(rereadOriginal)}"`,
+  );
+
+  // ── A corrected document is not a confirmed one ───────────────────────────
+  //
+  // This document was verified in the section above. A patient disputing one of
+  // its values has withdrawn that confirmation, whatever the column said a
+  // moment ago; reporting it as verified would report their own dispute as
+  // settled clinical truth.
+  check(
+    'correcting a verified document takes it back out of verified',
+    rereadDocument?.status === 'needs_review' &&
+      rereadDocument.verifiedAt === null &&
+      rereadDocument.hasOutstandingCorrections === true,
+    `${String(rereadDocument?.status)} / ${String(rereadDocument?.verifiedAt)}`,
+  );
+  const stillVerified = await prisma.patientDocument.count({
+    where: { id: prescriptionId, status: 'verified' },
+  });
+  check(
+    'and the row itself is not reportable as verified while the correction stands',
+    stillVerified === 0,
+    `${stillVerified} rows`,
+  );
+  check(
+    'the patient is told the correction landed, not asked to check it again',
+    (rereadDocument?.message ?? '').toLowerCase().includes('kept both'),
+    String(rereadDocument?.message),
+  );
+  check(
+    'nothing inside the machine is named in that sentence',
+    leaksIn(rereadDocument?.message ?? '', TECHNICAL_LEAKS).length === 0,
+    leaksIn(rereadDocument?.message ?? '', TECHNICAL_LEAKS).join(', '),
+  );
+
+  const reconfirmed = await call<DocumentView>(
+    'POST',
+    `/patient-documents/${prescriptionId}/verify`,
+    { token: owner.token },
+  );
+  check(
+    'confirming again settles it, and stamps the correction rather than deleting it',
+    reconfirmed.status === 200 &&
+      reconfirmed.body.data?.status === 'verified' &&
+      reconfirmed.body.data.hasOutstandingCorrections === false &&
+      reconfirmed.body.data.corrections[0].acknowledgedAt !== null &&
+      reconfirmed.body.data.corrections[0].originalValue === originalAtPath,
+    `${reconfirmed.status} ${String(
+      reconfirmed.body.data?.corrections[0]?.acknowledgedAt,
+    )}`,
+  );
+
+  // ── A correction that reaches the interview ───────────────────────────────
+  section('a correction on a session document supersedes the derived fact');
+
+  const session = await call<SessionView>('POST', '/case-taking/sessions', {
+    token: other.token,
+    body: { kind: 'new_consultation', language: 'en' },
+  });
+  const sessionId = session.body.data?.id;
+  check('the other patient has an interview open', Boolean(sessionId));
+  if (!sessionId) return;
+
+  // Uploaded by the *other* patient, so the duplicate check — which is scoped
+  // per patient — does not short-circuit the pipeline.
+  const attachedPost = await upload(other.token, 'prescription.png', sessionId);
+  const attachedId = attachedPost.body.data?.id;
+  check(
+    'a document can be attached to that interview',
+    attachedPost.status === 201 &&
+      Boolean(attachedId) &&
+      attachedPost.body.data?.sessionId === sessionId,
+    `${attachedPost.status} session ${String(attachedPost.body.data?.sessionId)}`,
+  );
+  if (!attachedId) return;
+
+  const attachedRead = await settled(other.token, attachedId);
+  check(
+    'and is read like any other',
+    attachedRead.document?.status === 'needs_review' &&
+      Boolean(attachedRead.document.extraction),
+    `${String(attachedRead.document?.status)} after ${Math.round(
+      attachedRead.waitedMs / 1000,
+    )}s`,
+  );
+  const attachedExtraction = attachedRead.document?.extraction;
+  if (!attachedExtraction || attachedExtraction.medications.length === 0)
+    return;
+
+  // This document was read on its own pass, so the model may have filled a
+  // different set of slots than it did for the owner's copy.
+  const [attachedPath, attachedOriginal] = correctableValue(
+    attachedExtraction.medications[0],
+  );
+  const propagated = await correct(other.token, attachedId, {
+    path: attachedPath,
+    kind: 'correct',
+    value: '850 mg',
+  });
+  check(
+    'the correction is accepted',
+    propagated.status === 200,
+    `${propagated.status} ${String(propagated.body.message)}`,
+  );
+  const reached = propagated.body.data?.correction;
+  check(
+    'and this one says it reached the interview',
+    reached?.target === 'case_fact' &&
+      reached.caseFieldPath === attachedPath &&
+      Boolean(reached.caseFactId) &&
+      Boolean(reached.supersededFactId),
+    `${String(reached?.target)} → ${String(reached?.caseFactId)} over ${String(
+      reached?.supersededFactId,
+    )}`,
+  );
+
+  const chain = await prisma.caseFact.findMany({
+    where: { sessionId, fieldPath: attachedPath },
+    orderBy: { createdAt: 'asc' },
+  });
+  check(
+    'two rows exist for that field, not one rewritten one',
+    chain.length === 2,
+    `${chain.length} rows`,
+  );
+
+  const supersededRow = chain.find(
+    (row) => row.id === reached?.supersededFactId,
+  );
+  const currentRow = chain.find((row) => row.id === reached?.caseFactId);
+  check(
+    'the superseded row is still there, still saying what the document said',
+    supersededRow !== undefined &&
+      supersededRow.sourceType === 'uploaded_document' &&
+      supersededRow.valueJson === attachedOriginal &&
+      supersededRow.supersededById === reached?.caseFactId &&
+      supersededRow.supersededAt !== null,
+    `${String(supersededRow?.sourceType)} ${JSON.stringify(
+      supersededRow?.valueJson,
+    )} → ${String(supersededRow?.supersededById)}`,
+  );
+  check(
+    'and the row that replaced it is the patient’s, unsuperseded',
+    currentRow !== undefined &&
+      currentRow.sourceType === 'patient_correction' &&
+      currentRow.valueJson === '850 mg' &&
+      currentRow.presence === 'recorded' &&
+      currentRow.supersededById === null,
+    `${String(currentRow?.sourceType)} ${JSON.stringify(currentRow?.valueJson)}`,
+  );
+  note(
+    `${String(supersededRow?.sourceType)} ${JSON.stringify(
+      supersededRow?.valueJson,
+    )}  ⟶  ${String(currentRow?.sourceType)} ${JSON.stringify(
+      currentRow?.valueJson,
+    )}`,
+  );
+
+  // ── The tri-state, at the point where it is easiest to collapse ───────────
+  section('"not sure" and "there is nothing here" stay different answers');
+
+  const unsurePath =
+    attachedExtraction.medications.length > 1
+      ? 'medications[1].strength'
+      : 'medications[0].frequency';
+  const unsure = await correct(other.token, attachedId, {
+    path: unsurePath,
+    kind: 'unsure',
+  });
+  check(
+    'a patient who does not know is recorded as not knowing',
+    unsure.status === 200 &&
+      unsure.body.data?.correction.presence === 'unknown' &&
+      unsure.body.data.correction.patientValue === null,
+    `${unsure.status} ${String(unsure.body.data?.correction.presence)}`,
+  );
+
+  const nothingPath =
+    attachedExtraction.medications.length > 2
+      ? 'medications[2].strength'
+      : 'medications[0].dose';
+  const nothing = await correct(other.token, attachedId, {
+    path: nothingPath,
+    kind: 'correct',
+    value: 'none',
+  });
+  check(
+    'a patient who says there is nothing there asserts it, rather than leaving a hole',
+    nothing.status === 200 &&
+      nothing.body.data?.correction.presence === 'none' &&
+      nothing.body.data.correction.patientValue === null,
+    `${nothing.status} ${String(nothing.body.data?.correction.presence)}`,
+  );
+
+  const presences = await prisma.caseFact.findMany({
+    where: { sessionId, supersededById: null },
+    select: { fieldPath: true, presence: true, sourceType: true },
+  });
+  check(
+    'and the interview holds those as two different presences',
+    presences.some((row) => row.presence === 'unknown') &&
+      presences.some((row) => row.presence === 'none') &&
+      presences.every((row) => row.presence !== 'not_assessed'),
+    presences.map((row) => `${row.fieldPath}=${row.presence}`).join(' '),
+  );
+
+  // A value with no counterpart in the interview's field vocabulary. The
+  // registry has no diagnosis slot anywhere, deliberately, so a correction to
+  // one is kept on the document rather than given a slot of its own.
+  // `diagnosesRecorded[0]` when the page carried one, and the document's own
+  // date otherwise. Both are outside the interview's vocabulary and for the same
+  // underlying reason: one because the field registry has no diagnosis slot
+  // anywhere and must not grow one, the other because the date a prescription
+  // was written is a fact about the paper rather than about the patient.
+  // `document.date` is the dependable one: the envelope always carries the key,
+  // and on this fixture the model reads no date off the page and says so with a
+  // null rather than inventing one — which makes it a slot a patient can fill
+  // and a path the interview has nowhere to put.
+  const outsidePath =
+    attachedExtraction.diagnosesRecorded.length > 0
+      ? 'diagnosesRecorded[0]'
+      : 'document.date';
+
+  const outside = await correct(other.token, attachedId, {
+    path: outsidePath,
+    kind: 'correct',
+    value: '2026-09-01',
+  });
+  check(
+    `${outsidePath} is corrected on the document, never into a new interview field`,
+    outside.status === 200 &&
+      outside.body.data?.correction.target === 'document_only' &&
+      outside.body.data.correction.documentOnlyReason === 'no_case_field' &&
+      outside.body.data.correction.caseFactId === null,
+    `${outside.status} ${String(outside.body.data?.correction.target)}/${String(
+      outside.body.data?.correction.documentOnlyReason,
+    )}`,
+  );
+
+  const outsideFacts = await prisma.caseFact.findMany({
+    where: { sessionId },
+    select: { fieldPath: true },
+  });
+  check(
+    'and no interview fact was invented to hold it',
+    outsideFacts.every(
+      (row) => !row.fieldPath.startsWith(outsidePath.split('[')[0]),
+    ),
+    outsideFacts.map((row) => row.fieldPath).join(' '),
+  );
+
+  // ── Refusals ─────────────────────────────────────────────────────────────
+  section('a correction cannot invent a value, and cannot cross patients');
+
+  const inventedPath = await correct(other.token, attachedId, {
+    path: 'medications[99].name',
+    kind: 'correct',
+    value: 'Something the page never said',
+  });
+  check(
+    'a path the document does not hold is refused',
+    inventedPath.status === 400 &&
+      inventedPath.body.errorCode === 'PATIENT_DOCUMENT_VALUE_NOT_FOUND',
+    `${inventedPath.status} ${String(inventedPath.body.errorCode)}`,
+  );
+
+  const empty = await correct(other.token, attachedId, {
+    path: attachedPath,
+    kind: 'correct',
+  });
+  check(
+    'a correction with nothing in it is refused rather than stored as a hole',
+    empty.status === 400 &&
+      empty.body.errorCode === 'PATIENT_DOCUMENT_CORRECTION_INVALID',
+    `${empty.status} ${String(empty.body.errorCode)}`,
+  );
+
+  const smuggled = await correct(other.token, attachedId, {
+    path: attachedPath,
+    kind: 'correct',
+    value: '850 mg',
+    presence: 'recorded',
+  });
+  check(
+    'and a client cannot post a presence of its own',
+    smuggled.status === 400,
+    `${smuggled.status} ${String(smuggled.body.message)}`,
+  );
+
+  const correctionsBefore = (
+    await prisma.patientDocument.findUnique({
+      where: { id: prescriptionId },
+      select: { corrections: true },
+    })
+  )?.corrections;
+
+  const strangerCorrects = await correct(other.token, prescriptionId, {
+    path: attachedPath,
+    kind: 'correct',
+    value: '1000 mg',
+  });
+  check(
+    'another patient cannot correct this patient’s document',
+    strangerCorrects.status === 404 &&
+      strangerCorrects.body.errorCode === 'PATIENT_DOCUMENT_NOT_FOUND',
+    `${strangerCorrects.status} ${String(strangerCorrects.body.errorCode)}`,
+  );
+  check(
+    'and the attempt leaves no trace on it',
+    JSON.stringify(
+      (
+        await prisma.patientDocument.findUnique({
+          where: { id: prescriptionId },
+          select: { corrections: true },
+        })
+      )?.corrections,
+    ) === JSON.stringify(correctionsBefore),
+  );
+  const sessionFacts = await prisma.caseFact.findMany({
+    where: { sessionId },
+    select: { valueJson: true },
+  });
+  check(
+    'nor does it reach the other patient’s interview',
+    sessionFacts.every((row) => row.valueJson !== '1000 mg'),
+    `${sessionFacts.length} facts on the session`,
   );
 }
 

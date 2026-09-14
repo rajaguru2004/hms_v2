@@ -1,0 +1,51 @@
+-- Patient corrections to what was read off a document.
+--
+-- One nullable JSONB column, and the argument for it is entirely about where it
+-- is NOT.
+--
+--   1. It is not an edit to `extraction`.
+--
+--      `PatientDocument.extraction` is the record of what the model claimed
+--      about the page. Documents §22 sets out the evidence chain —
+--
+--          Original Document → OCR Output → Extracted Medical Data
+--                            → Patient Verification → Clinical Record
+--
+--      — and a correction is a *later link* in that chain, not a revision of an
+--      earlier one. Overwriting the extracted value with the patient's would
+--      leave the row unable to answer "the model read X, the patient said it
+--      was Y", and that sentence is the entire reason any of this is auditable.
+--      So the column sits beside `extraction` and `extraction` is never written
+--      again after the pipeline sets it. The same instinct put `ocrText` and
+--      `extraction` in separate columns rather than folding the first into the
+--      second.
+--
+--   2. It is not a table.
+--
+--      `CaseFact` already exists for facts that must be superseded rather than
+--      overwritten, and a correction on a document attached to an interview
+--      goes there — as a new row whose `sourceType` is `patient_correction`,
+--      pointed at by the document-derived row it replaced. What lives here is
+--      the other half: the correction as an event on the *document*, which is
+--      the only home it has when the document belongs to no session. A second
+--      supersession table would be a second mechanism for one idea, and the two
+--      would drift.
+--
+--   3. It is not `String`.
+--
+--      Same reason `20260914180000_add_case_taking` gave for its six columns: a
+--      `String` column accepts malformed JSON silently, and what would be lost
+--      here is a patient's statement that their prescription was misread.
+--
+-- The value is an array and is appended to, never rewritten in place by meaning:
+-- a correction the patient has since confirmed is stamped with an
+-- `acknowledgedAt`, not removed, because "this was disputed and then settled" is
+-- a different fact from "this was never disputed".
+--
+-- Nullable with no default. NULL means no one has ever corrected this document,
+-- which is not the same as `[]` — an empty array would be a claim that somebody
+-- opened the review and found nothing to change. The distinction is the same one
+-- `CaseFact.presence` exists to keep, one level down.
+
+-- AlterTable
+ALTER TABLE "PatientDocument" ADD COLUMN     "corrections" JSONB;

@@ -10,14 +10,31 @@ import {
 import { ErrorCodes } from '../../common/exceptions/error-codes';
 import { PaginatedResult } from '../../common/types/paginated.type';
 import { ObjectStorageService } from '../../storage/object-storage.service';
+import { rowDataFromFact } from '../case-taking/case-state';
+import { CaseTakingRepository } from '../case-taking/case-taking.repository';
+import { FactProvenance } from '../case-taking/engine/tri-state';
+import { CorrectExtractionDto } from './dto/correct-extraction.dto';
 import { PatientDocumentQueryDto } from './dto/patient-document-query.dto';
 import { UploadPatientDocumentDto } from './dto/upload-patient-document.dto';
+import {
+  CorrectionTarget,
+  DocumentOnlyReason,
+  StoredCorrection,
+  acknowledgeAll,
+  caseFieldPathFor,
+  deriveCorrection,
+  documentFactFor,
+  outstandingCorrections,
+  readCorrections,
+  readExtractionValue,
+} from './document-corrections';
 import { PatientDocumentsRepository } from './patient-documents.repository';
 import { readExistingRecord } from './pipeline/contradictions';
 import { DocumentPipelineService } from './pipeline/document-pipeline.service';
 import { documentSha256, findTextDuplicate } from './pipeline/duplicates';
 import {
   AWAITING_REVIEW,
+  CORRECTION_RECORDED,
   DUPLICATE_DOCUMENT,
   NOTHING_EXTRACTED,
   PROCESSING,
@@ -62,6 +79,18 @@ export class PatientDocumentsService {
     private readonly storage: ObjectStorageService,
     private readonly pipeline: DocumentPipelineService,
     private readonly auditService: AuditService,
+    /**
+     * The interview's fact store, borrowed rather than copied.
+     *
+     * `recordFact` writes a row and points the previous one at it inside one
+     * transaction, and that supersession is the only thing in this codebase
+     * allowed to replace a clinical assertion. A correction on a document
+     * attached to a session is exactly such a replacement, so it goes through
+     * that method. Re-implementing the transaction here would be a second
+     * mechanism for one idea, and the second one is the one that forgets to set
+     * `supersededAt`.
+     */
+    private readonly caseFacts: CaseTakingRepository,
   ) {}
 
   /**
@@ -383,6 +412,12 @@ export class PatientDocumentsService {
    * medications or diagnoses onto the patient record. That import is a separate
    * decision with its own provenance rules (§30), and folding it in here would
    * mean a tap on a phone silently editing a chart.
+   *
+   * Confirming is also what settles an outstanding correction. What the patient
+   * is confirming is the document *as they have now corrected it*, so the
+   * corrections are stamped rather than left open — but they are stamped, not
+   * removed, because "disputed and then settled" is a different history from
+   * "never disputed" and a clinician reading the row needs to be able to tell.
    */
   async verify(
     id: string,
@@ -397,9 +432,19 @@ export class PatientDocumentsService {
       );
     }
 
+    const now = new Date();
+    const corrections = readCorrections(document.corrections);
+    const settled = acknowledgeAll(corrections, now);
+
     const updated = await this.repository.update(id, {
       status: 'verified',
-      verifiedAt: new Date(),
+      verifiedAt: now,
+      // Written only when there is something to write, so a document nobody
+      // corrected keeps `corrections` NULL. An empty array would claim somebody
+      // reviewed it and found nothing to change, which is not what happened.
+      ...(corrections.length > 0
+        ? { corrections: settled as unknown as Prisma.InputJsonValue }
+        : {}),
     });
 
     void this.auditService.log({
@@ -411,10 +456,312 @@ export class PatientDocumentsService {
         organizationId: caller.organizationId,
         patientId: caller.patientId,
         status: 'verified',
+        correctionsAcknowledged: outstandingCorrections(corrections).length,
       },
     });
 
     return this.toResponse(updated);
+  }
+
+  /**
+   * The patient fixing one value the model misread. §18, and Case Taking §35's
+   * "every important section should allow correction".
+   *
+   * ── The shape of this method is decided by one rule
+   *
+   * `extraction` is not written. Not here, not anywhere after the pipeline sets
+   * it. It is the record of what the model claimed about the page, and §22's
+   * evidence chain — original → OCR → extracted data → patient verification →
+   * clinical record — only survives while each link stays legible. A correction
+   * is a later link. Fold it into `extraction` and the row can no longer say
+   * "the model read 500 mg, the patient said 850", which is the one sentence
+   * that makes the case auditable. So the correction is appended to a sibling
+   * column and the original value it disputes is copied into it, because the
+   * original is the point.
+   *
+   * ── Where the correction goes after that
+   *
+   * Two places, or one, and the answer is in the response because the client has
+   * to be able to say which. A document attached to a `CaseSession` writes into
+   * the interview's draft through the same append-only supersession the
+   * interview itself uses: the document's reading is recorded as the fact it
+   * always was, and the patient's statement supersedes it. A document attached
+   * to no session has no draft to update, so the correction lives on the
+   * document alone — which is still a complete record of the disagreement.
+   *
+   * ── What does not happen here
+   *
+   * The session's `clinicalState` projection is not rewritten and the safety
+   * engine is not re-run. Neither is a gap: `case-state.ts` rebuilds the state
+   * from the `CaseFact` rows on every read precisely so that two writers cannot
+   * race over one JSON document, and `evaluate` runs off that rebuilt state. The
+   * interview picks this correction up on its next turn or review, from the rows
+   * this method wrote.
+   */
+  async correctExtraction(
+    id: string,
+    dto: CorrectExtractionDto,
+    caller: DocumentCaller,
+  ): Promise<DocumentCorrectionResponse> {
+    const document = await this.requireOwned(id, caller);
+
+    if (document.extraction === null || document.extraction === undefined) {
+      throw new BadRequestException(
+        'There is nothing to correct on this document yet.',
+        ErrorCodes.PATIENT_DOCUMENT_NOT_READY,
+      );
+    }
+
+    const reading = readExtractionValue(document.extraction, dto.path);
+    if (!reading.ok) {
+      // Refused rather than accepted as a new value. A path the extraction does
+      // not hold is a client inventing a finding by way of a field name, and a
+      // correction to a value nobody claimed is not a correction.
+      throw new BadRequestException(
+        `We could not find that on this document — ${reading.reason}.`,
+        ErrorCodes.PATIENT_DOCUMENT_VALUE_NOT_FOUND,
+      );
+    }
+
+    this.assertValueMatchesKind(dto);
+
+    const now = new Date();
+    const derivation = deriveCorrection({
+      kind: dto.kind,
+      originalValue: reading.value,
+      patientValue: dto.value,
+      provenance: this.correctionProvenance(document.id, dto.kind, now),
+    });
+    if (!derivation.ok) {
+      throw new BadRequestException(
+        derivation.reason,
+        ErrorCodes.PATIENT_DOCUMENT_CORRECTION_INVALID,
+      );
+    }
+
+    const propagation = await this.propagateCorrection({
+      document,
+      path: dto.path,
+      kind: dto.kind,
+      originalValue: reading.value,
+      fact: derivation.outcome.fact,
+    });
+
+    const correction: StoredCorrection = {
+      path: dto.path,
+      kind: dto.kind,
+      originalValue: reading.value,
+      patientValue: derivation.outcome.patientValue,
+      presence: derivation.outcome.presence,
+      presenceReason: derivation.outcome.reason,
+      note: dto.note ?? null,
+      correctedByUserId: caller.userId,
+      correctedAt: now.toISOString(),
+      ...propagation,
+      acknowledgedAt: null,
+    };
+
+    const corrections = [...readCorrections(document.corrections), correction];
+
+    const updated = await this.repository.update(document.id, {
+      corrections: corrections as unknown as Prisma.InputJsonValue,
+      // A document with an outstanding correction is not confirmed, whatever it
+      // was a moment ago. Saying otherwise would report the patient's own
+      // dispute as settled clinical truth — §17 keeps verification separate from
+      // everything else exactly so this stays answerable.
+      ...(document.status === 'verified'
+        ? { status: 'needs_review', verifiedAt: null }
+        : {}),
+    });
+
+    void this.auditService.log({
+      userId: caller.userId,
+      action: AuditAction.UPDATE,
+      entityName: 'PatientDocument',
+      entityId: document.id,
+      metadata: {
+        organizationId: caller.organizationId,
+        patientId: caller.patientId,
+        path: dto.path,
+        kind: dto.kind,
+        target: correction.target,
+        caseFactId: correction.caseFactId,
+        supersededFactId: correction.supersededFactId,
+      },
+      // The disagreement itself, in the audit trail as well as on the row. Two
+      // records of the same event, because the row can be corrected again and
+      // the log cannot.
+      oldValues: { path: dto.path, value: reading.value },
+      newValues: {
+        value: derivation.outcome.patientValue,
+        presence: derivation.outcome.presence,
+      },
+    });
+
+    return { correction, document: this.toResponse(updated) };
+  }
+
+  /**
+   * `correct` needs a value; `confirm` and `unsure` must not carry one.
+   *
+   * Checked here rather than with a conditional validator because the message a
+   * patient's client gets should say what to do, and because the rule is about
+   * the relationship between two fields rather than the shape of either.
+   */
+  private assertValueMatchesKind(dto: CorrectExtractionDto): void {
+    const supplied = (dto.value ?? '').trim();
+
+    if (dto.kind === 'correct' && supplied.length === 0) {
+      throw new BadRequestException(
+        'Tell us what this should say. To say the document is wrong and there ' +
+          'is nothing here, send "none".',
+        ErrorCodes.PATIENT_DOCUMENT_CORRECTION_INVALID,
+      );
+    }
+    if (dto.kind !== 'correct' && supplied.length > 0) {
+      throw new BadRequestException(
+        dto.kind === 'confirm'
+          ? 'Confirming means agreeing with what is already there. To change ' +
+              'it, send a correction instead.'
+          : '"Not sure" is not a value. Send it on its own.',
+        ErrorCodes.PATIENT_DOCUMENT_CORRECTION_INVALID,
+      );
+    }
+  }
+
+  /**
+   * Provenance for the patient's own statement. §16.
+   *
+   * `confirm` keeps the source as `uploaded_document`, and that is not a slip.
+   * §16 lists "uploaded document" and "patient correction" as different sources
+   * because they are different claims, and a patient agreeing with a document
+   * has not become the author of what it says. What changed is the verification
+   * status — §17 tracks that separately for precisely this case. A correction
+   * and an "I don't know" are the patient speaking, so those are
+   * `patient_correction`.
+   *
+   * No confidence on any of them. There is no measurement of how sure a patient
+   * is, and a number invented here would sit in the same column as an OCR
+   * engine's character confidence.
+   */
+  private correctionProvenance(
+    documentId: string,
+    kind: CorrectExtractionDto['kind'],
+    now: Date,
+  ): FactProvenance {
+    return {
+      source: kind === 'confirm' ? 'uploaded_document' : 'patient_correction',
+      // "Not sure" confirms nothing. The other two are the patient settling the
+      // value themselves, which is confirmation by definition.
+      verification: kind === 'unsure' ? 'unverified' : 'patient_confirmed',
+      recordedAt: now.toISOString(),
+      documentId,
+    };
+  }
+
+  /**
+   * Put the correction into the interview's draft, if there is one to put it in.
+   *
+   * The document's own reading is written first and superseded in the same
+   * breath, so that the chain reads "the document said X → the patient said Y"
+   * rather than starting at Y. It is written here rather than at upload because
+   * §2 forbids extracted information being treated as verified clinical truth:
+   * an upload must not quietly populate a chart with everything a model thought
+   * it saw. One value the patient has actually looked at and disputed is a
+   * different matter — and the row it creates is never live as an unchallenged
+   * assertion, because the patient's supersedes it immediately.
+   *
+   * `confirm` skips that step. There is nothing to supersede: the patient agreed
+   * with the document, so one row carrying the document's value and the
+   * patient's confirmation is the whole of what happened.
+   */
+  private async propagateCorrection(input: {
+    document: PatientDocument;
+    path: string;
+    kind: CorrectExtractionDto['kind'];
+    originalValue: string | null;
+    fact: Parameters<typeof rowDataFromFact>[1];
+  }): Promise<{
+    target: CorrectionTarget;
+    documentOnlyReason: DocumentOnlyReason | null;
+    caseFieldPath: string | null;
+    caseFactId: string | null;
+    supersededFactId: string | null;
+  }> {
+    const documentOnly = (
+      reason: DocumentOnlyReason,
+    ): {
+      target: CorrectionTarget;
+      documentOnlyReason: DocumentOnlyReason;
+      caseFieldPath: null;
+      caseFactId: null;
+      supersededFactId: null;
+    } => ({
+      target: 'document_only',
+      documentOnlyReason: reason,
+      caseFieldPath: null,
+      caseFactId: null,
+      supersededFactId: null,
+    });
+
+    const sessionId = input.document.sessionId;
+    if (!sessionId) return documentOnly('no_session');
+
+    const caseFieldPath = caseFieldPathFor(input.path);
+    if (!caseFieldPath) return documentOnly('no_case_field');
+
+    const live = (await this.caseFacts.listCurrentFacts(sessionId)).find(
+      (row) => row.fieldPath === caseFieldPath,
+    );
+
+    let superseded = live ?? null;
+    if (!live && input.kind !== 'confirm' && input.originalValue !== null) {
+      superseded = await this.caseFacts.recordFact({
+        sessionId,
+        patientId: input.document.patientId,
+        row: rowDataFromFact(
+          caseFieldPath,
+          documentFactFor(
+            input.originalValue,
+            this.documentFactProvenance(input.document),
+          ),
+          input.document.id,
+        ),
+      });
+    }
+
+    const created = await this.caseFacts.recordFact({
+      sessionId,
+      patientId: input.document.patientId,
+      row: rowDataFromFact(caseFieldPath, input.fact, input.document.id),
+    });
+
+    return {
+      target: 'case_fact',
+      documentOnlyReason: null,
+      caseFieldPath,
+      caseFactId: created.id,
+      supersededFactId: superseded?.id ?? null,
+    };
+  }
+
+  /** What the document claims, attributed to the document. §16. */
+  private documentFactProvenance(document: PatientDocument): FactProvenance {
+    return {
+      source: 'uploaded_document',
+      verification: 'unverified',
+      // The recogniser's measurement, tagged as one, so nothing downstream can
+      // compare it against a model's self-report. `document-facts.ts` makes the
+      // same distinction for the same reason.
+      ...(document.ocrConfidence !== null
+        ? {
+            confidence: document.ocrConfidence,
+            confidenceSource: 'ocr' as const,
+          }
+        : {}),
+      recordedAt: (document.processedAt ?? document.uploadedAt).toISOString(),
+      documentId: document.id,
+    };
   }
 
   private async requireOwned(
@@ -450,6 +797,8 @@ export class PatientDocumentsService {
    * message goes stale the first time a status changes without it.
    */
   private toResponse(document: PatientDocument): PatientDocumentResponse {
+    const corrections = readCorrections(document.corrections);
+
     return {
       id: document.id,
       patientId: document.patientId,
@@ -464,6 +813,12 @@ export class PatientDocumentsService {
       ocrConfidence: document.ocrConfidence,
       extractionConfidence: document.extractionConfidence,
       extraction: document.extraction ?? null,
+      // Beside the extraction, never merged into it. A client renders the
+      // corrected value and can still show what the page said, which is what
+      // §18's "the original document must remain available as evidence" means
+      // once the evidence is a value rather than a photograph.
+      corrections,
+      hasOutstandingCorrections: outstandingCorrections(corrections).length > 0,
       visionFallbackUsed: document.visionFallbackUsed,
       isDuplicate: document.duplicateOfId !== null,
       duplicateOfId: document.duplicateOfId,
@@ -489,6 +844,10 @@ export interface PatientDocumentResponse {
   ocrConfidence: number | null;
   extractionConfidence: number | null;
   extraction: unknown;
+  /** §18's corrections, as a sibling of the extraction they dispute. */
+  corrections: StoredCorrection[];
+  /** True while the patient has corrected something and not re-confirmed. */
+  hasOutstandingCorrections: boolean;
   visionFallbackUsed: boolean;
   isDuplicate: boolean;
   duplicateOfId: string | null;
@@ -498,12 +857,21 @@ export interface PatientDocumentResponse {
   verifiedAt: Date | null;
 }
 
+/** What `PATCH /:documentId/extraction` answers with. */
+export interface DocumentCorrectionResponse {
+  /** The correction as stored, including where it went. */
+  correction: StoredCorrection;
+  /** The document afterwards, so the client re-renders from one payload. */
+  document: PatientDocumentResponse;
+}
+
 /** The one sentence this row says to the patient looking at it. */
 export function messageFor(document: {
   status: string;
   duplicateOfId: string | null;
   failureReason: string | null;
   extraction: unknown;
+  corrections: unknown;
 }): string {
   if (document.duplicateOfId) return DUPLICATE_DOCUMENT;
 
@@ -515,6 +883,15 @@ export function messageFor(document: {
       return VERIFIED;
     case 'needs_review':
     case 'extracted':
+      // An outstanding correction outranks the generic prompt: the patient has
+      // already looked, and telling somebody who has just fixed a dose that "we
+      // found some information, please check it" reads as though nothing they
+      // did registered.
+      if (
+        outstandingCorrections(readCorrections(document.corrections)).length
+      ) {
+        return CORRECTION_RECORDED;
+      }
       return hasFindings(document.extraction)
         ? AWAITING_REVIEW
         : NOTHING_EXTRACTED;

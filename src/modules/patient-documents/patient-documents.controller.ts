@@ -5,6 +5,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Post,
   Query,
   UploadedFile,
@@ -34,14 +35,17 @@ import {
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { PaginatedResult } from '../../common/types/paginated.type';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
+import { CorrectExtractionDto } from './dto/correct-extraction.dto';
 import { PatientDocumentQueryDto } from './dto/patient-document-query.dto';
 import {
+  DocumentCorrectionResponseDto,
   PatientDocumentOriginalDto,
   PatientDocumentResponseDto,
 } from './dto/patient-document-response.dto';
 import { UploadPatientDocumentDto } from './dto/upload-patient-document.dto';
 import {
   DocumentCaller,
+  DocumentCorrectionResponse,
   PatientDocumentResponse,
   PatientDocumentsService,
   PATIENT_DOCUMENT_MAX_BYTES,
@@ -201,6 +205,46 @@ export class PatientDocumentsController {
   ): Promise<PatientDocumentOriginalDto> {
     return this.service.getOriginalUrl(
       id,
+      resolveCaller(currentUser, scopedPatientId),
+    );
+  }
+
+  /**
+   * Correct one value the model misread. §18's [ Correct ] and [ Not sure ].
+   *
+   * `PATCH` rather than `POST`, because this is a partial change to the
+   * document's review state rather than a new sub-resource — and the path says
+   * `extraction` because that is what the patient is looking at when they press
+   * the button, even though the column of that name is never written. What gets
+   * written is `corrections`, beside it. `patient-documents.service.ts` sets out
+   * why that separation is not merely tidy.
+   *
+   * The parameter is `:documentId`, and the header of this file explains what
+   * happens when it is not.
+   */
+  @Patch(':documentId/extraction')
+  @Permissions(Permission.PATIENT_DOCUMENT_UPDATE)
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiOperation({
+    summary: 'Tell us what one extracted value should say',
+    description:
+      'Records the correction beside the extraction, never inside it: the ' +
+      'value the model read is kept alongside the value the patient gave, so ' +
+      'the disagreement stays readable. When the document is attached to a ' +
+      'case-taking session the correction also supersedes the fact derived ' +
+      'from the document; the response says which happened. A document with an ' +
+      'outstanding correction is no longer reportable as verified.',
+  })
+  @ApiResponse({ status: 200, type: DocumentCorrectionResponseDto })
+  async correctExtraction(
+    @Param('documentId') id: string,
+    @Body() dto: CorrectExtractionDto,
+    @CurrentUser() currentUser: AuthenticatedUser,
+    @PatientScope() scopedPatientId: string | undefined,
+  ): Promise<DocumentCorrectionResponse> {
+    return this.service.correctExtraction(
+      id,
+      dto,
       resolveCaller(currentUser, scopedPatientId),
     );
   }

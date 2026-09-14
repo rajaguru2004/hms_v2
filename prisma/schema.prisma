@@ -2249,6 +2249,22 @@ model PatientDocument {
   extraction           Json?
   extractionConfidence Float?
 
+  /// What the patient said the extraction got wrong. §18, §22.
+  ///
+  /// A sibling of `extraction`, never an edit to it. `extraction` is the record
+  /// of what the model claimed about the page, and §22's evidence chain —
+  /// original → OCR → extracted data → patient verification → clinical record —
+  /// only holds while each link stays legible. Writing a correction into
+  /// `extraction` would destroy the ability to say "the model read X, the
+  /// patient said it was Y", which is the whole of what makes this auditable.
+  ///
+  /// An append-only array. Each entry names the path it corrects, the value the
+  /// extraction holds there, what the patient says instead, who said it and
+  /// when — and, when the document is attached to an interview, the `CaseFact`
+  /// it superseded. Nothing is ever removed; a correction that has been
+  /// confirmed is stamped rather than deleted.
+  corrections Json?
+
   /// Whether the page had to go to the vision model because OCR could not read
   /// it. Worth knowing when judging the result.
   visionFallbackUsed Boolean @default(false)

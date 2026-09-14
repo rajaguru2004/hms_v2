@@ -62,6 +62,19 @@ export const CONTRADICTION_FOUND =
 export const PROCESSING =
   "We're reading your document now. This usually takes less than a minute.";
 
+/**
+ * The patient has told us something the page got wrong. §18, §35.
+ *
+ * Says two things on purpose. First that both readings are kept — a patient who
+ * believes their correction erased the original will not trust it with the next
+ * one. Second that the document is still waiting on them, because a correction
+ * is not a confirmation and the row has gone back to needing review.
+ */
+export const CORRECTION_RECORDED =
+  'Thank you. We have kept both what the document says and what you have told ' +
+  'us, so a clinician can see the difference. Please confirm the rest of this ' +
+  'document when you are ready.';
+
 /** The patient has confirmed what was found. §18. */
 export const VERIFIED =
   'Thank you. You have confirmed this information, and it is now part of your ' +
