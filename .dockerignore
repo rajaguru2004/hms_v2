@@ -1,10 +1,41 @@
+# What the API image must never see.
+#
+# The builder stage does `COPY . .`, so anything not listed here is uploaded to
+# the daemon on every build and then baked into a layer. Before this file
+# excluded them, `ai-sidecar/` (879 MB of virtualenv and Piper voices) and
+# `hospital-management-system/` (288 MB of an unrelated frontend) made a
+# ~1.2 GB context for an image whose useful content is about 8 MB.
+
 node_modules
 dist
-.git
-.gitignore
-.env*
 coverage
 *.log
+
+.git
+.gitignore
+.github
+.husky
 .vscode
+.agents
+
+# Secrets, and the trap. The tracked `.env` points DATABASE_URL at the
+# production host; baking it into the image would mean a container that happened
+# to start without an explicit DATABASE_URL would fall through to production.
+# Compose supplies every variable the container needs.
+.env*
+
+# The sidecar is its own image (ai-sidecar/Dockerfile) with its own build
+# context, and `.venv` + `voices/` are 879 MB of it.
+ai-sidecar
+
+# A separate frontend checked in beside the API. Nothing in the Nest build
+# reads it, and tsconfig.json already excludes it from compilation.
+hospital-management-system
+
+# Docs and compose files change constantly and would bust the cache layer for
+# `COPY . .` on every edit, for content the runtime never opens.
 README.md
+DEMO.md
+api-documentation.md
 docker-compose*.yml
+Dockerfile

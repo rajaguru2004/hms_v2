@@ -1,0 +1,16 @@
+# The virtualenv and the voices are the two things that must not be copied.
+#
+# `.venv` is 700+ MB of host-built CPython 3.12 packages — wrong path prefixes,
+# wrong interpreter location, and rebuilt from requirements.txt inside the image
+# anyway. `voices/` is ~123 MB of Piper weights that belong to the deployment,
+# not the image: docker-compose.demo.yml bind-mounts them read-only so a new
+# language is a download rather than a rebuild.
+.venv
+voices
+
+__pycache__
+*.pyc
+*.pyo
+
+README.md
+run.sh

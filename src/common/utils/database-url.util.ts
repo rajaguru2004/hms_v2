@@ -32,6 +32,44 @@ export const LOCAL_DB_HOSTS: ReadonlySet<string> = new Set([
   'host.docker.internal',
 ]);
 
+/**
+ * Whether a hostname can only be a name on a Docker network.
+ *
+ * The named list above was enough while there was one compose file. It stopped
+ * being enough the moment a second one existed: `docker-compose.demo.yml` names
+ * its database service whatever reads best, and a guard that has to be edited
+ * every time somebody renames a service is a guard that gets bypassed with
+ * ALLOW_REMOTE_DB=1 instead — which is exactly the override this whole file
+ * exists to make unnecessary.
+ *
+ * The rule is a shape, not a list. A host reachable across the public internet
+ * is always one of two things: a dotted name (`db.example.com`,
+ * `hms.skillhiveinnovations.com`) or an address literal (`140.245.10.145`,
+ * `2606:4700::1111`). A *bare* label with no dot and no colon — `postgres`,
+ * `db`, `hms_v2_postgres_demo` — is resolvable only by something that has been
+ * told what it means: Docker's embedded DNS inside a compose network, or an
+ * /etc/hosts entry. It cannot route off the machine on its own.
+ *
+ * So this deliberately admits any dotless label, and just as deliberately
+ * refuses every dotted name and every IP literal. The tracked `.env`'s
+ * production host is `140.245.10.145`, which is an address literal and stays
+ * refused — see the spec beside this file, which pins that case.
+ *
+ * The residual risk is a bare label that an operator has mapped to a remote box
+ * in /etc/hosts. That is a machine somebody configured by hand to make a remote
+ * database look local, which this guard was never able to see through anyway.
+ */
+function isDockerInternalHost(host: string): boolean {
+  if (!host) return false;
+  // `.` is a dotted name; `:` is an IPv6 literal. Either way it is addressable
+  // from outside, so neither is "local" by this rule.
+  if (host.includes('.') || host.includes(':')) return false;
+  // A bare run of digits is not a name at all — it is an integer-form IPv4
+  // address, which `getaddrinfo` happily dials (`3232235777` is 192.168.1.1).
+  if (/^\d+$/.test(host)) return false;
+  return true;
+}
+
 export interface DatabaseTarget {
   readonly host: string;
   readonly port: string;
@@ -61,7 +99,12 @@ export function describeDatabaseUrl(url: string | undefined): DatabaseTarget {
 
   try {
     const parsed = new URL(url);
-    const host = parsed.hostname;
+    // `URL.hostname` hands back an IPv6 literal still wrapped in the brackets
+    // the URL syntax needs — `[::1]`, not `::1`. LOCAL_DB_HOSTS was written
+    // with the bare form, so the loopback entry never once matched. Unwrapping
+    // here rather than adding `[::1]` to the list keeps `host` meaning "the
+    // host", which is what the label and the error message both print.
+    const host = parsed.hostname.replace(/^\[(.+)\]$/, '$1');
     const port = parsed.port || '5432';
     const database = parsed.pathname.replace(/^\//, '') || 'unknown';
 
@@ -70,7 +113,7 @@ export function describeDatabaseUrl(url: string | undefined): DatabaseTarget {
       port,
       database,
       label: `${host}:${port}/${database}`,
-      isLocal: LOCAL_DB_HOSTS.has(host),
+      isLocal: LOCAL_DB_HOSTS.has(host) || isDockerInternalHost(host),
     };
   } catch {
     return {
@@ -133,7 +176,8 @@ export function assertLocalDatabaseUrl(
         '',
         `   Resolved host : ${target.host}`,
         `   Database      : ${target.database}`,
-        `   Expected host : one of ${[...LOCAL_DB_HOSTS].join(', ')}`,
+        `   Expected host : ${[...LOCAL_DB_HOSTS].join(', ')},`,
+        '                   or any dotless Docker service name (e.g. `postgres`)',
         '',
         '   The tracked `.env` points at a production host and every env loader',
         '   falls through to it. Pin DATABASE_URL in hms_v2/.env.local to your',

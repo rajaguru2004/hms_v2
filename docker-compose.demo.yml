@@ -1,0 +1,425 @@
+# ──────────────────────────────────────────────────────────────
+# MediHive demo stack — one command, one port, one phone.
+#
+#   docker compose -f docker-compose.demo.yml up -d --build
+#
+# Read DEMO.md before a presentation. This file is the reasoning.
+# ──────────────────────────────────────────────────────────────
+#
+# The shape of the problem, which explains almost every choice below:
+#
+# The demo runs on a physical phone, reaching the API through a *single* ngrok
+# tunnel on port 3000 (the free plan pools a second tunnel onto the same static
+# domain and load-balances between them, which sends half the requests to the
+# wrong port). So port 3000 is the only thing the phone can reach, and every
+# other service here is deliberately internal: Postgres, Redis, MinIO and the
+# sidecar are named on the `medihive` network and nothing else.
+#
+# It also runs *beside* `docker-compose.local.yml`, which is up right now and
+# holds the development data. Nothing here may disturb that, so this file uses
+# its own project name, its own container names, its own volumes and its own
+# published host ports. The one port both want is 3000, which the local stack
+# does not publish — the API runs from source there.
+
+name: medihive-demo
+
+services:
+  # ── Postgres ────────────────────────────────────────────────
+  #
+  # `hms_v2_demo`, not `hms_v2_dev`. A separate volume would have been enough
+  # to keep the data apart, but a separate *name* is what stops somebody with
+  # two psql windows open from running the wrong statement in the wrong one.
+  postgres:
+    image: postgres:16-alpine
+    container_name: hms_v2_postgres_demo
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: db_user
+      POSTGRES_PASSWORD: db_password
+      POSTGRES_DB: hms_v2_demo
+    # 55432, because 5432 belongs to the local stack and is in use. Published
+    # at all only so a psql from the host can look at the demo data mid-talk;
+    # nothing in the stack needs it.
+    ports:
+      - '55432:5432'
+    volumes:
+      - postgres_data_demo:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U db_user -d hms_v2_demo']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [medihive]
+
+  # ── Redis ───────────────────────────────────────────────────
+  #
+  # No published port. Nothing outside the network has any business here, and
+  # 6379 is already taken by the local stack.
+  redis:
+    image: redis:7-alpine
+    container_name: hms_v2_redis_demo
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [medihive]
+
+  # ── MinIO ───────────────────────────────────────────────────
+  #
+  # The bucket is created by the entrypoint rather than by hand or by a second
+  # `minio/mc` image. On a single drive MinIO reads a directory under /data as
+  # a bucket, so `mkdir` is exactly what `mc mb` would have done — and it means
+  # the first upload cannot fail with `NoSuchBucket` from inside the S3 client,
+  # which is nowhere anybody would think to look ninety seconds into a demo.
+  # `mkdir -p` is why this is safe to run on every restart.
+  minio:
+    image: minio/minio:latest
+    container_name: hms_v2_minio_demo
+    restart: unless-stopped
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - 'mkdir -p /data/hmsbucket && exec minio server /data --console-address ":9001"'
+    environment:
+      MINIO_ROOT_USER: minio_admin
+      MINIO_ROOT_PASSWORD: minio_password
+    # 9200/9201. Not 9000/9001 (the local stack holds those) and not 9100/9101
+    # either — the Flutter toolchain's `dart:dartdev` listens on 9100 while the
+    # app is being developed, which is a process that is very likely to be
+    # running on exactly the machine this demo runs on.
+    #
+    # These are HOST-SIDE ports and that is all they are. The phone reaches the
+    # demo through one tunnel on 3000 and has no route to either of them — see
+    # S3_ENDPOINT on the api service below for what that means for documents.
+    ports:
+      - '9200:9000'
+      - '9201:9001'
+    volumes:
+      - minio_data_demo:/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'curl -sf http://localhost:9000/minio/health/live || exit 1',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [medihive]
+
+  # ── Schema and the seeds that do not need the API ───────────
+  #
+  # Runs to completion and exits; the API waits on that exit code. A fresh
+  # volume needs the migrations applied and the base data in place before
+  # anything can sign in, and doing it here rather than in the API's entrypoint
+  # keeps one concern out of the long-running process — an API that migrates on
+  # boot is an API that migrates on every restart and every scale-up.
+  #
+  # Safe to run twice, which matters because `up` runs it on every start:
+  #   - `migrate deploy` applies only migrations not already recorded.
+  #   - seed.ts and seed-catalog.ts are upserts on fixed ids, by design.
+  #
+  # Built from the `builder` stage, not `production`: the seeds are TypeScript
+  # run through ts-node, and the runtime image contains neither the .ts sources
+  # nor a reason to.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    image: medihive-api:demo-tooling
+    container_name: hms_v2_migrate_demo
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://db_user:db_password@postgres:5432/hms_v2_demo?schema=public
+      # Explicitly off. The host here is `postgres`, and the point of the
+      # change in src/common/utils/database-url.util.ts is that a dotless
+      # Docker service name is recognised as local *on its own* — so this
+      # stack never needs the override that would also have unlocked the
+      # production host in the tracked `.env`.
+      ALLOW_REMOTE_DB: '0'
+      SEED_ADMIN_EMAIL: admin@hms.local
+      SEED_ADMIN_PASSWORD: Admin@HMS2024!
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "── prisma migrate deploy ──"
+        npx prisma migrate deploy
+        echo "── db:seed (roles, permissions, demo users) ──"
+        npm run db:seed
+        echo "── db:seed:catalog (departments, wards, beds, tests, drugs) ──"
+        npm run db:seed:catalog
+        echo "── schema and base data ready ──"
+    networks: [medihive]
+
+  # ── The API ─────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: medihive-api:demo
+    container_name: hms_v2_api_demo
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # The single published port in the whole stack, and the one ngrok fronts.
+    ports:
+      - '3000:3000'
+    # Ollama stays on the host; this is how the container dials back out to it.
+    # The reasoning is under the `ollama` profile at the bottom of this file.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    environment:
+      # `development`, not `production`, and deliberately:
+      #   - PrismaService.assertSafeTarget() returns early under production, so
+      #     production would skip the very guard this stack is meant to prove.
+      #   - Swagger is mounted only outside production, and /api/docs through
+      #     the tunnel is a genuinely useful thing to have on stage.
+      # The Dockerfile's own ENV NODE_ENV=production is overridden here.
+      NODE_ENV: development
+      PORT: '3000'
+      API_PREFIX: api
+      APP_NAME: MediHive
+      APP_VERSION: 2.0.0
+
+      DATABASE_URL: postgresql://db_user:db_password@postgres:5432/hms_v2_demo?schema=public
+      ALLOW_REMOTE_DB: '0'
+
+      # Joi rejects anything under 32 characters at boot, so the app will not
+      # start with a short one. Demo-only values, committed on purpose: there
+      # is nothing here worth protecting and a secret nobody can find is a
+      # demo nobody can run.
+      JWT_SECRET: medihive_demo_jwt_secret_change_before_any_real_deployment
+      JWT_EXPIRES_IN: 1440m
+      JWT_REFRESH_SECRET: medihive_demo_refresh_secret_change_before_any_real_deployment
+      JWT_REFRESH_EXPIRES_IN: 7d
+
+      REDIS_ENABLED: 'true'
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_TTL: '300'
+      REDIS_DB: '0'
+
+      # What the *API container* needs to reach MinIO. Not what the phone
+      # needs, and the two cannot be the same value.
+      #
+      # `getReadUrl` presigns with SigV4, which signs the Host header — the
+      # host in a presigned URL is therefore fixed at signing time and cannot
+      # be rewritten afterwards. With one tunnel available there is no public
+      # hostname that both this container and the phone can use, so any URL
+      # signed here is by definition unreachable from the phone. Uploads and
+      # OCR work perfectly (they are server-side); fetching a stored original
+      # directly from MinIO does not, and is being handled by a streaming
+      # route on the API instead. DEMO.md says so plainly.
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: hmsbucket
+      S3_ACCESS_KEY: minio_admin
+      S3_SECRET_KEY: minio_password
+
+      # Ollama on the host, reached through the gateway address. Measured, not
+      # assumed — the reasoning and the numbers are under the `ollama` profile
+      # at the bottom of this file.
+      #
+      # This requires the host Ollama to be listening on 0.0.0.0 rather than
+      # its default 127.0.0.1, or the container gets "connection refused" from
+      # the gateway address and the sidecar's /health quietly reports
+      # `"ollama": false`. DEMO.md step 1 is the one command that fixes it.
+      OLLAMA_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: gemma3:4b
+      # Two variables, one service, and that is not a mistake here.
+      #
+      # `AI_SIDECAR_URL` is what src/modules/ai/sidecar.client.ts reads (the
+      # case-taking speech routes) and what config/validation.schema.ts
+      # declares. But src/modules/patient-documents/ocr/sidecar-ocr.client.ts
+      # reads `MEDIHIVE_SIDECAR_URL` instead — a different name for the same
+      # endpoint, declared nowhere, so it silently keeps its
+      # `http://127.0.0.1:8801` default and inside a container that is the API
+      # container's own loopback.
+      #
+      # The symptom is specific and misleading: speech works, /health looks
+      # fine, and every document upload comes back `failed` with "We couldn't
+      # read this document clearly. Please upload a clearer image." — a
+      # sentence about image quality for what is actually a wiring fault.
+      # Setting both is the fix that does not require touching feature code;
+      # collapsing them to one name is a follow-up for whoever owns that module.
+      AI_SIDECAR_URL: http://sidecar:8801
+      MEDIHIVE_SIDECAR_URL: http://sidecar:8801
+      AI_ENABLED: 'true'
+      AI_TIMEOUT_MS: '90000'
+
+      # 10/minute is the production default and is the right number there. A
+      # demo signs in as several roles in a row and a rehearsal signs in many
+      # more times than that; being rate-limited on stage looks like a bug.
+      THROTTLE_LOGIN_LIMIT: '200'
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'wget -qO- http://localhost:3000/api/health/live || exit 1',
+        ]
+      interval: 10s
+      timeout: 5s
+      start_period: 40s
+      retries: 6
+    networks: [medihive]
+
+  # ── The clinical demo data ──────────────────────────────────
+  #
+  # A separate service from `migrate` because it cannot run at the same point
+  # in the sequence: test/seed-demo.ts drives the *public API* rather than
+  # Prisma — it POSTs patients, appointments, invoices and so on through the
+  # real routes, so it needs the API already listening. That is also what makes
+  # it worth having: the demo data went in the way a user's data would.
+  #
+  # Safe to run twice: it counts the patients already present and skips unless
+  # given --force, and prisma/seed-case-taking-demo.ts (which it chains to) is
+  # upserts on fixed `case-` ids.
+  #
+  # Exits when it is done. `docker compose ps` will show it as `exited (0)`,
+  # which is correct and not a failure.
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    image: medihive-api:demo-tooling
+    container_name: hms_v2_seed_demo
+    restart: 'no'
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://db_user:db_password@postgres:5432/hms_v2_demo?schema=public
+      ALLOW_REMOTE_DB: '0'
+      # test/lib/api-client.ts defaults this to localhost, which inside a
+      # container is the container itself.
+      API_BASE_URL: http://api:3000/api
+      SEED_ADMIN_EMAIL: admin@hms.local
+      SEED_ADMIN_PASSWORD: Admin@HMS2024!
+      # prisma/seed-case-taking-demo.ts uploads the two document originals for
+      # the Ramesh Kumar case straight to MinIO rather than through the API, so
+      # it needs its own S3 credentials. Without these it falls back to
+      # `http://localhost:9000`, warns, and finishes with exit 0 — the rows are
+      # all there and only "view the original" is broken, which is precisely
+      # the kind of failure that is not noticed until it is on a projector.
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: hmsbucket
+      S3_ACCESS_KEY: minio_admin
+      S3_SECRET_KEY: minio_password
+    command: ['npm', 'run', 'db:seed:demo']
+    networks: [medihive]
+
+  # ── The AI sidecar ──────────────────────────────────────────
+  #
+  # Speech-to-text, text-to-speech and OCR. No published port: only the API
+  # calls it, and it authenticates nobody.
+  sidecar:
+    build:
+      context: ./ai-sidecar
+      dockerfile: Dockerfile
+    image: medihive-sidecar:demo
+    container_name: hms_v2_sidecar_demo
+    restart: unless-stopped
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    environment:
+      # The sidecar reports Ollama's reachability in its own /health, which is
+      # the line the demo checks. Same host Ollama as the API uses.
+      OLLAMA_URL: http://host.docker.internal:11434
+      MEDIHIVE_VOICE_DIR: /app/voices
+      HF_HOME: /home/sidecar/.cache/huggingface
+      # `small` is the floor that handles accented English. `medium` is better
+      # for Indian languages and costs about 1.5 GB resident, which this box
+      # does not have spare.
+      MEDIHIVE_STT_MODEL: small
+      MEDIHIVE_STT_DEVICE: cpu
+      MEDIHIVE_STT_COMPUTE: int8
+    volumes:
+      # ~123 MB of Piper weights, gitignored and deliberately not in the image.
+      # Read-only: the sidecar loads these and never writes them.
+      - ./ai-sidecar/voices:/app/voices:ro
+      # The host's Hugging Face cache, which already holds
+      # Systran/faster-whisper-small. Without this mount the first spoken
+      # answer of the demo triggers a ~460 MB download. Read-write so a model
+      # that is genuinely missing can still be fetched once; the image runs as
+      # UID 1000 so anything written back is owned by the developer, not root.
+      - ${HOME}/.cache/huggingface:/home/sidecar/.cache/huggingface
+    networks: [medihive]
+
+  # ── Ollama in a container — opt-in, and measured to be the worse choice ──
+  #
+  #   docker compose -f docker-compose.demo.yml --profile ollama up -d
+  #
+  # The default wiring above points both the API and the sidecar at the Ollama
+  # already running on the host. That is the recommendation, and all three
+  # reasons below were measured on this box rather than reasoned about:
+  #
+  # 1. The GPU offload is free on the host and is not free in a container.
+  #    With gemma3:4b resident, `ollama ps` reports 3.79 GB total of which
+  #    1.9 GB sits in VRAM — so only ~2.9 GB of the model is in system RAM
+  #    (llama-server RSS measured 2874 MB). A container gets no GPU without
+  #    explicit device passthrough, so the same model there costs the full
+  #    3.8 GB of system RAM. On a 15 GB box whose IDE holds 3.4 GB and which
+  #    has already been OOM-killed once today, that ~900 MB is not spare.
+  #
+  # 2. The image is a demo-day risk. `docker pull ollama/ollama:latest` did not
+  #    complete in ten minutes on this connection. The host binary is already
+  #    installed and the model is already pulled; adding a multi-gigabyte image
+  #    fetch to the setup path buys nothing and can lose the morning.
+  #
+  # 3. The port. The host Ollama holds 11434. This profile binds 11435 on the
+  #    host so the two *can* coexist — but if you use this profile you should
+  #    stop the host instance first, because of reason 1.
+  #
+  # The one thing this profile does get right is the model store: ~/.ollama is
+  # mounted, so the 3.2 GB gemma3:4b already pulled is reused rather than
+  # downloaded again.
+  #
+  # To actually use it, also point the API and the sidecar at it:
+  #   OLLAMA_URL=http://ollama:11434
+  ollama:
+    image: ollama/ollama:latest
+    container_name: hms_v2_ollama_demo
+    profiles: ['ollama']
+    restart: unless-stopped
+    ports:
+      - '11435:11434'
+    volumes:
+      - ${HOME}/.ollama:/root/.ollama
+    healthcheck:
+      test: ['CMD-SHELL', 'ollama list >/dev/null 2>&1 || exit 1']
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    networks: [medihive]
+
+# Named explicitly so the network is `medihive` rather than
+# `medihive-demo_default`, and so every service above says which network it is
+# on out loud.
+networks:
+  medihive:
+    name: medihive
+
+# Distinct from the local stack's `postgres_data_local` / `minio_data_local`.
+# Compose prefixes these with the project name, so they are
+# `medihive-demo_postgres_data_demo` on disk and cannot collide.
+volumes:
+  postgres_data_demo:
+  minio_data_demo:
