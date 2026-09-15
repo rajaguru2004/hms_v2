@@ -50,7 +50,17 @@ class FakeRepository {
     return `${prefix}${++this.counter}`;
   }
 
+  /**
+   * A row as the database holds one.
+   *
+   * `seedSession({ language: 'ta' })` seeds a *pre-split* row — the patient's
+   * choice in the legacy column and nothing in the new ones — and then applies
+   * the same backfill the migration applied, so the fake and the real table
+   * agree about what an old Tamil session looks like. Passing `inputLanguage`
+   * or `outputLanguage` explicitly overrides that.
+   */
   seedSession(overrides: Partial<CaseSession> = {}): CaseSession {
+    const language = overrides.language ?? 'en';
     const session = {
       id: 'sess-1',
       organizationId: 'org-1',
@@ -58,6 +68,8 @@ class FakeRepository {
       appointmentId: null,
       kind: 'new_consultation',
       language: 'en',
+      inputLanguage: language,
+      outputLanguage: 'en',
       status: 'in_progress',
       consentGivenAt: new Date('2026-09-14T09:00:00Z'),
       consentVersion: '2026.09.1',
@@ -84,6 +96,8 @@ class FakeRepository {
         consentGivenAt: null,
         consentVersion: null,
         language: (data.language as string) ?? 'en',
+        inputLanguage: (data.inputLanguage as string) ?? 'en',
+        outputLanguage: (data.outputLanguage as string) ?? 'en',
       }),
     ),
   );
@@ -241,6 +255,8 @@ interface Harness {
   service: CaseTakingService;
   repo: FakeRepository;
   llm: jest.Mocked<LlmProvider>;
+  /** Exposed so the voice tests can read what language actually reached it. */
+  sidecar: jest.Mocked<Pick<SidecarClient, 'transcribe' | 'speak' | 'health'>>;
 }
 
 function harness(): Harness {
@@ -249,6 +265,9 @@ function harness(): Harness {
   const sidecar = {
     transcribe: jest.fn(),
     speak: jest.fn(),
+    // Unreachable by default, which is the state the other tests run in and the
+    // state the language catalogue has to survive.
+    health: jest.fn(() => Promise.resolve(null)),
   } as unknown as SidecarClient;
   const audit = {
     log: jest.fn(() => Promise.resolve()),
@@ -260,7 +279,14 @@ function harness(): Harness {
     sidecar,
     audit,
   );
-  return { service, repo, llm };
+  return {
+    service,
+    repo,
+    llm,
+    sidecar: sidecar as unknown as jest.Mocked<
+      Pick<SidecarClient, 'transcribe' | 'speak' | 'health'>
+    >,
+  };
 }
 
 async function errorCodeOf(fn: () => Promise<unknown>): Promise<string> {
@@ -966,6 +992,545 @@ describe('CaseTakingService', () => {
           h.service.getSession('someone-elses', USER, PATIENT_ID),
         ),
       ).toBe('CASE_SESSION_NOT_FOUND');
+    });
+  });
+
+  describe('the language a session is stored with', () => {
+    it('is reduced to its primary subtag, because a phone sends a region tag', async () => {
+      const h = harness();
+      await h.service.startOrResume({ language: 'ta-IN' }, USER, PATIENT_ID);
+      expect([...h.repo.sessions.values()][0].language).toBe('ta');
+    });
+
+    it('is English when none was asked for', async () => {
+      const h = harness();
+      await h.service.startOrResume({}, USER, PATIENT_ID);
+      expect([...h.repo.sessions.values()][0].language).toBe('en');
+    });
+
+    /**
+     * The split, at the row. What the patient picked is their INPUT language —
+     * it decides how their speech is transcribed and nothing else — and what
+     * they read and hear is English, on every session, because that is the
+     * product decision `DEFAULT_OUTPUT_LANGUAGE` records.
+     */
+    it("stores the patient's choice as the input language and English as the output", async () => {
+      const h = harness();
+
+      await h.service.startOrResume({ language: 'ta' }, USER, PATIENT_ID);
+
+      expect(h.repo.create.mock.calls[0][0]).toMatchObject({
+        inputLanguage: 'ta',
+        outputLanguage: 'en',
+      });
+    });
+
+    /** The legacy column is kept in step, so a pre-split reader still works. */
+    it('keeps the old `language` column equal to the input language', async () => {
+      const h = harness();
+
+      await h.service.startOrResume({ language: 'bn' }, USER, PATIENT_ID);
+
+      const written = h.repo.create.mock.calls[0][0];
+      expect(written.language).toBe('bn');
+      expect(written.language).toBe(written.inputLanguage);
+    });
+
+    /**
+     * Neither language is a field the client may send: `language` is the input
+     * one under its old name, and the output one is this service's decision. A
+     * body that names either of the new fields is refused by
+     * `forbidNonWhitelisted` at the pipe, and would be ignored here anyway.
+     */
+    it('ignores the new language fields if a client sends them', async () => {
+      const h = harness();
+
+      await h.service.startOrResume(
+        { language: 'ta', inputLanguage: 'hi', outputLanguage: 'ta' } as Record<
+          string,
+          string
+        >,
+        USER,
+        PATIENT_ID,
+      );
+
+      expect(h.repo.create.mock.calls[0][0]).toMatchObject({
+        inputLanguage: 'ta',
+        outputLanguage: 'en',
+      });
+    });
+
+    /** What the client renders: three fields, and two of them say a direction. */
+    it('reports both languages on the session view', async () => {
+      const h = harness();
+
+      const view = await h.service.startOrResume(
+        { language: 'ta' },
+        USER,
+        PATIENT_ID,
+      );
+
+      expect(view).toMatchObject({
+        language: 'ta',
+        inputLanguage: 'ta',
+        outputLanguage: 'en',
+      });
+    });
+
+    /**
+     * The point of the whole change, asserted where a patient would notice it:
+     * a Tamil interview asks its questions in English.
+     */
+    it('asks a Tamil session its questions in English', async () => {
+      const h = harness();
+
+      const view = await h.service.startOrResume(
+        { language: 'ta' },
+        USER,
+        PATIENT_ID,
+      );
+      const question = view.currentQuestion as { prompt: string } | null;
+
+      expect(question).not.toBeNull();
+      // ASCII-only is the cheap, honest test for "this is the English wording":
+      // every phrasebook this could have come from is in a non-Latin script.
+      expect(question!.prompt).toMatch(/^[ -~]+$/);
+    });
+
+    /**
+     * A session started before the split has the patient's choice in the legacy
+     * column and, in a restored dump, nothing in the new one. It still reaches
+     * the recogniser as Tamil rather than as a confident English guess.
+     */
+    it("reads a pre-split row's `language` as its input language", async () => {
+      const h = harness();
+      h.repo.seedSession({ language: 'ta', inputLanguage: '' });
+      h.sidecar.transcribe.mockResolvedValue({
+        text: 'three days',
+        confidence: 0.9,
+        language: 'ta',
+        segments: [],
+        durationMs: 1000,
+      });
+
+      await h.service.transcribe(
+        {
+          buffer: Buffer.from('wav'),
+          originalname: 'a.wav',
+          mimetype: 'audio/wav',
+        },
+        { sessionId: 'sess-1' },
+        USER,
+        PATIENT_ID,
+      );
+
+      expect(h.sidecar.transcribe.mock.calls[0][1]).toMatchObject({
+        language: 'ta',
+      });
+    });
+  });
+
+  describe('the language catalogue', () => {
+    /** Just enough of a health reply for the fields the catalogue reads. */
+    function healthWith(
+      languages: Record<string, { stt: boolean; tts: boolean }>,
+    ): Awaited<ReturnType<SidecarClient['health']>> {
+      return {
+        ollama: true,
+        ollamaModels: [],
+        stt: true,
+        tts: true,
+        ocr: true,
+        sttLanguages: [],
+        ttsLanguages: [],
+        ttsProviders: [],
+        languages: Object.fromEntries(
+          Object.entries(languages).map(([code, row]) => [
+            code,
+            { ...row, provider: row.tts ? 'indicf5' : null },
+          ]),
+        ),
+      };
+    }
+
+    it('is the whole set, in display order', async () => {
+      const catalogue = await harness().service.languages();
+
+      expect(catalogue.default).toBe('en');
+      expect(catalogue.languages).toHaveLength(12);
+      expect(catalogue.languages[0].code).toBe('en');
+      expect(catalogue.languages.map((l) => l.code)).toContain('or');
+    });
+
+    /**
+     * The picker still works when the speech service is down. Refusing to list
+     * any languages because a health probe timed out would be worse than
+     * listing a microphone that then refuses with a written sentence.
+     */
+    it('falls back to the static flags when the sidecar cannot be reached', async () => {
+      const catalogue = await harness().service.languages();
+
+      expect(catalogue.source).toBe('catalogue');
+      expect(
+        catalogue.languages.find((language) => language.code === 'or'),
+      ).toMatchObject({ nativeName: 'ଓଡ଼ିଆ', stt: false, tts: true });
+    });
+
+    /**
+     * The sidecar holds the weights, so it is the authority on what can
+     * actually be spoken. Nine of the eleven have no voice on a given box, and
+     * a picker that offered a speaker for all of them would play silence.
+     */
+    it('prefers what the sidecar reports over what the table hopes', async () => {
+      const h = harness();
+      h.sidecar.health.mockResolvedValue(
+        healthWith({
+          en: { stt: true, tts: true },
+          ta: { stt: true, tts: false },
+          or: { stt: false, tts: false },
+        }),
+      );
+
+      const catalogue = await h.service.languages();
+      const by = (code: string) =>
+        catalogue.languages.find((language) => language.code === code);
+
+      expect(catalogue.source).toBe('sidecar');
+      expect(by('ta')).toMatchObject({ stt: true, tts: false });
+      expect(by('or')).toMatchObject({ stt: false, tts: false });
+    });
+
+    /**
+     * The catalogue has to say what the patient actually gets, and what they
+     * get is English. A row's own `tts` is now a coverage fact about the
+     * system; `outputTts` is the one a speaker button belongs on, and it is
+     * true for a Tamil patient whose own language has no voice on this box.
+     */
+    it('says every row is answered in English, and whether English can be heard', async () => {
+      const h = harness();
+      h.sidecar.health.mockResolvedValue(
+        healthWith({
+          en: { stt: true, tts: true },
+          ta: { stt: true, tts: false },
+        }),
+      );
+
+      const catalogue = await h.service.languages();
+      const tamil = catalogue.languages.find((l) => l.code === 'ta');
+
+      expect(tamil).toMatchObject({
+        stt: true,
+        // Tamil itself cannot be spoken aloud on this box...
+        tts: false,
+        // ...and it does not matter, because the questions are English and
+        // English has a voice.
+        outputLanguage: 'en',
+        outputTts: true,
+      });
+    });
+
+    /**
+     * And when the English voice is the one that is missing, the speaker button
+     * goes for everybody — including the rows whose own voice is installed.
+     */
+    it('reports no output voice when the output language has none here', async () => {
+      const h = harness();
+      h.sidecar.health.mockResolvedValue(
+        healthWith({
+          en: { stt: true, tts: false },
+          ta: { stt: true, tts: true },
+        }),
+      );
+
+      const catalogue = await h.service.languages();
+
+      expect(catalogue.languages.find((l) => l.code === 'ta')).toMatchObject({
+        tts: true,
+        outputTts: false,
+      });
+    });
+
+    /**
+     * The one row that is still not fully usable, and the reason it is not is
+     * the microphone rather than the interview. Reported honestly whatever the
+     * output language is.
+     */
+    it('still refuses to claim a microphone for Odia', async () => {
+      const catalogue = await harness().service.languages();
+
+      expect(catalogue.languages.find((l) => l.code === 'or')).toMatchObject({
+        stt: false,
+        outputLanguage: 'en',
+      });
+    });
+
+    /**
+     * Silence about a language is not a yes. A row the sidecar did not mention
+     * is one it cannot serve, and reverting to the optimistic table for it
+     * would put the button back.
+     */
+    it('reads an unmentioned language as unavailable, not as the table says', async () => {
+      const h = harness();
+      h.sidecar.health.mockResolvedValue(
+        healthWith({ en: { stt: true, tts: true } }),
+      );
+
+      const catalogue = await h.service.languages();
+      expect(
+        catalogue.languages.find((language) => language.code === 'bn'),
+      ).toMatchObject({ stt: false, tts: false });
+    });
+  });
+
+  /**
+   * The routes that used to let the phone decide what language the patient
+   * speaks. The session is the authority now — it is what the patient chose,
+   * what the rest of the interview runs on, and what the clinician sees.
+   */
+  describe('voice, and whose language wins', () => {
+    const speech = {
+      buffer: Buffer.from('wav'),
+      originalname: 'a.wav',
+      mimetype: 'audio/wav',
+    };
+
+    function transcript(): Record<string, unknown> {
+      return {
+        text: 'three days',
+        confidence: 0.9,
+        language: 'ta',
+        segments: [],
+        durationMs: 1000,
+      };
+    }
+
+    it("prefers the session's language over the body's", async () => {
+      const h = harness();
+      h.repo.seedSession({ language: 'ta' });
+      h.sidecar.transcribe.mockResolvedValue(transcript() as never);
+
+      await h.service.transcribe(
+        speech,
+        { language: 'en', sessionId: 'sess-1' },
+        USER,
+        PATIENT_ID,
+      );
+
+      expect(h.sidecar.transcribe.mock.calls[0][1]).toMatchObject({
+        language: 'ta',
+      });
+    });
+
+    it('falls back to the body when no session was named', async () => {
+      const h = harness();
+      h.sidecar.transcribe.mockResolvedValue(transcript() as never);
+
+      await h.service.transcribe(speech, { language: 'hi' }, USER, PATIENT_ID);
+
+      expect(h.sidecar.transcribe.mock.calls[0][1]).toMatchObject({
+        language: 'hi',
+      });
+    });
+
+    /**
+     * Measured: naming the language cuts warm transcription from 3.857 s to
+     * 2.073 s for identical text. Detection is the fallback, not the goal.
+     */
+    it('names the language whenever it knows one', async () => {
+      const h = harness();
+      h.repo.seedSession({ language: 'bn' });
+      h.sidecar.transcribe.mockResolvedValue(transcript() as never);
+
+      await h.service.transcribe(
+        speech,
+        { sessionId: 'sess-1' },
+        USER,
+        PATIENT_ID,
+      );
+
+      expect(h.sidecar.transcribe.mock.calls[0][1]).toMatchObject({
+        language: 'bn',
+      });
+    });
+
+    it('detects when it knows nothing, rather than guessing English', async () => {
+      const h = harness();
+      h.sidecar.transcribe.mockResolvedValue(transcript() as never);
+
+      await h.service.transcribe(speech, {}, USER, PATIENT_ID);
+
+      expect(h.sidecar.transcribe.mock.calls[0][1]).toMatchObject({
+        language: undefined,
+      });
+    });
+
+    /**
+     * The asymmetry, at the one place it can hurt somebody.
+     *
+     * This test used to assert that an Odia session sent `language: undefined`
+     * and let the recogniser detect. It passed, and the behaviour it described
+     * was the bug: `undefined` is "detect", not "refuse", and detection on a
+     * language Whisper has no model for returns somebody else's language at
+     * HTTP 200. Measured against the running stack, an Odia session's `/stt`
+     * answered `{"text":"I have had chest pain for three days.",
+     * "confidence":0.7829,"language":"en"}`.
+     *
+     * So the assertion is inverted: the recording is refused in writing and
+     * the recogniser is never called at all.
+     */
+    it('refuses an Odia session in writing rather than letting the recogniser guess', async () => {
+      const h = harness();
+      h.repo.seedSession({ language: 'or' });
+      h.sidecar.transcribe.mockResolvedValue(transcript() as never);
+
+      await expect(
+        h.service.transcribe(speech, { sessionId: 'sess-1' }, USER, PATIENT_ID),
+      ).rejects.toThrow(
+        /We cannot listen in Odia yet\. Please type your answer\./,
+      );
+
+      expect(h.sidecar.transcribe).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The half of the split that changed behaviour. A Tamil session is
+     * transcribed as Tamil and read aloud in English, because what the patient
+     * reads and hears is the OUTPUT language and the output language is English
+     * on every session. Before the split this was one column and the answer had
+     * to be `ta` for both.
+     */
+    it("reads aloud in the session's OUTPUT language, which is English", async () => {
+      const h = harness();
+      h.repo.seedSession({ language: 'ta' });
+      h.sidecar.speak.mockResolvedValue(Buffer.from('audio'));
+
+      await h.service.speak(
+        { text: 'How long?', language: 'ta', sessionId: 'sess-1' },
+        USER,
+        PATIENT_ID,
+      );
+
+      expect(h.sidecar.speak).toHaveBeenCalledWith('How long?', 'en');
+    });
+
+    /**
+     * And the other half, side by side, so the asymmetry is one assertion and
+     * not an inference across two files: the same session, the same request,
+     * two different languages, each going where it belongs.
+     */
+    it('sends the input language to the recogniser and the output language to the voice', async () => {
+      const h = harness();
+      h.repo.seedSession({ inputLanguage: 'ta', outputLanguage: 'en' });
+      h.sidecar.transcribe.mockResolvedValue(transcript() as never);
+      h.sidecar.speak.mockResolvedValue(Buffer.from('audio'));
+
+      await h.service.transcribe(
+        speech,
+        { sessionId: 'sess-1' },
+        USER,
+        PATIENT_ID,
+      );
+      await h.service.speak(
+        { text: 'How long?', sessionId: 'sess-1' },
+        USER,
+        PATIENT_ID,
+      );
+
+      expect(h.sidecar.transcribe.mock.calls[0][1]).toMatchObject({
+        language: 'ta',
+      });
+      expect(h.sidecar.speak).toHaveBeenCalledWith('How long?', 'en');
+    });
+
+    /**
+     * The output language is this service's decision, not the handset's. A
+     * phone that could override it is a phone that can put an unreviewed
+     * clinical translation in front of a patient.
+     */
+    it('does not let the request body override the output language', async () => {
+      const h = harness();
+      h.repo.seedSession({ inputLanguage: 'ta', outputLanguage: 'en' });
+      h.sidecar.speak.mockResolvedValue(Buffer.from('audio'));
+
+      await h.service.speak(
+        { text: 'How long?', language: 'hi', sessionId: 'sess-1' },
+        USER,
+        PATIENT_ID,
+      );
+
+      expect(h.sidecar.speak).toHaveBeenCalledWith('How long?', 'en');
+    });
+
+    it('reads aloud in English when nobody said otherwise', async () => {
+      const h = harness();
+      h.sidecar.speak.mockResolvedValue(Buffer.from('audio'));
+
+      await h.service.speak({ text: 'How long?' }, USER, PATIENT_ID);
+
+      expect(h.sidecar.speak).toHaveBeenCalledWith('How long?', 'en');
+    });
+
+    /**
+     * Naming a session scopes the call, which these two routes previously were
+     * not at all: somebody else's session id is not found rather than a way to
+     * learn what language they speak.
+     */
+    it("is not found when the session is somebody else's", async () => {
+      const h = harness();
+      h.sidecar.speak.mockResolvedValue(Buffer.from('audio'));
+
+      expect(
+        await errorCodeOf(() =>
+          h.service.speak(
+            { text: 'hello', sessionId: 'not-yours' },
+            USER,
+            PATIENT_ID,
+          ),
+        ),
+      ).toBe('CASE_SESSION_NOT_FOUND');
+    });
+
+    /**
+     * A row written before the table existed can hold anything — the column was
+     * a free sixteen-character string. For the INPUT direction it degrades to
+     * what the caller asked for, never to a confident English transcription of
+     * Tamil speech: a wrong transcript becomes a clinical fact, and the body at
+     * least carries something the client believes.
+     */
+    it('ignores a stored input language that is not one we support', async () => {
+      const h = harness();
+      h.repo.seedSession({ language: 'klingon', inputLanguage: 'klingon' });
+      h.sidecar.transcribe.mockResolvedValue(transcript() as never);
+
+      await h.service.transcribe(
+        speech,
+        { language: 'hi', sessionId: 'sess-1' },
+        USER,
+        PATIENT_ID,
+      );
+
+      expect(h.sidecar.transcribe.mock.calls[0][1]).toMatchObject({
+        language: 'hi',
+      });
+    });
+
+    /**
+     * The OUTPUT direction degrades the other way, and deliberately so: what the
+     * patient hears is a decision this service makes, so an unreadable column
+     * falls back to the decision rather than to whatever the handset sent.
+     */
+    it('falls back to English, not to the body, for an unreadable output language', async () => {
+      const h = harness();
+      h.repo.seedSession({ outputLanguage: 'klingon' });
+      h.sidecar.speak.mockResolvedValue(Buffer.from('audio'));
+
+      await h.service.speak(
+        { text: 'hello', language: 'hi', sessionId: 'sess-1' },
+        USER,
+        PATIENT_ID,
+      );
+
+      expect(h.sidecar.speak).toHaveBeenCalledWith('hello', 'en');
     });
   });
 });

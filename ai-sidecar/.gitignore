@@ -1,4 +1,8 @@
 .venv/
-voices/
+# Anchored to the repository root on purpose. Unanchored, `voices/` matches a
+# directory of that name at ANY depth — including tts/voices/, which holds the
+# eleven reference directories and the contract that says what goes in them.
+# Those are source. The ~63 MB Piper .onnx files in ./voices are not.
+/voices/
 __pycache__/
 *.pyc

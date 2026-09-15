@@ -44,6 +44,11 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=sidecar:sidecar *.py ./
+# The TTS package, its config.yaml and the eleven reference directories. A
+# separate COPY because `*.py` does not match a directory, and the reference
+# pairs are source rather than deployment data — unlike the Piper weights in
+# /app/voices, which stay a bind mount.
+COPY --chown=sidecar:sidecar tts/ ./tts/
 
 USER sidecar
 

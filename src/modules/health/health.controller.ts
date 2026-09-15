@@ -1,3 +1,5 @@
+import { parse } from 'node:path';
+
 import { SkipThrottle } from '@nestjs/throttler';
 import { Controller, Get } from '@nestjs/common';
 import {
@@ -11,6 +13,21 @@ import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { Public } from '../../common/decorators/current-user.decorator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AppCacheService } from '../../cache/cache.service';
+
+/**
+ * The filesystem root the disk check measures.
+ *
+ * `/` is correct where this deploys — the Dockerfile builds a Linux image — but
+ * a developer runs the same code on Windows, where `check-disk-space` rejects a
+ * bare `/` outright: "The following path is invalid (should be X:\\...)". That
+ * rejection is not caught as an unhealthy indicator, it throws, and terminus
+ * answers the whole of `GET /health` with a 500. The symptom is a health
+ * endpoint that reports the service as broken while every other route works,
+ * which is exactly backwards.
+ *
+ * `parse(cwd()).root` is `/` on POSIX, so Linux behaviour is unchanged.
+ */
+const STORAGE_ROOT = parse(process.cwd()).root;
 
 /**
  * HealthController — Kubernetes/load-balancer health probes.
@@ -48,7 +65,7 @@ export class HealthController {
       () => this.memory.checkRSS('memory_rss', 512 * 1024 * 1024),
       () =>
         this.disk.checkStorage('storage', {
-          path: '/',
+          path: STORAGE_ROOT,
           thresholdPercent: 0.9, // Alert at 90% disk usage
         }),
     ]);

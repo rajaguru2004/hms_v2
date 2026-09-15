@@ -6,7 +6,9 @@
 # not the image: docker-compose.demo.yml bind-mounts them read-only so a new
 # language is a download rather than a rebuild.
 .venv
-voices
+# Anchored: this is ./voices, the Piper weights. tts/voices/ is source — the
+# eleven reference directories — and has to reach the image with the package.
+/voices
 
 __pycache__
 *.pyc

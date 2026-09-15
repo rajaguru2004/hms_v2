@@ -26,6 +26,7 @@
  * run, in a form a clinician can read and argue with.
  */
 
+import { isNonEnglishScript } from '../../../common/constants/language.constants';
 import {
   ClinicalState,
   SectionKey,
@@ -336,6 +337,50 @@ export function classifyComplaint(
 }
 
 /**
+ * Whether the complaint is written in a script these patterns cannot read.
+ *
+ * Separate from [classifyComplaint] on purpose, and the separation is the
+ * whole point — it is what lets "we could not read it" widen the **questions**
+ * without also firing the **alarms**.
+ *
+ * `classifyComplaint` briefly returned every category for unreadable text, on
+ * the reasoning that a rule firing needlessly costs a clinician a moment while
+ * one that never fires is invisible. Measured, that was wrong:
+ *
+ *   ta "எனக்கு மூணு நாளா நெஞ்சு வலி இருக்கு"  (chest pain)    -> 14 categories
+ *   ta "நேற்று என் கணுக்கால் சுளுக்கிக் கொண்டது" (sprained ankle) -> 14 categories
+ *
+ * Identical. So ACS_TRIAD fired on a sprained ankle, and every red flag
+ * carried exactly no information for any non-English interview. That is the
+ * failure `safety-engine.spec.ts` opens by calling the single most important
+ * property of the engine: if absent data can match, every patient arrives
+ * pre-alerted and the one real alert is dismissed with the rest.
+ *
+ * So the two consumers of a classification are now treated differently:
+ *
+ *  * `whenCategory` — which decides which review-of-systems questions apply —
+ *    widens on this. Asking a patient more questions is safe, and the answers
+ *    are what the rules actually key on.
+ *  * A red-flag `complaint` condition does NOT. It requires a real
+ *    classification, because an alarm raised on evidence nobody could read is
+ *    not evidence.
+ *
+ * By the time a `complaint` rule could fire, the associated symptoms it needs
+ * have been asked and answered — several turns later, by which point the
+ * background translation has landed and the complaint classifies properly.
+ * The widened question set is what carries the patient across that gap.
+ */
+export function complaintUnreadable(state: ClinicalState): boolean {
+  const symptom = readFact(readFactAt(state, 'chief_complaint.symptom'));
+  return (
+    symptom.kind === 'value' &&
+    typeof symptom.value === 'string' &&
+    isNonEnglishScript(symptom.value) &&
+    classifyComplaint(symptom.value).includes('unclassified')
+  );
+}
+
+/**
  * Categories implied by the current state.
  *
  * `chief_complaint.category` wins when it is recorded, because the touch
@@ -419,7 +464,17 @@ function whenComplaintKnown(state: ClinicalState): boolean {
 function whenCategory(...categories: ComplaintCategory[]): Predicate {
   return (state) => {
     const active = complaintCategories(state);
-    return categories.some((category) => active.includes(category));
+    if (categories.some((category) => active.includes(category))) return true;
+
+    // The complaint is in a script the patterns cannot read, so no category
+    // matched and none was ruled out either. Ask the questions.
+    //
+    // This is the one place the widening happens, and keeping it here rather
+    // than inside `classifyComplaint` is what stops it reaching the red-flag
+    // rules — see the note on [complaintUnreadable]. Asking a patient a few
+    // more questions is safe and the answers are what the rules key on; firing
+    // an alarm on a complaint nobody could read is not.
+    return complaintUnreadable(state);
   };
 }
 
@@ -1846,6 +1901,32 @@ const GROUP_TEMPLATES: readonly GroupTemplate[] = [
     ],
   },
 ];
+
+/**
+ * The repeated-group fields as *templates*, with the index written `[]`.
+ *
+ * `fieldsFor` instantiates `medications[0].name`, `medications[1].name` and so
+ * on, which means those keys do not exist until a patient has said they take a
+ * medicine — and a translation cannot be keyed on a path that only exists at
+ * runtime for one particular patient. One instance of a phrasebook entry per
+ * index would also be absurd: the question is the same question whether it is
+ * the first medicine or the fourth.
+ *
+ * So a phrasebook keys these on the template, `medications[].name`, and
+ * `phrasebook.ts` strips the index before looking a question up. This export is
+ * what makes a typo in such a key fail at import rather than silently ask the
+ * English question forever — the same argument as
+ * `assertRulesReferenceRealFields`.
+ */
+export const GROUP_TEMPLATE_FIELD_KEYS: readonly string[] =
+  GROUP_TEMPLATES.flatMap((template) =>
+    template.items.map((item) => `${template.prefix}[].${item.suffix}`),
+  );
+
+/** `medications[2].name` → `medications[].name`. Any other key is unchanged. */
+export function groupTemplateKey(fieldKey: string): string {
+  return fieldKey.replace(/\[\d+\]/, '[]');
+}
 
 /** Every non-repeating field, in declaration order. */
 export const STATIC_FIELDS: readonly FieldDefinition[] = [

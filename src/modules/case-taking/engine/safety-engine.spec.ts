@@ -570,3 +570,141 @@ describe('the engine reads facts, not metadata', () => {
     );
   });
 });
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  Language independence
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * The property the translation work has to not break: red flags fire on
+ * presences and validated tokens, never on the words a patient or a phrasebook
+ * used. A rule that reads text is a rule that stops firing the day the text is
+ * in a script its patterns were not written for, and a red flag that stops
+ * firing in Hindi is worse than one that never existed, because the interview
+ * still looks like it screened.
+ */
+
+/** The session language is the only thing that differs between these states. */
+function statedIn(
+  language: string,
+  entries: Record<string, Fact<FactValue>>,
+): ClinicalState {
+  let next = createClinicalState({ sessionId: 's', language });
+  for (const [path, fact] of Object.entries(entries)) {
+    next = applyFact(next, path, fact);
+  }
+  return next;
+}
+
+describe('the engine does not read the interview language', () => {
+  const facts = {
+    'ros.neurological.face_droop': recorded(true, voice),
+    'ros.gastrointestinal.black_stools': recorded(true, voice),
+    'ros.psychiatric.self_harm_thoughts': recorded(true, voice),
+    'ros.allergic.throat_or_lip_swelling': recorded(true, voice),
+    'hpi.onset': recorded('sudden', voice),
+    'hpi.severity': recorded(9, voice),
+  };
+
+  it('produces a byte-identical assessment in every language', () => {
+    const english = JSON.stringify(evaluate(statedIn('en', facts)));
+    for (const language of ['hi', 'hi-IN', 'ta', 'or', 'bn', '']) {
+      expect(JSON.stringify(evaluate(statedIn(language, facts)))).toBe(english);
+    }
+  });
+
+  it('fires on the stored choice token, not on any word spoken for it', () => {
+    // `choiceLabels` gives `sudden` a Hindi word to be READ ALOUD as. The value
+    // in the state stays `sudden`, which is what ACS_TRIAD's choice condition
+    // matches, and a label sent back as a value would fail validation instead
+    // of quietly becoming a fact.
+    const withToken = statedIn('hi', {
+      'chief_complaint.symptom': recorded('chest pain', voice),
+      'hpi.associated.breathlessness': recorded(true, voice),
+      'hpi.onset': recorded('sudden', voice),
+    });
+    expect(firedIds(withToken)).toContain('ACS_TRIAD');
+
+    const withTheHindiLabel = statedIn('hi', {
+      'chief_complaint.symptom': recorded('chest pain', voice),
+      'hpi.associated.breathlessness': recorded(true, voice),
+      'hpi.onset': recorded('अचानक', voice),
+    });
+    // Not a silent mismatch that looks like a "no": the onset simply is not
+    // `sudden`, so the sudden-onset limb does not match. Breathlessness plus a
+    // cardiac complaint on its own is not the triad.
+    expect(firedIds(withTheHindiLabel)).not.toContain('ACS_TRIAD');
+  });
+});
+
+/**
+ * The one exception, recorded here so it cannot be lost.
+ *
+ * `classifyComplaint` is an English (plus transliterated-Tamil) keyword table
+ * run over the patient's own words, and `extraction.prompt.ts` explicitly tells
+ * the model NOT to translate those words. So a Hindi chief complaint classifies
+ * as `unclassified`, and everything gated on a category — twenty-odd review-of-
+ * systems questions, and ACS_TRIAD's `complaint` condition — behaves as though
+ * the complaint were unrecognised.
+ *
+ * These assertions describe what the code does today, not what it should do.
+ * They exist so that the gap is visible in the suite rather than discovered by
+ * a patient, and so that fixing it breaks a test that says why.
+ */
+describe('the complaint classifier fails toward assessment, not silence', () => {
+  const chestPain = {
+    'hpi.associated.breathlessness': recorded(true, voice),
+    'hpi.associated.sweating': recorded(true, voice),
+  };
+
+  it('fires ACS_TRIAD for an English chest-pain complaint', () => {
+    expect(
+      firedIds(
+        statedIn('en', {
+          ...chestPain,
+          'chief_complaint.symptom': recorded(
+            'chest pain for three days',
+            voice,
+          ),
+        }),
+      ),
+    ).toContain('ACS_TRIAD');
+  });
+
+  it('fires it for the same complaint written in Hindi', () => {
+    // Identical structured facts; only the untranslated complaint text differs.
+    //
+    // This asserted the opposite until the classifier was fixed, and what it
+    // asserted was a Hindi-speaking patient with cardiac chest pain getting no
+    // acute-coronary flag. Translation is the real fix and now runs, but it
+    // runs behind the response — so for the turn that introduces the complaint
+    // this function still sees Devanagari, and must not read that as "nothing
+    // applies".
+    expect(
+      firedIds(
+        statedIn('hi', {
+          ...chestPain,
+          'chief_complaint.symptom': recorded(
+            'तीन दिन से सीने में दर्द हो रहा है',
+            voice,
+          ),
+        }),
+      ),
+    ).toContain('ACS_TRIAD');
+  });
+
+  it('still fires every rule that reads structured facts alone', () => {
+    // The blast radius is bounded: only rules with a `complaint` condition and
+    // fields gated by `whenCategory` are affected. Everything keyed on a
+    // boolean or a token is untouched, which is why the Hindi state above still
+    // raises its other critical flags.
+    const hindi = statedIn('hi', {
+      ...chestPain,
+      'chief_complaint.symptom': recorded(
+        'तीन दिन से सीने में दर्द हो रहा है',
+        voice,
+      ),
+      'ros.neurological.face_droop': recorded(true, voice),
+    });
+    expect(firedIds(hindi)).toContain('STROKE_SIGNS');
+  });
+});

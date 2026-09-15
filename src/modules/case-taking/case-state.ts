@@ -61,7 +61,10 @@ const logger = new Logger('CaseState');
 export interface StateSources {
   readonly sessionId: string;
   readonly startedAt?: Date | null;
+  /** The OUTPUT language: what the questions are worded in. */
   readonly language?: string | null;
+  /** The INPUT language: what the patient's own words are in. */
+  readonly inputLanguage?: string | null;
   /** Unsuperseded facts only, oldest first. */
   readonly facts: readonly CaseFact[];
   /** Every turn for the session, oldest first. */
@@ -83,6 +86,7 @@ export function rebuildState(sources: StateSources): ClinicalState {
     sessionId: sources.sessionId,
     startedAt: sources.startedAt?.toISOString(),
     language: sources.language ?? undefined,
+    inputLanguage: sources.inputLanguage ?? undefined,
   });
 
   for (const row of sources.facts) {

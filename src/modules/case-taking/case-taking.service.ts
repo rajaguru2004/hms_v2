@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
   CaseFact,
   CaseRedFlag,
@@ -11,9 +11,12 @@ import { FactRowData, rebuildState, rowDataFromFact } from './case-state';
 import {
   CaseConsentDto,
   CorrectFactDto,
+  SpeakDto,
   StartCaseSessionDto,
   SubmitTurnDto,
+  TranscribeDto,
 } from './dto/case-taking.dto';
+import { LanguageCatalogueDto } from './dto/language.dto';
 import {
   ClinicalState,
   applyFact,
@@ -37,6 +40,11 @@ import {
   outstandingFields,
   selectNext,
 } from './engine/question-selector';
+import {
+  PHRASEBOOKS,
+  PhrasebookSource,
+  phrasebookFor,
+} from './engine/phrasebook';
 import { evaluate, SafetyAssessment } from './engine/safety-engine';
 import { RULESET_VERSION } from './engine/safety-rules';
 import {
@@ -55,16 +63,30 @@ import {
   presenceLabel,
 } from './engine/tri-state';
 import { LLM_PROVIDER, LlmProvider } from '../ai/llm-provider.interface';
+import {
+  TRANSLATION_PROVIDER,
+  TranslationProvider,
+} from '../ai/translation-provider.interface';
 import { SidecarClient, SidecarUnavailableError } from '../ai/sidecar.client';
 import { AuditService } from '../../audit/audit.service';
 import { AuditAction } from '../../common/enums/action.enum';
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   NotFoundException,
 } from '../../common/exceptions/app.exception';
 import { ErrorCode, ErrorCodes } from '../../common/exceptions/error-codes';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
+import {
+  DEFAULT_LANGUAGE,
+  DEFAULT_OUTPUT_LANGUAGE,
+  SUPPORTED_LANGUAGES,
+  findLanguage,
+  isNonEnglishScript,
+  normaliseLanguage,
+  sttLanguageFor,
+} from '../../common/constants/language.constants';
 
 /**
  * The interview.
@@ -186,6 +208,18 @@ export class CaseTakingService {
     @Inject(LLM_PROVIDER) private readonly llm: LlmProvider,
     private readonly sidecar: SidecarClient,
     private readonly auditService: AuditService,
+    /**
+     * Optional on purpose.
+     *
+     * Translation is an improvement to a background job, not a dependency of
+     * the interview: with no translator wired the service behaves exactly as it
+     * did before this seam existed, which is the same behaviour a translator
+     * that is down produces. Making it required would mean a missing provider
+     * could stop a patient being interviewed at all.
+     */
+    @Optional()
+    @Inject(TRANSLATION_PROVIDER)
+    private readonly translator?: TranslationProvider,
   ) {}
 
   /* ═══════════════════════════════ sessions ═══════════════════════════════ */
@@ -209,15 +243,60 @@ export class CaseTakingService {
     );
 
     if (existing) {
-      const view = await this.describeSession(existing);
+      // The picker the patient just used governs a resumed session too.
+      //
+      // This branch used to ignore `dto.language` entirely, and the screen
+      // immediately before it says "Pick the language you will speak". Observed
+      // on a handset: the patient selected Tamil, resumed a session that had
+      // been started in Telugu, and their recording went up to `/stt` tagged
+      // `te`. Speech recognition given the wrong language does not fail — it
+      // returns a fluent, confident transcript of something nobody said, and
+      // that becomes a clinical fact. The app was doing the right thing with
+      // the wrong data: it sends the *session's* input language, which was not
+      // the one the patient had just chosen.
+      //
+      // Only the INPUT language moves. `outputLanguage` stays as it is, and
+      // the facts already recorded keep the language they were recorded in —
+      // this changes what the recogniser is told next, nothing retrospective.
+      const chosen = normaliseLanguage(dto.language);
+      const resumed =
+        chosen && chosen !== sessionInputLanguage(existing)
+          ? await this.repository.touchSession(existing.id, {
+              language: chosen,
+              inputLanguage: chosen,
+            })
+          : existing;
+
+      const view = await this.describeSession(resumed);
       return { ...view, resumed: true };
     }
+
+    // The patient chooses one language and it decides one thing: how their
+    // speech is transcribed. Normalised again here rather than trusted from the
+    // DTO — `@IsLanguageCode` has already reduced `ta-IN` to `ta` for anything
+    // that came through the pipe, but these columns are read back by `/stt`,
+    // `/tts` and the engine, and a service that assumes a pipe ran is a service
+    // that stores `ta-IN` the first time somebody calls it from a job.
+    const inputLanguage = normaliseLanguage(dto.language) || DEFAULT_LANGUAGE;
 
     const session = await this.repository.create({
       organization: { connect: { id: user.organizationId } },
       patient: { connect: { id: patientId } },
       kind: dto.kind ?? 'new_consultation',
-      language: dto.language ?? 'en',
+      // Written three times on purpose, and only two of them mean anything.
+      //
+      // `inputLanguage` is the patient's choice. `outputLanguage` is the
+      // product's — English, on every session, for the reasons written beside
+      // `DEFAULT_OUTPUT_LANGUAGE` — and it is not taken from the request, so a
+      // handset cannot put an unreviewed clinical translation in front of a
+      // patient by sending a field.
+      //
+      // `language` is the legacy column, kept in step with `inputLanguage` so
+      // that the mobile client, the demo seed and anything else written before
+      // the split keeps reading the value it always read. Nothing routes off it.
+      language: inputLanguage,
+      inputLanguage,
+      outputLanguage: DEFAULT_OUTPUT_LANGUAGE,
       appointmentId: dto.appointmentId,
       status: 'in_progress',
     });
@@ -235,7 +314,11 @@ export class CaseTakingService {
       entityName: 'CaseSession',
       entityId: session.id,
       metadata: { organizationId: user.organizationId, patientId },
-      newValues: { status: session.status, language: session.language },
+      newValues: {
+        status: session.status,
+        inputLanguage: session.inputLanguage,
+        outputLanguage: session.outputLanguage,
+      },
     });
 
     const view = await this.describeSession(session);
@@ -393,7 +476,10 @@ export class CaseTakingService {
         organizationId: user.organizationId,
         utterance: answerText,
         askedFieldPath: answeredPath ?? undefined,
-        language: session.language,
+        // The utterance being extracted is in the patient's own language, so
+        // this is the INPUT language. Telling the model the output language
+        // would have it read Tamil as though it were English.
+        language: sessionInputLanguage(session) ?? DEFAULT_LANGUAGE,
         turnId: patientTurn.id,
       });
     }
@@ -504,7 +590,14 @@ export class CaseTakingService {
       // quietly retired, because a correction that lands as "not assessed"
       // would turn a recorded answer into a hole.
       throw new BadRequestException(
-        `We could not read that as an answer to "${field.label}". ${fallbackPhrasing(field)}`,
+        // Re-asked in the session's OUTPUT language, because this sentence is
+        // read by the patient and the question inside it is the one they just
+        // failed to answer — so it has to be worded exactly as the interview
+        // words it, not in some second language the patient never saw.
+        `We could not read that as an answer to "${field.label}". ${fallbackPhrasing(
+          field,
+          sessionOutputLanguage(session),
+        )}`,
         ErrorCodes.CASE_ANSWER_NOT_UNDERSTOOD,
       );
     }
@@ -575,7 +668,8 @@ export class CaseTakingService {
           title: section.title,
           lines: section.items.map((item) => `${item.label}: ${item.display}`),
         })),
-        language: session.language,
+        // The narrative is read by the patient, so it is the OUTPUT language.
+        language: sessionOutputLanguage(session),
       });
       narrative = drafted.summary;
     }
@@ -630,7 +724,13 @@ export class CaseTakingService {
       // that actually ran on it, not the ones in the file today.
       rulesetVersion: RULESET_VERSION,
       consentVersion: session.consentVersion,
+      // Both, on the record. A clinician reading this case a year from now needs
+      // to know the patient spoke Tamil and was answered in English — one code
+      // could not say that, and "language: ta" over an English transcript is
+      // the kind of half-truth that gets read as a translation that never ran.
       language: session.language,
+      inputLanguage: sessionInputLanguage(session),
+      outputLanguage: sessionOutputLanguage(session),
       renderedAt: new Date().toISOString(),
       percentComplete: rendered.percentComplete,
       // §36: printed, not omitted. An omitted line reads as nothing to report.
@@ -688,17 +788,177 @@ export class CaseTakingService {
     };
   }
 
+  /* ═══════════════════════════════ languages ══════════════════════════════ */
+
+  /**
+   * The languages this interview can be taken in, and what each can actually do
+   * on this box right now.
+   *
+   * ── What a row means now that the interview has two languages
+   *
+   * A row is an INPUT language: the language a patient may speak. `stt` is the
+   * flag that decides whether they may speak it at all, and it is still
+   * reported per language and still honestly — Odia is `false`, because
+   * faster-whisper has no Odia model, and a row the sidecar cannot serve is
+   * `false` whatever this table hopes.
+   *
+   * `tts` and `questions` are the other direction, and they are no longer about
+   * the patient who picks this row. They describe what this system can do with
+   * text IN that language — whether a voice for it is installed, whether anyone
+   * has checked a translation of the questions — which is a fact about the
+   * catalogue and the box, and is what a clinician auditing coverage is asking.
+   * What the patient will actually read and hear is `outputLanguage`, which is
+   * `en` on every row today, and whether they can hear it is `outputTts`. A
+   * picker that greys out the speaker on `tts` would now be wrong: a Tamil
+   * patient hears English, and English has a voice.
+   *
+   * ── Two sources, and which wins
+   *
+   * The *list* — which languages exist, what they are called in their own
+   * script, what order to show them in — comes from `language.constants.ts`.
+   * The *capabilities* come from the sidecar, because it is the process holding
+   * the weights and it is the only thing that knows whether the Tamil reference
+   * audio is on the disk. A config file cannot know that, and a config file
+   * that claims to is how a patient gets offered a speaker that plays nothing.
+   *
+   * When the sidecar cannot be reached the static flags stand and `source` says
+   * `catalogue`. That is the honest degradation: the picker still works, it may
+   * offer a microphone that then refuses, and the refusal is a written sentence
+   * with a keyboard behind it. Refusing to list any languages because a health
+   * probe timed out would be worse.
+   *
+   * ── Why the health call is safe to make here
+   *
+   * It was not, until the breaker was split per capability: a health probe
+   * against a down sidecar used to push the one shared counter towards opening,
+   * so opening a language picker three times could have switched off document
+   * reading. Now a health failure only opens the health breaker, and `health()`
+   * already answers `null` rather than throwing.
+   *
+   * ── Why there is no repository call
+   *
+   * There is no data. The catalogue is a property of the models we run, not of
+   * this hospital's database, and a table in Postgres would be a third copy
+   * free to disagree with both of the above. The layering is honoured — a
+   * Repository is the data-access layer and this has no data to access — and
+   * §4's pagination rule is about list endpoints that scan a table, which this
+   * cannot.
+   */
+  async languages(): Promise<LanguageCatalogueDto> {
+    const health = await this.sidecar.health();
+    const live = health?.languages ?? {};
+    const known = Object.keys(live).length > 0;
+
+    // Resolved once, not per row: every row's output is the same language, and
+    // asking the same question twelve times would invite twelve answers.
+    const outputLanguage = DEFAULT_OUTPUT_LANGUAGE;
+    const outputTts = known
+      ? live[outputLanguage]?.tts === true
+      : findLanguage(outputLanguage)?.tts === true;
+
+    return {
+      default: DEFAULT_LANGUAGE,
+      source: known ? 'sidecar' : 'catalogue',
+      languages: SUPPORTED_LANGUAGES.map((language) => {
+        const reported = live[language.code];
+        return {
+          code: language.code,
+          nativeName: language.nativeName,
+          englishName: language.englishName,
+          // Once the sidecar has answered at all, it is the authority for every
+          // row — including the ones it did not mention. It builds that table
+          // from its own full language list, so a language missing from it is
+          // one it does not know rather than one it forgot, and treating
+          // silence as a yes is how the speaker button gets offered for a voice
+          // that is not installed.
+          stt: known ? reported?.stt === true : language.stt,
+          tts: known ? reported?.tts === true : language.tts,
+          // Not from the sidecar: the sidecar holds voices and recognisers, and
+          // knows nothing about whether the QUESTIONS have been translated. A
+          // language can have a voice and no phrasebook — Hindi did until
+          // today — and a client that reads `tts: true` as "the interview is in
+          // Hindi" is reading the wrong flag. So the two are reported side by
+          // side and separately.
+          ...questionCapability(language.code),
+          // The two fields that say what this patient actually gets. They are
+          // the same on every row on purpose: the output language is a product
+          // decision, not a consequence of what the patient picked, and a
+          // client should be able to read it off the row it is rendering
+          // rather than infer it from a rule written down somewhere else.
+          outputLanguage,
+          outputTts,
+        };
+      }),
+    };
+  }
+
   /* ═════════════════════════════ voice seams ══════════════════════════════ */
 
+  /**
+   * Transcribe a recorded answer.
+   *
+   * The language sent to the recogniser is the session's INPUT language when a
+   * session was named, and the caller's otherwise — see `voiceLanguage`. This
+   * is the half of the interview the patient's choice governs: a Tamil speaker
+   * is transcribed as Tamil, whatever language they are being answered in.
+   *
+   * A language the table marks `stt: false` is refused here, in writing, and
+   * the recording is never sent. Today that is Odia and only Odia.
+   *
+   * ── Why the refusal has to be on this path too
+   *
+   * `@IsLanguageCode('stt')` already refuses `language=or` in the request body,
+   * so the phone cannot name it. But the app does not name it: it sends
+   * `sessionId`, and the session's own language wins. On that path `or` used to
+   * resolve through `sttLanguageFor` to `undefined`, and `undefined` does not
+   * mean "refuse" — it means "send no language hint", which is the instruction
+   * to auto-detect. Whisper has no `or` model to detect, so it lands on a
+   * neighbouring language and returns a fluent, confident transcript of words
+   * the patient never said, at HTTP 200.
+   *
+   * Measured on this box, an Odia session with `sessionId` set:
+   *
+   *   POST /api/case-taking/stt  ->  200
+   *   {"text":"I have had chest pain for three days.","confidence":0.7829,
+   *    "language":"en"}
+   *
+   * Nothing downstream can tell that from a transcript the patient meant. It
+   * becomes a fact, the fact becomes a chart, and the only person who could
+   * catch it is the one who cannot read what they never said. A refused upload
+   * costs an Odia patient the microphone, which they never had; a wrong
+   * transcript costs them the record.
+   */
   async transcribe(
     file: { buffer: Buffer; originalname?: string; mimetype?: string },
-    language?: string,
+    dto: TranscribeDto,
+    user: AuthenticatedUser,
+    patientId: string | undefined,
   ): Promise<Record<string, unknown>> {
+    const language = await this.voiceLanguage(
+      dto.sessionId,
+      dto.language,
+      { user, patientId },
+      'input',
+    );
+
+    // Refused before the upload is spent, and named rather than hardcoded: the
+    // sentence comes off the row in `SUPPORTED_LANGUAGES`, so a language whose
+    // recogniser arrives later stops being refused by editing that table.
+    // `AI_SIDECAR_UNAVAILABLE` is the code the client already reads as "offer
+    // the keyboard", which is exactly the fallback an Odia interview runs on.
+    const definition = findLanguage(language);
+    if (definition !== undefined && !definition.stt) {
+      throw new BadRequestException(
+        `We cannot listen in ${definition.englishName} yet. Please type your answer.`,
+        ErrorCodes.AI_SIDECAR_UNAVAILABLE,
+      );
+    }
+
     try {
       const transcript = await this.sidecar.transcribe(file.buffer, {
         filename: file.originalname,
         mimeType: file.mimetype,
-        language,
+        language: sttLanguageFor(language),
       });
       return { ...transcript, available: true };
     } catch (error) {
@@ -709,12 +969,116 @@ export class CaseTakingService {
     }
   }
 
-  async speak(text: string, language = 'en'): Promise<Buffer> {
+  /**
+   * Read a line out loud.
+   *
+   * The OUTPUT language, which is English on every session — so this is served
+   * by Piper's English voice, the one that is actually installed, rather than
+   * by an IndicF5 reference audio that may not be on this box. The IndicF5
+   * providers stay wired up behind the same call: a session whose
+   * `outputLanguage` is `hi` reaches them without anything here changing.
+   */
+  async speak(
+    dto: SpeakDto,
+    user: AuthenticatedUser,
+    patientId: string | undefined,
+  ): Promise<Buffer> {
+    const language = await this.voiceLanguage(
+      dto.sessionId,
+      dto.language,
+      { user, patientId },
+      'output',
+    );
+
     try {
-      return await this.sidecar.speak(text, language);
+      return await this.sidecar.speak(dto.text, language ?? DEFAULT_LANGUAGE);
     } catch (error) {
       throw this.asDomainError(error, ErrorCodes.AI_SIDECAR_UNAVAILABLE);
     }
+  }
+
+  /**
+   * Which language a voice call is actually in.
+   *
+   * ── Which of the session's two
+   *
+   * `direction` says it, and it is the only thing that says it: `/stt` asks for
+   * `'input'` and `/tts` for `'output'`, once each, and no other caller exists.
+   * The two used to be one column, which meant a Tamil patient could either be
+   * transcribed as Tamil or read to in English and never both.
+   *
+   * ── Why the session wins
+   *
+   * `/tts` and `/stt` used to take the language from the request body and
+   * nothing else, so the phone decided. The phone is the wrong authority: it is
+   * remembering a choice, and a resumed app, a shared handset or a client
+   * written before the picker existed all remember the wrong one. The session
+   * row holds what the patient chose when they started, it is the value the
+   * rest of the interview already runs on, and it is the value a clinician sees
+   * on the record. Two answers to "what language is this interview in" is one
+   * answer too many.
+   *
+   * ── Why `sessionId` is optional rather than required
+   *
+   * Both routes are legitimately used before there is a session: the consent
+   * text is read aloud, and so is the language picker. Making it required would
+   * break those, and inferring the patient's open session instead would be
+   * worse — the language would change under a caller who never mentioned a
+   * session, at the moment an unrelated interview was opened or submitted.
+   *
+   * Naming a session also *scopes* the call, which these two routes previously
+   * were not at all: it is loaded through the same patient-and-organisation
+   * check as everything else, so somebody else's session id is not found rather
+   * than being a way to learn what language they speak.
+   */
+  private async voiceLanguage(
+    sessionId: string | undefined,
+    requested: string | undefined,
+    caller: { user: AuthenticatedUser; patientId: string | undefined },
+    direction: VoiceDirection,
+  ): Promise<string | undefined> {
+    const fromBody = normaliseLanguage(requested) || undefined;
+    if (!sessionId) return fromBody;
+
+    if (!caller.patientId) {
+      throw new ForbiddenException(
+        'Naming an interview here is for the patient whose interview it is. A clinician reads a submitted case on the patient record.',
+        ErrorCodes.PATIENT_PORTAL_NOT_LINKED,
+      );
+    }
+
+    const session = await this.loadSession(
+      sessionId,
+      caller.user,
+      caller.patientId,
+    );
+    // The output direction never falls back to the body: what the patient reads
+    // and hears is a decision this service makes, and `sessionOutputLanguage`
+    // always answers with a language we have (English, when the column holds
+    // something unreadable). Letting the handset override it here would be a
+    // second authority on the one thing that is deliberately not the handset's.
+    if (direction === 'output') return sessionOutputLanguage(session);
+
+    const stored = sessionInputLanguage(session);
+
+    // A row written before this table existed can hold anything — the column
+    // was a free sixteen-character string. An unrecognised value is not
+    // silently turned into English, which is the exact failure the sidecar
+    // stopped making; it is discarded in favour of what the caller asked for,
+    // so a legacy session degrades to the behaviour it already had.
+    if (stored === null) {
+      this.logger.warn({
+        message:
+          'session input language is not in the supported set; using the request language',
+        sessionId: session.id,
+        storedLanguage: normaliseLanguage(
+          session.inputLanguage || session.language,
+        ),
+      });
+      return fromBody;
+    }
+
+    return stored;
   }
 
   /* ══════════════════════════════ internals ═══════════════════════════════ */
@@ -780,11 +1144,21 @@ export class CaseTakingService {
       this.repository.listTurns(session.id),
     ]);
 
+    // The one place the two languages reach the engine.
+    //
+    // `language` on the state is the OUTPUT language: it is read by
+    // `fallbackPhrasing`, and by nothing else, so it decides how questions are
+    // worded. `inputLanguage` is read by `derivePresence`, and by nothing else,
+    // so it decides what the patient's own words are matched against. Routing
+    // them here rather than at each call site is what keeps "questions are
+    // English, answers are Tamil" a property of the session rather than a rule
+    // every caller has to remember.
     const state = expirePending(
       rebuildState({
         sessionId: session.id,
         startedAt: session.startedAt,
-        language: session.language,
+        language: sessionOutputLanguage(session),
+        inputLanguage: sessionInputLanguage(session),
         facts,
         turns,
       }),
@@ -812,6 +1186,18 @@ export class CaseTakingService {
     sourceRef: string;
     source: FactSource;
     verification: 'unverified' | 'patient_confirmed';
+    /**
+     * What language `text` is in, when it is not the language the patient
+     * speaks. The only caller that passes it is the extraction path, after a
+     * translation has actually run: the span it hands over is English by then,
+     * and the phrase lists it is about to be matched against are English too.
+     *
+     * Omitted everywhere else, and it must stay that way — the default is the
+     * session's INPUT language, which is what the patient's own words are in.
+     * Passing `en` for a Tamil answer would claim the English phrase lists had
+     * read it, and an unmatched "no" would become a recorded negative.
+     */
+    textLanguage?: string;
   }): Promise<{
     state: ClinicalState;
     derivation: PresenceDerivation;
@@ -826,7 +1212,15 @@ export class CaseTakingService {
       evidenceSpan: isShortAnswer(input.text) ? input.text : undefined,
       extractedValue: input.value ?? (input.text || undefined),
       field: valueSpecFor(input.field),
-      language: input.state.language,
+      // The language of THESE WORDS. Normally the session's INPUT language,
+      // because the words are the patient's and the phrase lists they are
+      // matched against are English: a Tamil "illai" is an unmatched answer
+      // that the engine flags for confirmation, which is the honest reading.
+      // The OUTPUT language is never right here — it would claim the English
+      // lists had covered Tamil, and an unmatched "no" would become a recorded
+      // negative. `textLanguage` overrides it for the one caller whose text is
+      // no longer the patient's own: extraction, after a translation ran.
+      language: input.textLanguage ?? input.state.inputLanguage,
     };
 
     const provenance: FactProvenance = {
@@ -882,9 +1276,37 @@ export class CaseTakingService {
     field?: FieldDefinition;
     text: string;
     derivation: PresenceDerivation | null;
+    language?: string;
   }): { queued: boolean; reason: string } {
     if (input.text.length === 0) {
       return { queued: false, reason: 'no free text in this turn' };
+    }
+
+    // Text the engine cannot read is text the engine did not read, however
+    // short it is and however cleanly it stored.
+    //
+    // This branch has to come before the `isShortAnswer` one below, and that
+    // ordering is the whole fix. A chief complaint is a `text` field: the
+    // engine "reads" it by storing it verbatim, so derivation succeeds and a
+    // short answer took the "engine read the answer without a model" exit —
+    // which for `எனக்கு மூணு நாளா நெஞ்சு வலி இருக்கு` is not true. It stored
+    // it; it understood none of it.
+    //
+    // The cost of that was precise and measured: no extraction meant no
+    // translation, so `classifyComplaint` — an English keyword table — went on
+    // reading Tamil, and a cardiac complaint never reached the cardiac
+    // pathway. The short chief complaint is the single most common utterance
+    // in the whole interview and it was the one case that skipped the model.
+    //
+    // `chief_complaint.symptom` is also the highest-value text in the session:
+    // `complaintCategories` reads it to decide which fifty review-of-systems
+    // fields apply and whether ACS_TRIAD is even evaluated. Paying a
+    // background job for it is worth it.
+    if (isNonEnglishScript(input.text)) {
+      return {
+        queued: true,
+        reason: 'answer is not in a script the engine can read',
+      };
     }
 
     if (!input.field) {
@@ -940,11 +1362,38 @@ export class CaseTakingService {
       const menu = extractionMenu(loaded.state, input.askedFieldPath);
       if (menu.length === 0) return;
 
+      // ── The patient's words, in English, for the English engine ───────────
+      //
+      // Everything after this line that reads *meaning* reads English;
+      // everything that is a *record of what the patient said* still reads the
+      // original, which was written to `CaseTurn.answerRaw` before the response
+      // shipped and is not touched here or anywhere below.
+      //
+      // This is on the background path deliberately. It is a second model call
+      // on a job that already costs eight to twenty seconds and already lands
+      // minutes late — which is affordable — and it would be a catastrophe on
+      // the turn path, where the measured handler time is a few milliseconds.
+      const englishUtterance = await this.translateForEngine(
+        input.utterance,
+        input.language,
+      );
+
       const result = await this.llm.extractFacts({
-        utterance: input.utterance,
+        // English when there is English to give. The values that come back
+        // populate `chief_complaint.symptom`, which is what `classifyComplaint`
+        // reads — an English keyword table that returned `[unclassified]` for
+        // "तीन दिन से सीने में दर्द हो रहा है" and silenced ACS_TRIAD.
+        utterance: englishUtterance.text,
         candidateFields: menu,
         askedFieldPath: input.askedFieldPath,
-        language: input.language,
+        // `en` only when the text really is English, because this tag drives
+        // the prompt's "copy their words, do not translate" line. Telling the
+        // model a Hindi sentence is English would invite it to translate — the
+        // one thing extraction must never do, since a translated value cannot
+        // be matched back to the span it came from.
+        language: englishUtterance.translated
+          ? DEFAULT_LANGUAGE
+          : input.language,
       });
 
       if (result.degraded) {
@@ -973,7 +1422,23 @@ export class CaseTakingService {
           // Not the patient's original modality: what reached us here is text
           // the model attributed, and the source has to say so.
           modality: 'text',
-          text: extracted.evidenceSpan ?? input.utterance,
+          // The span the extractor returned, verified against the same text the
+          // extractor was given — so when translation ran, both are English and
+          // the fallback is the English utterance rather than the original. It
+          // has to be one or the other: a span verified against English cannot
+          // be found in Devanagari, and `derivePresence`'s phrase lists are
+          // English too. None of this is stored: `rowDataFromFact` writes a
+          // value and a presence, never the text. The patient's own words stay
+          // where they were put, in the turn row, untouched.
+          text: extracted.evidenceSpan ?? englishUtterance.text,
+          // ...and when it is English, `derivePresence` is told so, so its
+          // English phrase lists actually run over it. Without this the span
+          // would be tagged with the language the patient spoke, the lists
+          // would be skipped as uncovered, and the translation would have
+          // bought nothing for the one thing it was meant to help.
+          ...(englishUtterance.translated
+            ? { textLanguage: DEFAULT_LANGUAGE }
+            : {}),
           value: extracted.value,
           sourceRef: input.turnId,
           source: 'patient_text',
@@ -1009,6 +1474,77 @@ export class CaseTakingService {
   }
 
   /**
+   * The patient's utterance in English — or the utterance, unchanged.
+   *
+   * ── What this is for
+   *
+   * `classifyComplaint` is an English keyword table and `complaintCategories`
+   * runs it over `chief_complaint.symptom`. Given the patient's own Hindi it
+   * returned `[unclassified]`, which cut the applicable field set from 64 to 44
+   * and left ACS_TRIAD silent for a patient describing cardiac chest pain. The
+   * table is not wrong; it was being handed something it cannot read. This
+   * hands it English.
+   *
+   * ── What it is careful not to be
+   *
+   * It returns a *pair*, never a replacement. The original utterance was
+   * written to `CaseTurn.answerRaw` on the synchronous path before the response
+   * shipped, and nothing downstream of here rewrites it — `rowDataFromFact`
+   * persists a value and a presence and has no column for text at all. So the
+   * verbatim record a clinician reads is the patient's, and English is a
+   * derived reading of it that exists only in memory, for the duration of one
+   * background job.
+   *
+   * Three ways out, all of them today's behaviour: no translator wired, the
+   * session already in English, or a translation that failed. The last is the
+   * common one on this box and it is a `warn`, not a throw — the caller is
+   * inside a fire-and-forget promise, and a rejection there takes the process
+   * down under Node's default handler.
+   *
+   * Nothing here logs the utterance. It is PHI, and a translation failure is
+   * diagnosable from the language tag and the reason.
+   */
+  private async translateForEngine(
+    utterance: string,
+    language: string,
+  ): Promise<{ text: string; translated: boolean }> {
+    const untranslated = { text: utterance, translated: false };
+
+    if (!this.translator) return untranslated;
+    if (normaliseLanguage(language) === DEFAULT_LANGUAGE) return untranslated;
+
+    try {
+      const result = await this.translator.translateToEnglish({
+        text: utterance,
+        sourceLanguage: language,
+      });
+
+      if (result.englishText === null) {
+        this.logger.warn(
+          `translation degraded for a "${language}" utterance (${
+            result.degradedReason ?? 'unknown'
+          }); extracting from the patient's own words instead`,
+        );
+        return untranslated;
+      }
+
+      this.logger.log(
+        `translated a "${language}" utterance for extraction in ${result.latencyMs}ms`,
+      );
+      return { text: result.englishText, translated: !result.passthrough };
+    } catch (error) {
+      // The provider contract says this cannot happen. The contract is not a
+      // reason to let a background promise reject if it ever does.
+      this.logger.error(
+        `translation threw for a "${language}" utterance: ${
+          error instanceof Error ? error.message : 'unknown'
+        }`,
+      );
+      return untranslated;
+    }
+  }
+
+  /**
    * Choose the next question and record that it was asked.
    *
    * The assistant turn is written before the response goes out, so a client
@@ -1024,9 +1560,16 @@ export class CaseTakingService {
     const selected = selectNext(state);
     if (!selected) return { question: null, state };
 
-    // The registry's own phrasing. The model may reword it later — that is what
-    // `phraseQuestion` is for — but the patient sees a complete question now,
-    // and §42's offline mode is this line rather than a special case.
+    // Already in the session's language: `selectNext` resolved it through the
+    // phrasebook, which is checked-in data and costs nothing. The model may
+    // reword it later — that is what `phraseQuestion` is for — but the patient
+    // sees a complete question now, and §42's offline mode is this line rather
+    // than a special case.
+    //
+    // This is also why translation is not a model call. The measured cost of
+    // this handler is a few milliseconds plus the database round trips; a
+    // per-turn translation would be eight to twenty seconds of it, sixty times
+    // an interview, and nobody would have read the question it produced.
     const prompt = selected.fallbackPrompt;
 
     await this.repository.appendTurn(session.id, {
@@ -1155,7 +1698,15 @@ export class CaseTakingService {
       id: session.id,
       patientId: session.patientId,
       kind: session.kind,
+      // Three fields, two meanings. `language` is the legacy name and carries
+      // the input language, so a client written before the split reads exactly
+      // what it always read; the two explicit names say which direction they
+      // are. A client that wants to label the microphone reads `inputLanguage`;
+      // one that wants to know what script the questions arrive in reads
+      // `outputLanguage`.
       language: session.language,
+      inputLanguage: sessionInputLanguage(session) ?? session.language,
+      outputLanguage: sessionOutputLanguage(session),
       status: session.status,
       consent: {
         given: Boolean(session.consentGivenAt),
@@ -1238,6 +1789,77 @@ export class CaseTakingService {
 /* ────────────────────────────── pure helpers ────────────────────────────── */
 
 /**
+ * Which of the interview's two languages a voice call is about. `/stt` is the
+ * patient talking, `/tts` is the interview talking back, and they have not been
+ * the same language since the day output became English.
+ */
+type VoiceDirection = 'input' | 'output';
+
+/**
+ * The language the patient SPEAKS, or `null` when the row does not say.
+ *
+ * Reads `inputLanguage` and falls back to the legacy `language` column, because
+ * a session that was started before the split has the patient's choice in the
+ * old column and the migration's backfill is the only thing that copied it
+ * across — a row restored from a pre-split dump would not have been backfilled.
+ *
+ * `null` rather than English when neither column holds a language we know:
+ * quietly transcribing an unknown language as English is exactly the confident
+ * wrong-language transcript this module exists to prevent, and a wrong
+ * transcript becomes a clinical fact. The caller decides what to do with the
+ * `null` — `/stt` falls back to what the request asked for, which is the
+ * behaviour a legacy session already had.
+ */
+function sessionInputLanguage(session: CaseSession): string | null {
+  for (const candidate of [session.inputLanguage, session.language]) {
+    const code = normaliseLanguage(candidate);
+    if (findLanguage(code)) return code;
+  }
+  return null;
+}
+
+/**
+ * The language the patient READS AND HEARS. Always answers.
+ *
+ * The asymmetry with the function above is deliberate. The input language is a
+ * fact about the patient that we can fail to know; the output language is a
+ * decision this system makes, and it has a defined answer even for a row that
+ * predates the column — `DEFAULT_OUTPUT_LANGUAGE`, which is English, which is
+ * the one language whose wording a clinician here has actually signed off.
+ */
+function sessionOutputLanguage(session: CaseSession): string {
+  const code = normaliseLanguage(session.outputLanguage);
+  return findLanguage(code) ? code : DEFAULT_OUTPUT_LANGUAGE;
+}
+
+/**
+ * Whether the interview's QUESTIONS come out in this language, and on whose
+ * authority — the half of "supported" that the sidecar cannot answer.
+ *
+ * `phrasebookFor` is the authority rather than `PHRASEBOOKS`, because it is the
+ * function the interview itself calls: it applies the review gate and the
+ * `MEDIHIVE_ALLOW_UNREVIEWED_PHRASEBOOKS` override, so what this endpoint
+ * reports and what a patient is actually asked cannot disagree. Reading the
+ * registry directly would produce a picker that promises Hindi while the gate
+ * quietly serves English, which is the specific confusion this field exists to
+ * end.
+ */
+function questionCapability(code: string): {
+  questions: 'none' | 'unreviewed' | 'reviewed';
+  questionSource: PhrasebookSource | null;
+} {
+  const spoken = phrasebookFor(code);
+  const declared = PHRASEBOOKS[code];
+  if (!spoken) {
+    return { questions: 'none', questionSource: declared?.source ?? null };
+  }
+  return {
+    questions: spoken.reviewedAt === null ? 'unreviewed' : 'reviewed',
+    questionSource: spoken.source,
+  };
+}
+
+/**
  * Short enough that the whole utterance is the evidence for one field.
  *
  * A sentence boundary is disqualifying on its own, regardless of length: two
@@ -1277,7 +1899,7 @@ function currentQuestionFrom(
       label: field.label,
       kind: field.kind,
       choices: field.choices,
-      prompt: turn.questionText ?? fallbackPhrasing(field),
+      prompt: turn.questionText ?? fallbackPhrasing(field, state.language),
       remaining: outstandingFields(state).length,
     };
   }

@@ -10,6 +10,13 @@ import {
   Min,
 } from 'class-validator';
 import { ANSWER_MODALITIES } from '../engine/tri-state';
+import { IsLanguageCode } from '../../../common/decorators/language.decorator';
+import {
+  DEFAULT_LANGUAGE,
+  STT_LANGUAGE_CODES,
+  SUPPORTED_LANGUAGE_CODES,
+  TTS_LANGUAGE_CODES,
+} from '../../../common/constants/language.constants';
 
 /**
  * The wire shapes for the interview.
@@ -37,15 +44,42 @@ export class StartCaseSessionDto {
   @IsIn(['new_consultation', 'follow_up'])
   kind?: string;
 
+  /**
+   * ── The interview's two languages, and why the request carries one
+   *
+   * The session stores an `inputLanguage` and an `outputLanguage`. This request
+   * names neither, and that is deliberate on both counts.
+   *
+   * `language` already IS the input language: the picker chooses one thing —
+   * the language the patient speaks — and it governs the recogniser. A second
+   * field meaning the same fact would be two sources of truth for it and the
+   * first thing to drift, so the request shape is unchanged and the server maps
+   * `language` onto `inputLanguage`.
+   *
+   * `outputLanguage` is absent because it is a product decision the server
+   * makes — `DEFAULT_OUTPUT_LANGUAGE`, with the reasoning written down beside
+   * it — and not something the handset gets a vote on. A phone that could set
+   * it would be a phone that can put an unreviewed clinical translation in
+   * front of a patient, which is what the review gate exists to stop.
+   *
+   * The session VIEW reports both, so a client can label the microphone with
+   * one and the script of the questions with the other.
+   */
   @ApiPropertyOptional({
+    enum: [...SUPPORTED_LANGUAGE_CODES],
+    default: DEFAULT_LANGUAGE,
     description:
-      'BCP-47-ish. Only `en` has phrase lists today; anything else still runs, ' +
-      'with every derivation flagged for patient confirmation.',
-    default: 'en',
+      'The language the patient SPEAKS — what their speech is transcribed as. ' +
+      'It does not change what they read or hear: the questions and the voice ' +
+      'are English on every session. BCP-47 is accepted and reduced to its ' +
+      'primary subtag — send `Locale.toLanguageTag()` and `ta-IN` becomes ' +
+      '`ta`. A code outside the set is a 400 with a written sentence, never a ' +
+      'quiet fall back to English. `or` is offered here even though its ' +
+      'microphone is not, because an Odia interview that is read aloud and ' +
+      'typed is a complete interview.',
   })
   @IsOptional()
-  @IsString()
-  @MaxLength(16)
+  @IsLanguageCode('interview')
   language?: string;
 
   @ApiPropertyOptional({
@@ -166,33 +200,82 @@ export class CorrectFactDto {
   value?: string;
 }
 
+/**
+ * ── `sessionId` on the two voice routes
+ *
+ * These two routes carry no session id today, so `session.language` — the
+ * language the patient actually chose — was never consulted and the body
+ * decided. That is the wrong authority: the body is whatever the phone
+ * remembered, and a phone that has been handed to a relative, or resumed after
+ * an app update, remembers the wrong thing.
+ *
+ * `sessionId` is **optional and additive**: an existing client that sends only
+ * `text` and `language` behaves exactly as it did. Send it and the session's
+ * language wins over the body's, which is the point. It is not made required
+ * because both routes are legitimately used before a session exists — reading
+ * the consent text aloud, and reading the language picker itself.
+ *
+ * Supplying it also scopes the call: the session is loaded through the same
+ * patient-and-organisation check every other route uses, so a session id that
+ * is not yours reads as not found rather than as a language hint.
+ */
 export class SpeakDto {
   @ApiProperty({ description: 'What to read aloud.' })
   @IsString()
   @MaxLength(2000)
   text!: string;
 
-  @ApiPropertyOptional({ default: 'en' })
+  @ApiPropertyOptional({
+    enum: [...TTS_LANGUAGE_CODES],
+    default: DEFAULT_LANGUAGE,
+    description:
+      "Ignored when `sessionId` names a session: that session's OUTPUT " +
+      'language decides, and the output language is English on every session ' +
+      'today. This field still decides for the calls made before a session ' +
+      'exists — the consent text, the language picker. BCP-47 accepted; a ' +
+      'code outside the set is a 400.',
+  })
   @IsOptional()
-  @IsString()
-  @MaxLength(16)
+  @IsLanguageCode('tts')
   language?: string;
-}
 
-/**
- * Multipart, so the language arrives as a form field rather than JSON.
- *
- * Declared anyway: `forbidNonWhitelisted` applies to a multipart body too, and
- * an undeclared `language` field would 400 the upload.
- */
-export class TranscribeDto {
   @ApiPropertyOptional({
     description:
-      'Omit to let the recogniser detect it — the right default for a patient ' +
-      'who switches language mid-sentence.',
+      'The interview this line belongs to. When given, its OUTPUT language ' +
+      'wins over `language` above.',
   })
   @IsOptional()
   @IsString()
-  @MaxLength(16)
+  @MaxLength(64)
+  sessionId?: string;
+}
+
+/**
+ * Multipart, so the fields arrive as form fields rather than JSON.
+ *
+ * Declared anyway: `forbidNonWhitelisted` applies to a multipart body too, and
+ * an undeclared field would 400 the upload.
+ */
+export class TranscribeDto {
+  @ApiPropertyOptional({
+    enum: [...STT_LANGUAGE_CODES],
+    description:
+      "Ignored when `sessionId` names a session: that session's INPUT " +
+      'language — the one the patient chose — decides. Omit both and the ' +
+      'recogniser detects the language itself. `or` is refused here: there is ' +
+      'no Odia speech model, so an Odia answer is typed.',
+  })
+  @IsOptional()
+  @IsLanguageCode('stt')
   language?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'The interview this recording answers. When given, its INPUT language ' +
+      'wins over `language` above.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  sessionId?: string;
 }

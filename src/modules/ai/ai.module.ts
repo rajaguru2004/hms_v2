@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { OllamaProvider } from './ollama.provider';
+import { OllamaTranslationProvider } from './ollama-translation.provider';
 import { SidecarClient } from './sidecar.client';
 import { MedicationMatcher } from './medication-matcher.service';
 import { LLM_PROVIDER } from './llm-provider.interface';
+import { TRANSLATION_PROVIDER } from './translation-provider.interface';
 
 /**
  * Everything that talks to a model, and nothing that decides anything.
@@ -15,15 +17,28 @@ import { LLM_PROVIDER } from './llm-provider.interface';
  *
  * `LLM_PROVIDER` is a string token because the thing being injected is an
  * interface, and because a concrete class as the token invites an `instanceof`
- * somewhere that then cannot be given a stub in a test.
+ * somewhere that then cannot be given a stub in a test. `TRANSLATION_PROVIDER`
+ * is a second token rather than another method on the first because the two
+ * seams point at different servers — extraction at Ollama's default port, the
+ * translator at 8080 — and a single provider would have hidden that behind one
+ * `isAvailable`.
  */
 @Module({
   providers: [
     OllamaProvider,
     { provide: LLM_PROVIDER, useExisting: OllamaProvider },
+    OllamaTranslationProvider,
+    { provide: TRANSLATION_PROVIDER, useExisting: OllamaTranslationProvider },
     SidecarClient,
     MedicationMatcher,
   ],
-  exports: [LLM_PROVIDER, OllamaProvider, SidecarClient, MedicationMatcher],
+  exports: [
+    LLM_PROVIDER,
+    TRANSLATION_PROVIDER,
+    OllamaProvider,
+    OllamaTranslationProvider,
+    SidecarClient,
+    MedicationMatcher,
+  ],
 })
 export class AiModule {}

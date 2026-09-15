@@ -20,5 +20,59 @@ rapidocr-onnxruntime
 # Speech to text. Held on CPU on purpose — see stt.py.
 faster-whisper
 
-# Text to speech. Voice files are downloaded separately; see tts.py.
+# Text to speech. Voice files are downloaded separately; see tts/piper.py.
 piper-tts
+
+# tts/config.yaml. It arrived transitively before this was written down, which
+# meant the TTS chain's configuration depended on a dependency of a dependency.
+pyyaml
+
+# IndicF5 — the eleven Indian languages — is deliberately NOT here.
+#
+# It brings torch and transformers: several gigabytes, most of it CUDA wheels
+# this CPU-bound box will never execute, on every `pip install -r`, including
+# the demo container that only needs English. tts/indicf5.py is written to
+# report itself unavailable when they are missing and the chain falls through
+# to Piper, so a box that wants the Indian languages installs them itself:
+#
+#   .venv/Scripts/pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   .venv/Scripts/pip install transformers
+#
+# `tts/config.yaml` lists what has to import under `indicf5.requires`.
+#
+# ## Windows Smart App Control: do NOT install the newest of these six
+#
+#     pip install regex==2026.7.19 numpy==2.2.6 scikit-learn==1.7.2 \
+#                 matplotlib==3.10.7 numba==0.62.1 xxhash==3.5.0
+#
+# Every one of these ships an unsigned native extension. With Smart App Control
+# enforced — HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy, value
+# VerifiedAndReputablePolicyState = 1 — Windows refuses to load a binary it has
+# not seen before, and a just-released wheel has no reputation yet:
+#
+#     ImportError: DLL load failed while importing _regex:
+#     An Application Control policy has blocked this file.
+#
+# It is a reputation clock, not a version bug: the same wheel loads once it is
+# a few months old, which is why a slightly older pin fixes it and why this
+# will come back the next time somebody runs `pip install -U`.
+#
+# It matters here because the breakage does not look like this. Only `regex`
+# names itself. The others surface far away, as errors that read like a
+# torch/transformers version conflict and send you off pinning the wrong thing:
+#
+#   numpy         _pcg64 blocked -> `import numpy.random` fails -> a swallowed
+#                 `except ImportError` in torch/_dynamo/utils.py leaves
+#                 NP_SUPPORTED_MODULES undefined -> `torch._dynamo` will not
+#                 import -> transformers.masking_utils will not import. It
+#                 presents as "cannot import name 'NP_SUPPORTED_MODULES' from
+#                 'torch._dynamo.utils'", which is torch failing to import
+#                 torch and says nothing about numpy at all.
+#   scikit-learn  _check_build blocked -> `from transformers import AutoModel`
+#   matplotlib    _image blocked      -> f5_tts.infer.utils_infer
+#   numba         _box blocked        -> librosa -> f5_tts
+#   xxhash        _xxhash blocked     -> wandb -> f5_tts
+#
+# To check whether this is what you are looking at, import the bare module:
+# a blocked binary always says "An Application Control policy has blocked this
+# file", whatever the traceback above it claims.

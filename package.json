@@ -35,6 +35,9 @@
     "prepare": "husky",
     "verify:mobile": "ts-node -r tsconfig-paths/register test/verify-mobile-contract.ts",
     "verify:case-taking": "ts-node -r tsconfig-paths/register test/verify-case-taking.ts",
+    "verify:hindi": "ts-node -r tsconfig-paths/register test/verify-hindi-interview.ts",
+    "verify:language-split": "ts-node -r tsconfig-paths/register test/verify-language-split.ts",
+    "verify:languages": "ts-node -r tsconfig-paths/register test/verify-languages.ts",
     "verify:patient-documents": "ts-node -r tsconfig-paths/register test/verify-patient-documents.ts"
   },
   "prisma": {

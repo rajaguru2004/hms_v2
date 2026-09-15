@@ -29,6 +29,7 @@ import {
   sectionRank,
 } from './clinical-state';
 import { FieldDefinition, applicableFields } from './field-registry';
+import { phrasingFor } from './phrasebook';
 import { isAssessed } from './tri-state';
 
 export interface SelectedQuestion {
@@ -112,7 +113,14 @@ export function selectNext(state: ClinicalState): SelectedQuestion | null {
   if (!field) return null;
   return {
     field,
-    fallbackPrompt: fallbackPhrasing(field),
+    // The session's OUTPUT language — `state.language` — carried on the state
+    // since it was built. Not the patient's: what they speak governs the
+    // recogniser, what the interview answers in governs this, and since
+    // `outputLanguage` is `en` for every session today every question here
+    // comes out of the registry's own English `prompt`. A session with no
+    // language, or one whose translation nobody has reviewed, gets the same
+    // English wording — never an empty prompt.
+    fallbackPrompt: fallbackPhrasing(field, state.language),
     remaining: outstandingFields(state).length,
   };
 }
@@ -159,7 +167,7 @@ export function selectNextBatch(
   const outstanding = outstandingFields(state).length;
   return askable.slice(0, Math.max(0, limit)).map((field, index) => ({
     field,
-    fallbackPrompt: fallbackPhrasing(field),
+    fallbackPrompt: fallbackPhrasing(field, state.language),
     remaining: outstanding - index,
   }));
 }
@@ -176,46 +184,30 @@ export function interviewProgress(state: ClinicalState): CompletionReport {
 }
 
 /**
- * Plain-English phrasing, assembled from the registry's `prompt` plus a hint
+ * The question as the patient hears it: the registry's `prompt` plus a hint
  * about the shape of the expected answer.
  *
  * The answer hint matters more offline than online: without a model to
  * interpret "a bit sore", a patient needs to hear what kind of answer the form
  * can take. Choice values are stored in snake_case for the state and spoken as
- * words here, so the same constant serves both.
+ * words, so the same constant serves both.
+ *
+ * The wording itself now lives in `phrasebook.ts`, which is where the
+ * translations sit beside it. This stayed a function here, with the same name
+ * and the same English output, because it is what `SelectedQuestion` is built
+ * from and what the service quotes back in a "we could not read that" message —
+ * moving the callers would have been a bigger change than moving the strings.
+ *
+ * `language` is the session's OUTPUT language, not the request's and not the
+ * patient's: it is the language the question is asked in. Omit it and you get
+ * English, which is what every existing caller and every existing test expects
+ * — and, since `outputLanguage` defaults to `en`, what every live session gets
+ * too. The phrasebooks stay wired to this argument, so pointing a session's
+ * `outputLanguage` at `hi` is all it takes to serve the Hindi wording again.
  */
-export function fallbackPhrasing(field: FieldDefinition): string {
-  const base = field.prompt.trim();
-  switch (field.kind) {
-    case 'boolean':
-      return `${base} You can answer yes or no.`;
-    case 'choice': {
-      const spoken = (field.choices ?? []).map(humanise);
-      return spoken.length > 0
-        ? `${base} You can say: ${joinWithOr(spoken)}.`
-        : base;
-    }
-    case 'scale':
-      return `${base} Please give a number from 0 to 10.`;
-    case 'number':
-      return `${base} Please give a number.`;
-    case 'duration':
-      return `${base} For example: three days, or two weeks.`;
-    case 'text':
-      return base;
-    default:
-      // No `assertNever` here: `kind` comes from data the deployment may extend
-      // with a new input widget, and an unknown widget should still ask the
-      // question rather than crash the interview.
-      return base;
-  }
-}
-
-function humanise(token: string): string {
-  return token.replace(/_/g, ' ');
-}
-
-function joinWithOr(items: readonly string[]): string {
-  if (items.length <= 1) return items[0] ?? '';
-  return `${items.slice(0, -1).join(', ')} or ${items[items.length - 1]}`;
+export function fallbackPhrasing(
+  field: FieldDefinition,
+  language?: string,
+): string {
+  return phrasingFor(field, language);
 }
