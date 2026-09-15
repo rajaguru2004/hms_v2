@@ -28,6 +28,9 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { patientScopeFor } from '../../common/guards/patient-self.guard';
+import { NotFoundException } from '../../common/exceptions/app.exception';
+import { ErrorCodes } from '../../common/exceptions/error-codes';
 import { Permission } from '../../common/enums/permission.enum';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
 
@@ -62,6 +65,20 @@ export class AppointmentsController {
     @Query() query: AppointmentQueryDto,
     @CurrentUser() currentUser: AuthenticatedUser,
   ) {
+    // A patient sees their own appointments and nobody else's.
+    //
+    // The guard that protects the patient-scoped modules rewrites an id in the
+    // URL, and a listing route has no id to rewrite — so this one answered with
+    // the whole organisation. Signing in as a patient returned ten
+    // appointments belonging to ten other patients, with their names on them.
+    // The filter is applied here rather than trusted from the query, because a
+    // client-supplied `patientId` is the thing being defended against.
+    // Assigned onto the DTO rather than spread into a new object: the query
+    // class carries `skip` and `take` as getters, and a spread copies the data
+    // and leaves the behaviour behind.
+    const scope = patientScopeFor(currentUser);
+    if (scope) query.patientId = scope;
+
     return this.appointmentsService.findAll(query, currentUser.organizationId);
   }
 
@@ -74,7 +91,24 @@ export class AppointmentsController {
     @Param('id') id: string,
     @CurrentUser() currentUser: AuthenticatedUser,
   ) {
-    return this.appointmentsService.findById(id, currentUser.organizationId);
+    const appointment = await this.appointmentsService.findById(
+      id,
+      currentUser.organizationId,
+    );
+
+    // Same rule as the listing, one record at a time. Answered as not-found
+    // rather than forbidden: telling a patient an appointment exists but is
+    // not theirs confirms another patient's appointment to them, which is the
+    // thing being prevented.
+    const scope = patientScopeFor(currentUser);
+    if (scope && appointment?.patientId !== scope) {
+      throw new NotFoundException(
+        'Appointment not found',
+        ErrorCodes.APPOINTMENT_NOT_FOUND,
+      );
+    }
+
+    return appointment;
   }
 
   @Put(':id')

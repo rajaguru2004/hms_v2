@@ -86,8 +86,32 @@ export class PatientSelfGuard implements CanActivate {
  * that is two accounts, and holding PATIENT is the narrower of the two — so it
  * is the one that wins.
  */
-function isPatientCaller(user: AuthenticatedUser): boolean {
+export function isPatientCaller(user: AuthenticatedUser): boolean {
   return user.roles?.includes(SystemRole.PATIENT) ?? false;
+}
+
+/**
+ * The only patient id a caller may read, or `undefined` for staff.
+ *
+ * For a route that lists or fetches *somebody's* records rather than one
+ * patient-scoped resource, the guard's param rewriting is not enough — a list
+ * endpoint has no id to rewrite, so an unfiltered query answers with the whole
+ * organisation. `GET /appointments` did exactly that: a patient signing in saw
+ * ten appointments belonging to ten other patients, by name.
+ *
+ * So a listing route asks this, and narrows its own query. Staff get
+ * `undefined` and are unaffected; a PATIENT with no linked record is refused
+ * rather than defaulted, for the same reason the guard refuses one.
+ */
+export function patientScopeFor(user: AuthenticatedUser): string | undefined {
+  if (!isPatientCaller(user)) return undefined;
+  if (!user.patientId) {
+    throw new ForbiddenException(
+      'This account is not linked to a patient record.',
+      ErrorCodes.PATIENT_PORTAL_NOT_LINKED,
+    );
+  }
+  return user.patientId;
 }
 
 /** The patient id this request asked for, wherever it was written. */
