@@ -8,6 +8,8 @@ import {
   Patch,
   Post,
   Query,
+  Res,
+  StreamableFile,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -22,6 +24,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { Response } from 'express';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -207,6 +210,48 @@ export class PatientDocumentsController {
       id,
       resolveCaller(currentUser, scopedPatientId),
     );
+  }
+
+  /**
+   * The original itself, served on this API's own origin.
+   *
+   * `/original` signs a link straight at the object store, which is cheaper and
+   * correct whenever the client shares a network with it. A phone does not:
+   * over a tunnel, or on mobile data, `minio:9000` resolves to nothing and
+   * §22's preserved evidence becomes evidence nobody can open.
+   *
+   * So both exist, and they are for different callers rather than one being a
+   * replacement. A console on this host takes the signed URL; the app takes
+   * this. It costs a proxy hop and buys "view the original" working from
+   * wherever the patient actually is.
+   */
+  @Get(':documentId/file')
+  @Permissions(Permission.PATIENT_DOCUMENT_READ)
+  @ApiParam({ name: 'documentId', type: String })
+  @ApiOperation({ summary: 'The original file, streamed through the API' })
+  async getOriginalFile(
+    @Param('documentId') id: string,
+    @CurrentUser() currentUser: AuthenticatedUser,
+    @PatientScope() scopedPatientId: string | undefined,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<StreamableFile> {
+    const file = await this.service.streamOriginal(
+      id,
+      resolveCaller(currentUser, scopedPatientId),
+    );
+
+    response.set({
+      'Content-Type': file.mimeType,
+      // `inline`, so a phone shows the prescription rather than downloading it.
+      'Content-Disposition': `inline; filename="${file.filename}"`,
+      ...(file.contentLength
+        ? { 'Content-Length': String(file.contentLength) }
+        : {}),
+      // A medical document on a shared device has no business in a cache.
+      'Cache-Control': 'no-store',
+    });
+
+    return new StreamableFile(file.body);
   }
 
   /**

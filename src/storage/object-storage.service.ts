@@ -4,6 +4,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { Readable } from 'stream';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
@@ -169,6 +170,50 @@ export class ObjectStorageService {
       this.logger.error('Failed to sign an S3 read URL', error);
       throw new AppException(
         'Failed to prepare the document for viewing',
+        ErrorCodes.S3_SIGN_FAILED,
+      );
+    }
+  }
+
+  /**
+   * The object itself, as a stream, for the API to serve.
+   *
+   * The counterpart to [getReadUrl], and it exists because a signed URL points
+   * at the object store's own address — which is reachable from the API and
+   * from nothing else. Behind one tunnel, or on a phone on a different network,
+   * a presigned link is a URL the client cannot resolve, so the evidence §22
+   * requires be preserved becomes evidence nobody can open.
+   *
+   * Streamed rather than buffered: a discharge summary is a multi-page scan,
+   * and reading it whole into memory to hand it straight out again is a copy
+   * nobody needs.
+   *
+   * Whose object this is remains the caller's question, exactly as it is for
+   * [getReadUrl]. This answers for any key it is given.
+   */
+  async readObject(key: string): Promise<{
+    body: Readable;
+    contentType?: string;
+    contentLength?: number;
+  }> {
+    if (!key) {
+      throw new AppException('No object key supplied', ErrorCodes.BAD_REQUEST);
+    }
+
+    try {
+      const result = await this.client.send(
+        new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+
+      return {
+        body: result.Body as Readable,
+        contentType: result.ContentType,
+        contentLength: result.ContentLength,
+      };
+    } catch (error) {
+      this.logger.error('Failed to read an S3 object', error);
+      throw new AppException(
+        'Failed to open the document',
         ErrorCodes.S3_SIGN_FAILED,
       );
     }

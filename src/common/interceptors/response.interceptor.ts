@@ -1,8 +1,9 @@
 import {
+  CallHandler,
+  ExecutionContext,
   Injectable,
   NestInterceptor,
-  ExecutionContext,
-  CallHandler,
+  StreamableFile,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
@@ -25,6 +26,14 @@ export class ResponseInterceptor implements NestInterceptor {
       map((data: unknown) => {
         // If data already has our envelope shape, pass through
         if (this.isApiResponse(data)) return data;
+
+        // A file is not a payload. `StreamableFile` wraps a live stream, and
+        // wrapping it in the envelope both destroys the response — the client
+        // gets JSON where it asked for a PNG — and throws on the way out:
+        // serialising a stream walks its socket back to itself and fails with
+        // "Converting circular structure to JSON", which surfaces as a 500 with
+        // nothing in it about streams.
+        if (data instanceof StreamableFile) return data;
 
         return {
           success: true,

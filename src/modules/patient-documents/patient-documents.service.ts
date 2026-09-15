@@ -1,3 +1,4 @@
+import { Readable } from 'stream';
 import { Injectable, Logger } from '@nestjs/common';
 import { PatientDocument, Prisma } from '@prisma/client';
 
@@ -399,6 +400,59 @@ export class PatientDocumentsService {
       expiresInSeconds: ORIGINAL_URL_TTL_SECONDS,
       expiresAt: new Date(Date.now() + ORIGINAL_URL_TTL_SECONDS * 1000),
       mimeType: document.mimeType,
+    };
+  }
+
+  /**
+   * The original itself, streamed through the API.
+   *
+   * `getOriginalUrl` signs a link straight to the object store, which is the
+   * cheaper answer and the right one whenever the client shares a network with
+   * it. A phone does not. Reached over a tunnel — or over mobile data, or from
+   * any device that is not this host — `minio:9000` resolves to nothing, and
+   * §22's preserved evidence becomes evidence nobody can open.
+   *
+   * So this route serves the bytes on the API's own origin. It costs a proxy
+   * hop; what it buys is that "view the original" works from wherever the
+   * patient actually is, which is the only place it matters.
+   *
+   * Ownership is settled before a byte is read: `requireOwned` loads the row
+   * scoped to the organisation and the patient, and only the key on that row is
+   * ever opened.
+   */
+  async streamOriginal(
+    id: string,
+    caller: DocumentCaller,
+  ): Promise<{
+    body: Readable;
+    mimeType: string;
+    contentLength?: number;
+    filename: string;
+  }> {
+    const document = await this.requireOwned(id, caller);
+    const object = await this.storage.readObject(document.fileKey);
+
+    void this.auditService.log({
+      userId: caller.userId,
+      action: AuditAction.CREATE,
+      entityName: 'PatientDocumentAccess',
+      entityId: document.id,
+      metadata: {
+        organizationId: caller.organizationId,
+        patientId: caller.patientId,
+        via: 'stream',
+      },
+    });
+
+    return {
+      body: object.body,
+      // The row's own type, not the store's. The row is what the pipeline
+      // validated; a store answering `application/octet-stream` would make a
+      // phone offer to download a prescription instead of showing it.
+      mimeType:
+        document.mimeType || object.contentType || 'application/octet-stream',
+      contentLength: object.contentLength,
+      filename: document.fileKey.split('/').pop() || 'document',
     };
   }
 
