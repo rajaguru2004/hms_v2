@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+# Recorded round trips from tools/speak_into_room.py. They are audio of
+# somebody answering clinical questions; they do not belong in git.
+*.wav

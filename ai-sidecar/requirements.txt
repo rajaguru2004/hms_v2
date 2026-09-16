@@ -17,8 +17,29 @@ pypdfium2
 # the same detection and recognition models without the paddlepaddle runtime.
 rapidocr-onnxruntime
 
-# Speech to text. Held on CPU on purpose — see stt.py.
+# Speech to text. On the GPU where there is one — see stt.py for the numbers.
 faster-whisper
+
+# faster-whisper on CUDA needs cuBLAS 12. It is NOT here on purpose: it is a
+# 553 MB wheel that a CPU-only box has no use for, and `stt.py` falls back to
+# the CPU without it. A box with an NVIDIA GPU installs it itself:
+#
+#   .venv/Scripts/pip install --no-deps nvidia-cublas-cu12
+#
+# `--no-deps` is not optional. The wheel needs none, and a bare `pip install`
+# re-runs the resolver across numpy, which is pinned at 2.2.6 for the Smart
+# App Control reason documented at the bottom of this file.
+#
+# cuDNN is NOT needed separately: ctranslate2 ships `cudnn64_9.dll` beside its
+# own DLL. cuBLAS is the only gap, and the failure it causes is worth
+# recognising because it does not look like a missing package — the model
+# loads onto the GPU successfully and then dies at the first encode with
+#
+#     RuntimeError: Library cublas64_12.dll is not found or cannot be loaded
+#
+# i.e. at the first transcription rather than at startup. `stt.py` probes for
+# it up front so that a box missing it degrades to CPU at load instead of
+# failing mid-interview.
 
 # Text to speech. Voice files are downloaded separately; see tts/piper.py.
 piper-tts

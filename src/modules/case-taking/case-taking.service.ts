@@ -1,4 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import {
   CaseFact,
   CaseRedFlag,
@@ -17,6 +19,7 @@ import {
   TranscribeDto,
 } from './dto/case-taking.dto';
 import { LanguageCatalogueDto } from './dto/language.dto';
+import { VoiceGrantDto, VoiceTokenDto } from './dto/voice-token.dto';
 import {
   ClinicalState,
   applyFact,
@@ -77,7 +80,10 @@ import {
   NotFoundException,
 } from '../../common/exceptions/app.exception';
 import { ErrorCode, ErrorCodes } from '../../common/exceptions/error-codes';
-import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
+import {
+  AuthenticatedUser,
+  JwtPayload,
+} from '../../common/types/jwt-payload.type';
 import {
   DEFAULT_LANGUAGE,
   DEFAULT_OUTPUT_LANGUAGE,
@@ -199,6 +205,43 @@ export interface TurnResult {
   serverTimeMs: number;
 }
 
+/**
+ * How long a room pass is good for.
+ *
+ * Long enough to cover one interview including a patient who puts the phone
+ * down to think, short enough that a leaked token is an expired token before
+ * it is worth anything. The client asks for another when this runs out; that
+ * costs one request and is invisible.
+ */
+const VOICE_TOKEN_TTL_SECONDS = 60 * 30;
+
+/**
+ * The worker this API dispatches an interview to.
+ *
+ * Must match `AGENT_NAME` in `voice-agent/agent.py`. They are two languages
+ * naming one worker: if they drift, this creates a dispatch for an agent
+ * nobody is registered as, LiveKit has nothing to hand it to, and the patient
+ * waits in a room that never gets a second participant. Nothing fails loudly,
+ * which is exactly why the constant is named on both sides rather than typed
+ * twice.
+ */
+const VOICE_AGENT_NAME = 'medihive';
+
+/**
+ * `ParticipantInfo.Kind.AGENT` on the LiveKit wire.
+ *
+ * Written as the number rather than imported. The enum lives in
+ * `@livekit/protocol`, which is a transitive dependency of
+ * `livekit-server-sdk` and is not declared in this project's `package.json` —
+ * `livekit-server-sdk` re-exports the clients but not this enum, so reaching
+ * for it means importing a package nothing here depends on, which survives
+ * only as long as the installer keeps hoisting it.
+ *
+ * The value is a protobuf field number, which is the one kind of constant that
+ * cannot change without breaking every LiveKit client in existence.
+ */
+const PARTICIPANT_KIND_AGENT = 4;
+
 @Injectable()
 export class CaseTakingService {
   private readonly logger = new Logger(CaseTakingService.name);
@@ -220,6 +263,22 @@ export class CaseTakingService {
     @Optional()
     @Inject(TRANSLATION_PROVIDER)
     private readonly translator?: TranslationProvider,
+    /**
+     * Optional for the same reason the translator is: a box with no LiveKit
+     * credentials still runs a complete interview. Nothing on the clinical
+     * path reads this.
+     */
+    @Optional()
+    private readonly config?: ConfigService,
+    /**
+     * Optional on the same grounds as `config`, and paired with it: it exists
+     * only to mint the short-lived credential the voice worker posts turns
+     * with. A box with no LiveKit has nothing to dispatch and therefore nothing
+     * to sign, and `dispatchVoiceAgent` returns early when either is absent.
+     * Nothing on the clinical path reads it.
+     */
+    @Optional()
+    private readonly jwt?: JwtService,
   ) {}
 
   /* ═══════════════════════════════ sessions ═══════════════════════════════ */
@@ -890,6 +949,264 @@ export class CaseTakingService {
         };
       }),
     };
+  }
+
+  /* ═════════════════════════════ live voice ═══════════════════════════════ */
+
+  /**
+   * A short-lived pass into this patient's own voice room.
+   *
+   * ## Why the client names neither the room nor itself
+   *
+   * Both are derived here from the session the caller already owns. A client
+   * that could name its own room could name somebody else's, and two patients
+   * in one room is two clinical interviews sharing an audio stream — a
+   * disclosure with no recovery once it has happened. `loadSession` is what
+   * proves the caller owns the session; everything after it is derived.
+   *
+   * ## Why the TTL is minutes
+   *
+   * The token is the whole credential: anyone holding it can join that room
+   * and hear that interview. It only has to survive the dial, so it is scoped
+   * to roughly the length of one interview and no longer. A client whose token
+   * expires mid-session asks for another; a token that lasted a day would
+   * outlive the consultation it was minted for.
+   *
+   * ## What the phone never receives
+   *
+   * The API secret. It mints this and stays on the server. A credential
+   * shipped inside an APK belongs to anybody who has the APK, so the worst a
+   * decompiled build yields is an expired pass to a finished interview.
+   *
+   * ## What this being unavailable must not do
+   *
+   * Stop an interview. With no LiveKit configured this refuses in writing and
+   * the patient notices nothing: the microphone still records, `/stt` still
+   * answers, and the tiles and the keyboard were never conditional on any of
+   * it. That is why the config is optional and this returns a refusal rather
+   * than throwing something a client would render as a fault.
+   */
+  async voiceToken(
+    dto: VoiceTokenDto,
+    user: AuthenticatedUser,
+    patientId: string,
+  ): Promise<VoiceGrantDto> {
+    const url = this.config?.get<string>('LIVEKIT_URL');
+    const key = this.config?.get<string>('LIVEKIT_API_KEY');
+    const secret = this.config?.get<string>('LIVEKIT_API_SECRET');
+
+    if (!url || !key || !secret) {
+      throw new BadRequestException(
+        'Live voice is not available here. You can still speak your answer, ' +
+          'type it, or tap one of the choices.',
+        ErrorCodes.AI_SIDECAR_UNAVAILABLE,
+      );
+    }
+
+    // Proves the caller owns this session before anything is derived from it.
+    const session = await this.loadSession(dto.sessionId, user, patientId);
+    this.assertOpen(session);
+
+    const roomName = `case-${session.id}`;
+    const identity = `patient-${patientId}`;
+    const ttlSeconds = VOICE_TOKEN_TTL_SECONDS;
+
+    // Off the session row, never off `dto` — the session is the authority on
+    // what the patient speaks. Hoisted into one pair because the room token and
+    // the agent dispatch both carry them, and two readings that could disagree
+    // is a recogniser listening for one language while the worker speaks
+    // another.
+    const languages = {
+      input: sessionInputLanguage(session) ?? DEFAULT_LANGUAGE,
+      output: sessionOutputLanguage(session),
+    };
+
+    const { AccessToken } = await import('livekit-server-sdk');
+    const token = new AccessToken(key, secret, {
+      identity,
+      ttl: ttlSeconds,
+      // Read by the agent that joins the room, so it knows which language to
+      // listen for without a second round trip. Advisory: the session remains
+      // the authority, which is why these come off the row and not off `dto`.
+      metadata: JSON.stringify({
+        sessionId: session.id,
+        inputLanguage: languages.input,
+        outputLanguage: languages.output,
+      }),
+    });
+
+    // The minimum that works. A patient publishes their microphone and hears
+    // the agent; they do not create rooms, do not administer one, and do not
+    // publish data — so a token that leaked cannot be used to open a room of
+    // its own or to speak into somebody else's as them.
+    token.addGrant({
+      room: roomName,
+      roomJoin: true,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: false,
+      roomCreate: false,
+      roomAdmin: false,
+    });
+
+    await this.dispatchVoiceAgent(
+      session.id,
+      roomName,
+      user,
+      ttlSeconds,
+      languages,
+    );
+
+    return {
+      token: await token.toJwt(),
+      url,
+      roomName,
+      expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
+    };
+  }
+
+  /**
+   * Ask LiveKit to put the interview worker in this patient's room.
+   *
+   * ## Why this exists at all
+   *
+   * The worker used to join by itself: with no `agent_name` registered, LiveKit
+   * dispatches a job for every room in the project automatically. It worked, in
+   * the sense that audio flowed — and it was useless, because a job LiveKit
+   * invents carries no metadata, and metadata is the only channel that can hand
+   * the worker a credential. It joined, it listened, and it posted nothing:
+   * `no session id or token: listening only`, on a room that looked healthy from
+   * both ends. A whole interview could be spoken into it and the record stayed
+   * empty.
+   *
+   * ## What the worker is trusted with
+   *
+   * A token that is this caller's own authority and nothing more, expiring with
+   * the room pass. The worker posts the patient's answers *as the patient*,
+   * which is what it is doing on their behalf; it gains no role they do not
+   * have, and it cannot outlive the interview it was minted for. There is no
+   * long-lived credential anywhere in this path — the alternative, a shared
+   * `MEDIHIVE_API_TOKEN` in the worker's environment, would have made every
+   * patient's answers post as one identity.
+   *
+   * ## Why a failure here does not throw
+   *
+   * Same rule as the rest of this method: losing live voice must not stop an
+   * interview. If the dispatch fails the patient is in a room no agent joins,
+   * which is a silent room — but the microphone, `/stt`, the tiles and the
+   * keyboard are all still there and none of them route through LiveKit. A
+   * throw would take those away too, to punish a failure they do not share.
+   * It is logged at error, because a silent room is not something to discover
+   * from a patient.
+   */
+  private async dispatchVoiceAgent(
+    sessionId: string,
+    roomName: string,
+    user: AuthenticatedUser,
+    ttlSeconds: number,
+    languages: { input: string; output: string },
+  ): Promise<void> {
+    const url = this.config?.get<string>('LIVEKIT_URL');
+    const key = this.config?.get<string>('LIVEKIT_API_KEY');
+    const secret = this.config?.get<string>('LIVEKIT_API_SECRET');
+    if (!url || !key || !secret || !this.jwt) return;
+
+    // `AgentDispatchClient` speaks HTTP to the same host the client dials over
+    // WebSocket, and it will not do the conversion for us: handed `wss://…` it
+    // fails on an unsupported protocol rather than connecting. The SDK's own
+    // docs say "hostname including protocol. i.e. 'https://<project>.livekit.cloud'".
+    const host = url.replace(/^ws(s?):\/\//, 'http$1://');
+
+    try {
+      const { AgentDispatchClient, RoomServiceClient } =
+        await import('livekit-server-sdk');
+
+      // Is an agent in the room *right now* — not "was one ever dispatched".
+      //
+      // The distinction is the whole guard. A dispatch is consumed once: the
+      // job it creates ends when the room empties, and the dispatch stays in
+      // `listDispatch` afterwards looking exactly like a live one. Guarding on
+      // that list meant a patient whose phone dropped for ten seconds asked for
+      // a new pass, was told an agent had already been dispatched, and spent
+      // the rest of the interview alone in a silent room. Observed directly:
+      // one `received job request`, then `the participant we were listening to
+      // left`, and every later join heard nothing.
+      //
+      // Presence is the condition actually wanted — exactly one agent in the
+      // room — and it is true only while a worker is really there, so a
+      // reconnection dispatches again and a double-tap does not.
+      let agentPresent = false;
+      try {
+        const rooms = new RoomServiceClient(host, key, secret);
+        const participants = await rooms.listParticipants(roomName);
+        // `Number(...)` rather than a bare comparison: `kind` is typed as the
+        // protocol's enum, and comparing an enum to a loose numeric literal is
+        // what `@typescript-eslint/no-unsafe-enum-comparison` exists to catch.
+        // The conversion says plainly what this is — a wire value checked
+        // against a wire value — instead of silencing the rule.
+        agentPresent = participants.some(
+          (p) => Number(p.kind) === PARTICIPANT_KIND_AGENT,
+        );
+      } catch {
+        // On the first call the room does not exist yet — `createDispatch` is
+        // what brings it into being — and `listParticipants` answers
+        // `requested room does not exist` by throwing. A room that does not
+        // exist contains no agent, which is the same answer as an empty one,
+        // and both mean "dispatch". Letting this escape to the outer handler
+        // would log a failure and return without ever dispatching, so the
+        // guard against a second agent would have prevented the first.
+        agentPresent = false;
+      }
+      if (agentPresent) {
+        this.logger.debug(`voice agent already in ${roomName}`);
+        return;
+      }
+
+      const dispatcher = new AgentDispatchClient(host, key, secret);
+
+      await dispatcher.createDispatch(roomName, VOICE_AGENT_NAME, {
+        metadata: JSON.stringify({
+          sessionId,
+          token: this.mintWorkerToken(user, ttlSeconds),
+          inputLanguage: languages.input,
+          outputLanguage: languages.output,
+        }),
+      });
+      this.logger.log(`dispatched ${VOICE_AGENT_NAME} to ${roomName}`);
+    } catch (error) {
+      this.logger.error(
+        `could not dispatch the voice agent to ${roomName}; the patient will ` +
+          `be alone in the room and should use the keyboard or /stt: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+      );
+    }
+  }
+
+  /**
+   * The worker's bearer token: this caller's authority, for this room's life.
+   *
+   * Re-signed rather than forwarded. The caller's own token is already in
+   * memory on this request, and passing *that* through would hand the worker a
+   * credential outliving the interview by however long was left on it. Minting
+   * a fresh one costs a signature and bounds the worker to the room.
+   *
+   * The claims mirror `AuthService.generateTokenPair` exactly, because
+   * `JwtStrategy` refuses anything that is not `type: 'access'` and reads
+   * `patientId` straight off the payload. A token missing it is a token that
+   * `PatientSelfGuard` then refuses on the patient's own data.
+   */
+  private mintWorkerToken(user: AuthenticatedUser, ttlSeconds: number): string {
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      roles: user.roles,
+      permissions: user.permissions,
+      organizationId: user.organizationId,
+      type: 'access',
+      ...(user.patientId && { patientId: user.patientId }),
+    };
+    return this.jwt!.sign(payload, { expiresIn: ttlSeconds });
   }
 
   /* ═════════════════════════════ voice seams ══════════════════════════════ */

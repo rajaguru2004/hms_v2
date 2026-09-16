@@ -34,6 +34,7 @@ import {
   TranscribeDto,
 } from './dto/case-taking.dto';
 import { LanguageOptionDto } from './dto/language.dto';
+import { VoiceGrantDto, VoiceTokenDto } from './dto/voice-token.dto';
 import { ReviewQueryDto } from './dto/review-query.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -126,6 +127,38 @@ export class CaseTakingController {
     // sidecar's own `/health`, which reports it in more detail than a flag here
     // could.
     return catalogue.languages;
+  }
+
+  /**
+   * A pass into this patient's own live voice room.
+   *
+   * Patient-scoped like every other route here. The room name and the
+   * participant identity are derived server-side from the session, never taken
+   * from the request — a client that could name its own room could name
+   * somebody else's.
+   *
+   * A site with no media server answers this with a written refusal, and a
+   * patient there is meant to notice nothing: the microphone still records,
+   * `/stt` still answers, and the tiles and the keyboard were never
+   * conditional on any of it.
+   */
+  @Post('voice/token')
+  @Permissions(Permission.CASE_TAKING_UPDATE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'A short-lived pass into the live voice room',
+    description:
+      'Mints a LiveKit room token scoped to the caller’s own interview. The ' +
+      'API key and secret never leave the server; what the client receives is ' +
+      'one narrowly-granted, short-lived credential for one room.',
+  })
+  @ApiResponse({ status: 200, type: VoiceGrantDto })
+  async voiceToken(
+    @Body() dto: VoiceTokenDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @PatientScope() patientId: string | undefined,
+  ): Promise<VoiceGrantDto> {
+    return this.caseTakingService.voiceToken(dto, user, self(patientId));
   }
 
   @Post('sessions')

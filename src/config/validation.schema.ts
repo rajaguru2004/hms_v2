@@ -87,6 +87,24 @@ export const validationSchema = Joi.object({
   MEDIHIVE_ALLOW_UNREVIEWED_PHRASEBOOKS: Joi.string()
     .valid('true', 'false')
     .default('false'),
+
+  // ── LiveKit, for the streaming voice session ────────────────────────────────
+  //
+  // Optional, all three, and deliberately so: a box with no media server still
+  // boots and still runs a complete interview. The patient taps, types, or
+  // records-and-uploads exactly as before, and the room is an enhancement that
+  // simply never opens. Making these required would let a missing third-party
+  // credential stop a hospital taking a history.
+  //
+  // The SECRET is read here and never leaves the server. The phone is issued a
+  // short-lived room token minted against its own bearer token; it never sees
+  // the key or the secret, because a credential shipped inside an APK is a
+  // credential held by anyone who has the APK.
+  LIVEKIT_URL: Joi.string()
+    .uri({ scheme: ['ws', 'wss'] })
+    .optional(),
+  LIVEKIT_API_KEY: Joi.string().optional(),
+  LIVEKIT_API_SECRET: Joi.string().optional(),
 });
 
 export const validationOptions = {

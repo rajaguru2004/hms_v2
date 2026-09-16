@@ -10,7 +10,16 @@ It is a separate process because these are Python model runtimes with their own
 interpreter and their own lifecycle, and because a model that wedges should not
 take the hospital API down with it.
 
-    uvicorn main:app --host 127.0.0.1 --port 8801
+Start it with `run.ps1` (or `run.sh`), never with a bare uvicorn line. The
+launcher sets the environment this service depends on — `OLLAMA_URL`, the voice
+directory, the STT device — and the defaults in this file are *not* a working
+configuration on their own. `OLLAMA_URL` is the one that bites: Ollama runs on
+**8080** on this deployment and the default below is Ollama's stock 11434, so a
+bare `uvicorn main:app` starts cleanly, serves speech correctly, and reports
+`"ollama": false` forever while the background translation path quietly has no
+model. It also pays ~320 ms per `/health` on the failed probe.
+
+    .\run.ps1
 """
 
 from __future__ import annotations
@@ -18,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 import httpx
@@ -63,6 +73,26 @@ ACCEPTED_DOCUMENT_TYPES = {
 app = FastAPI(title="MediHive AI sidecar", version="1.0.0")
 
 
+@app.on_event("startup")
+async def _prewarm_stt() -> None:
+    """Load Whisper before the first patient speaks, not during.
+
+    Whisper is lazily loaded, so without this the first `/stt` of the day pays
+    model load plus a first decode that is itself slower than every subsequent
+    one — about 5.8 s on CUDA against 0.21 s warm. That cost landed on the
+    first answer of an interview, which is the worst place in the session to
+    spend six seconds.
+
+    On a thread, so uvicorn finishes binding and `/health` answers immediately;
+    a caller that races it gets `sttConfig.loaded: false` and a slow first
+    request, which is exactly the old behaviour. `MEDIHIVE_STT_PREWARM=0` opts
+    out on a box where the memory matters more than the first turn.
+    """
+    if not stt.prewarm_enabled() or not stt.available():
+        return
+    threading.Thread(target=stt.warm, name="stt-prewarm", daemon=True).start()
+
+
 @app.get("/health")
 async def health() -> JSONResponse:
     """What can actually run right now.
@@ -80,8 +110,20 @@ async def health() -> JSONResponse:
             ollama_up = response.status_code == 200
             if ollama_up:
                 models = [m["name"] for m in response.json().get("models", [])]
-    except Exception:
+    except Exception as error:
+        # Named, at WARNING, with the URL it tried.
+        #
+        # A silent `false` here reads as "Ollama is down" when the commonest
+        # cause is this service looking at the wrong port — 11434 is Ollama's
+        # stock default and this deployment runs it on 8080, so a sidecar
+        # started without `run.ps1` probes an address nothing is listening on
+        # and says so in a way indistinguishable from a real outage.
         ollama_up = False
+        logging.getLogger(__name__).warning(
+            "ollama probe failed at %s (%s) — background translation has no model",
+            OLLAMA_URL,
+            type(error).__name__,
+        )
 
     return JSONResponse(
         {
@@ -92,6 +134,13 @@ async def health() -> JSONResponse:
             # missing from it and always will be until an engine other than
             # Whisper is plugged into `stt.STTProvider` — see stt.py.
             "sttLanguages": stt.languages(),
+            # Which model, on which device, with which decode settings. The
+            # device is resolved at load time and can fall back — a box whose
+            # CUDA libraries are missing transcribes on the CPU rather than
+            # refusing to start, and this is the only place that difference is
+            # visible without reading an old log line. It is the first thing to
+            # check when transcription is suddenly seconds slower.
+            "sttConfig": stt.describe(),
             "tts": tts.available("en"),
             # Which languages can actually be spoken, not just whether English
             # can. One boolean computed for English said `tts: true` while

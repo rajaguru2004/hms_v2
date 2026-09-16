@@ -69,6 +69,7 @@
     "helmet": "^8.2.0",
     "ioredis": "^5.11.1",
     "joi": "^18.2.1",
+    "livekit-server-sdk": "^2.19.0",
     "nestjs-pino": "^4.6.1",
     "papaparse": "^5.5.3",
     "passport": "^0.7.0",

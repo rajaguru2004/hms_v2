@@ -113,9 +113,13 @@ exception`.
 | ---------------------------- | ------------------------ | ----------------------------------------------------------------- |
 | `OLLAMA_URL`                 | `http://127.0.0.1:11434` | Ollama elsewhere on the host                                      |
 | `MEDIHIVE_SIDECAR_PORT`      | `8801`                   | Port clash                                                        |
-| `MEDIHIVE_STT_MODEL`         | `small`                  | `medium` for Indian languages — benchmark first                   |
-| `MEDIHIVE_STT_DEVICE`        | `cpu`                    | The GPU is holding gemma3:4b; leave it there                      |
-| `MEDIHIVE_STT_COMPUTE`       | `int8`                   | `float32` when int8 quantisation costs accuracy                   |
+| `MEDIHIVE_STT_MODEL`         | `small`                  | `large-v3-turbo` on a card with >2 GB spare — better Hindi        |
+| `MEDIHIVE_STT_DEVICE`        | `auto`                   | `cpu` to keep the GPU free; `auto` falls back on its own          |
+| `MEDIHIVE_STT_COMPUTE`       | `auto`                   | `int8_float16` on CUDA, `int8` on CPU; override to pin one        |
+| `MEDIHIVE_STT_BEAM`          | `1`                      | `5` if a deployment can show beam search buying it something      |
+| `MEDIHIVE_STT_VAD`           | `1`                      | `0` saves ~30 ms and risks hallucinated speech in silence         |
+| `MEDIHIVE_STT_CONDITION`     | `0`                      | `1` only for audio longer than one 30 s decode window             |
+| `MEDIHIVE_STT_PREWARM`       | `1`                      | `0` where idle memory costs more than the first turn              |
 | `MEDIHIVE_VOICE_DIR`         | `./voices`               | Piper voices kept with the deployment                             |
 | `MEDIHIVE_TTS_DEVICE`        | `cpu`                    | `cuda` for IndicF5 — only if Ollama has moved off the GPU         |
 | `MEDIHIVE_TTS_PROVIDERS`     | from config.yaml         | `piper` takes IndicF5 out of service for one run                  |
