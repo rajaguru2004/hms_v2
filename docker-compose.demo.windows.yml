@@ -1,0 +1,34 @@
+# Untracked local override for docker-compose.demo.yml on this Windows box.
+#
+# Two things differ here from the machine the demo file was written on:
+#
+# 1. Ollama listens on 8080, not 11434. That is deliberate and documented in
+#    scripts/README.md ("Port 8080, not the default 11434"); OLLAMA_HOST is a
+#    persistent User env var set to 0.0.0.0:8080, and hms_v2/.env.local points
+#    the source-run API at the same place. The demo file hardcodes 11434, so
+#    without this the api and the sidecar both report the model unreachable.
+#
+#    0.0.0.0 is what makes host.docker.internal work at all - a loopback bind
+#    is not reachable from a container.
+#
+# 2. $HOME does not exist in PowerShell (Windows has USERPROFILE), so the
+#    ${HOME}/.cache/huggingface mount in the demo file resolves to a bare
+#    /.cache/huggingface and the sidecar re-downloads ~460 MB of Whisper
+#    weights on the first spoken request. The path is stated absolutely here
+#    so it does not depend on a variable the shell may not set.
+#
+# Ollama stays on the host, unprofiled, for the reason measured in the demo
+# file: this box has 11.7 GB of RAM and a 4 GB GPU, and a containerised Ollama
+# gets no GPU offload, costing the full 3.8 GB in system RAM instead of ~2.9.
+
+services:
+  api:
+    environment:
+      OLLAMA_URL: http://host.docker.internal:8080
+
+  sidecar:
+    environment:
+      OLLAMA_URL: http://host.docker.internal:8080
+    volumes:
+      - ./ai-sidecar/voices:/app/voices:ro
+      - C:/Users/user/.cache/huggingface:/home/sidecar/.cache/huggingface
