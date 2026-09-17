@@ -22,7 +22,11 @@ import {
   applyFact,
   createClinicalState,
 } from './clinical-state';
-import { fallbackPhrasing, selectNext } from './question-selector';
+import {
+  fallbackPhrasing,
+  selectNext,
+  spokenPhrasingFor,
+} from './question-selector';
 import { recorded } from './tri-state';
 
 /**
@@ -56,6 +60,47 @@ function reviewedTamil(
 ): QuestionPhrasebook {
   return { ...PHRASEBOOKS.ta, reviewedAt: '2026-09-15', ...overrides };
 }
+
+describe('the spoken question drops the answer hint', () => {
+  /**
+   * The clause that made the voice interview sound like a form. It belongs over
+   * a row of tiles and nowhere near a conversation — and the agent's Whisper
+   * plus `derivePresence` read "not really, only on stairs" without anybody
+   * being coached into saying "no".
+   */
+  it('leaves off "You can answer yes or no."', () => {
+    const field = byKey('past_medical.diabetes');
+    expect(fallbackPhrasing(field)).toContain('You can answer yes or no.');
+    expect(spokenPhrasingFor(field)).not.toContain('You can answer');
+  });
+
+  it('leaves off the spoken choice list', () => {
+    const field = STATIC_FIELDS.find((f) => f.kind === 'choice');
+    if (!field) throw new Error('the registry has no choice field');
+    expect(fallbackPhrasing(field)).toContain('You can say');
+    expect(spokenPhrasingFor(field)).not.toContain('You can say');
+  });
+
+  it('is still the whole question, never a fragment', () => {
+    // The failure worth guarding: a "spoken" variant that stripped too much and
+    // left the patient with half a sentence would be worse than the hint.
+    for (const field of STATIC_FIELDS) {
+      const spoken = spokenPhrasingFor(field);
+      expect(spoken.length).toBeGreaterThan(0);
+      expect(fallbackPhrasing(field).startsWith(spoken)).toBe(true);
+    }
+  });
+
+  it('follows the same phrasebook as the written question', () => {
+    // It must not quietly fall back to English while `fallbackPhrasing`
+    // translates — one question, two renderings, never two languages.
+    const field = byKey('past_medical.diabetes');
+    const book = reviewedTamil();
+    const written = composePhrasing(field, book);
+    const spoken = spokenPhrasingFor(field, 'ta');
+    expect(written.startsWith(spoken)).toBe(true);
+  });
+});
 
 describe('English is the source, not a translation of it', () => {
   it('asks in English when no language is given', () => {

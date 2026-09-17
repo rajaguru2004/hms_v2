@@ -38,6 +38,7 @@ import {
 import {
   compareFields,
   fallbackPhrasing,
+  spokenPhrasingFor,
   interviewProgress,
   interviewStatus,
   outstandingFields,
@@ -161,6 +162,19 @@ export interface NextQuestionView {
   kind: string;
   choices?: readonly string[];
   prompt: string;
+  /**
+   * The same question with no answer hint, for anything that says it out loud.
+   *
+   * `prompt` ends in the shape of the expected answer — "You can answer yes or
+   * no." — which belongs over a row of tiles and does not belong in a
+   * conversation. Spoken sixty times it is the clause that makes the interview
+   * sound like a form being read at somebody.
+   *
+   * Sent alongside rather than instead of: the touch UI still wants the hint,
+   * and a client written before this field existed still gets a complete
+   * question. See `spokenPhrasingFor`.
+   */
+  spokenPrompt: string;
   remaining: number;
 }
 
@@ -1922,6 +1936,7 @@ export class CaseTakingService {
         kind: selected.field.kind,
         choices: selected.field.choices,
         prompt,
+        spokenPrompt: spokenPhrasingFor(selected.field, state.language),
         remaining: selected.remaining,
       },
       // `markAsked` rather than the selector's combined call, because the turn
@@ -2235,6 +2250,10 @@ function currentQuestionFrom(
       kind: field.kind,
       choices: field.choices,
       prompt: turn.questionText ?? fallbackPhrasing(field, state.language),
+      // Off the registry, never off `turn.questionText`: the stored text is
+      // what was asked *with* its hint, and stripping a clause back off a
+      // sentence is guesswork the phrasebook can answer exactly.
+      spokenPrompt: spokenPhrasingFor(field, state.language),
       remaining: outstandingFields(state).length,
     };
   }
@@ -2248,6 +2267,7 @@ function currentQuestionFrom(
         kind: selected.field.kind,
         choices: selected.field.choices,
         prompt: selected.fallbackPrompt,
+        spokenPrompt: spokenPhrasingFor(selected.field, state.language),
         remaining: selected.remaining,
       }
     : null;
