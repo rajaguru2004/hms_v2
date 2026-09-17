@@ -400,10 +400,60 @@ function banner(cfg) {
     `    flutter run -d <device> --dart-define=MEDIHIVE_API=${base} --dart-define=MEDIHIVE_FILES=${base}`,
   );
   if (lan) {
-    console.log(`\n  a phone needs inbound TCP ${cfg.apiPort} allowed through the Windows firewall.`);
-    console.log(`  if this address is not ${'192.168.163.97'}, rebuild the app with the --dart-define above.`);
+    console.log(
+      `\n  a phone needs inbound TCP ${cfg.apiPort} reachable from the LAN ` +
+        '(Windows Defender, or firewalld on Linux).',
+    );
+
+    // Read back, not restated. This line used to name a hardcoded address, and
+    // a hardcoded address in a message about a DHCP lease is wrong the first
+    // time the laptop changes network — it then tells you to rebuild when you
+    // need not, or stays silent when you must. The app's own default is the
+    // only thing worth comparing against, so it is what gets read.
+    const compiled = compiledApiHost();
+    if (!compiled) {
+      console.log('  could not read the app\'s compiled default; check endpoints.dart by hand.');
+    } else if (compiled === lan) {
+      console.log(`  the app is already compiled against ${lan} - nothing to do.`);
+    } else {
+      console.log(
+        `  the app is compiled against ${compiled}, not ${lan}: rebuild with the ` +
+          '--dart-define above, or change the default in endpoints.dart.',
+      );
+    }
   }
   console.log('');
+}
+
+/**
+ * The host the Flutter app will dial with no `--dart-define`.
+ *
+ * Parsed out of the app's source rather than duplicated here, for the reason
+ * the top of this file gives about .env.local: a constant kept in two places is
+ * a constant that eventually disagrees with itself, and this one is a DHCP
+ * lease. Returns null rather than guessing if the file or the literal moves —
+ * a wrong answer here sends somebody rebuilding an app that was already right.
+ */
+function compiledApiHost() {
+  const endpoints = path.join(
+    root,
+    '..',
+    'medihive',
+    'lib',
+    'app',
+    'data',
+    'network',
+    'endpoints.dart',
+  );
+  if (!existsSync(endpoints)) return null;
+  try {
+    const src = readFileSync(endpoints, 'utf8');
+    // The `MEDIHIVE_API` fromEnvironment block, and its defaultValue.
+    const block = src.match(/'MEDIHIVE_API'[\s\S]{0,200}?defaultValue:\s*'([^']+)'/);
+    return block ? new URL(block[1]).hostname : null;
+  } catch {
+    return null;
+  }
 }
 
 async function main() {
