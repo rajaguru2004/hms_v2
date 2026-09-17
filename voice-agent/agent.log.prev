@@ -1,0 +1,37 @@
+2026-09-17 10:38:39,224 INFO    medihive.agent: env file: /home/suryaguru/StudioProjects/CRM/HMS/hms_v2/.env.local
+2026-09-17 10:38:39,225 INFO    medihive.agent:   LIVEKIT_URL                  wss://ash10-n1k1vc5v.livekit.cloud
+2026-09-17 10:38:39,225 INFO    medihive.agent:   LIVEKIT_API_KEY              …fnH9 (15 chars)
+2026-09-17 10:38:39,225 INFO    medihive.agent:   LIVEKIT_API_SECRET           …ecbB (44 chars)
+2026-09-17 10:38:39,225 INFO    medihive.agent:   AI_SIDECAR_URL               http://127.0.0.1:8801
+2026-09-17 10:38:39,225 INFO    medihive.agent:   MEDIHIVE_API_URL             http://127.0.0.1:3000/api
+2026-09-17 10:38:39,225 INFO    medihive.agent:   MEDIHIVE_API_TOKEN           (unset)
+2026-09-17 10:38:39,225 INFO    medihive.agent:   MEDIHIVE_SESSION_LANGUAGE    en
+2026-09-17 10:38:39,225 INFO    medihive.agent:   MEDIHIVE_SESSION_ID          (from room name or job metadata)
+2026-09-17 10:38:39,225 INFO    medihive.agent:   SILERO_MIN_SPEECH_MS         50
+2026-09-17 10:38:39,225 INFO    medihive.agent:   SILERO_MIN_SILENCE_MS        650
+2026-09-17 10:38:39,225 INFO    medihive.agent:   SILERO_PREFIX_PAD_MS         900
+2026-09-17 10:38:39,225 INFO    medihive.agent:   SILERO_ACTIVATION            0.26
+2026-09-17 10:38:39,225 INFO    medihive.agent:   SILERO_DEACTIVATION          0.16
+2026-09-17 10:38:39,225 INFO    medihive.agent:   BARGE_MIN_SEC                0.2
+2026-09-17 10:38:39,225 INFO    medihive.agent:   BARGE_MIN_SILENCE_MS         250
+2026-09-17 10:38:39,225 INFO    medihive.agent:   MEDIHIVE_INTERIM_TRANSCRIPTS 1
+2026-09-17 10:38:39,225 INFO    medihive.agent:   MEDIHIVE_INTERIM_EVERY_SEC   1.4
+2026-09-17 10:38:39,225 INFO    medihive.agent:   AGENT_HEALTH_PORT            9090
+2026-09-17 10:38:39,225 INFO    medihive.agent:   MEDIHIVE_FRAME_MS            20
+2026-09-17 10:38:39,226 INFO    health: health server on http://127.0.0.1:9090/healthz
+2026-09-17 10:38:39,290 WARNING livekit.agents: dev mode is deprecated and will be removed in a future release; use `lk agent dev` instead (https://docs.livekit.io/reference/developer-tools/livekit-cli/#setup)
+2026-09-17 10:38:39,290 WARNING livekit.agents: in-process auto-reload has been removed from the Python CLI; use `lk agent dev` for hot-reload
+2026-09-17 10:38:39,291 DEBUG   asyncio: Using selector: EpollSelector
+2026-09-17 10:38:39,291 - [36mDEBUG[0m asyncio - Using selector: EpollSelector [90m[0m
+2026-09-17 10:38:39,292 INFO    livekit.agents: starting worker
+2026-09-17 10:38:39,292 - [32mINFO[0m livekit.agents - starting worker [90m{"version": "1.8.2", "rtc-version": "1.1.18"}[0m
+2026-09-17 10:38:39,292 INFO    livekit.agents: plugin registered
+2026-09-17 10:38:39,292 - [32mINFO[0m livekit.agents - plugin registered [90m{"plugin": "livekit.plugins.silero", "version": "1.8.2"}[0m
+2026-09-17 10:38:39,292 INFO    livekit.agents: preloading plugins
+2026-09-17 10:38:39,292 - [32mINFO[0m livekit.agents - preloading plugins [90m{"packages": ["livekit.plugins.silero", "livekit.agents.ipc._preload", "livekit.agents.ipc._preload_freeze"]}[0m
+2026-09-17 10:38:39,294 INFO    livekit.agents: HTTP server listening on :44319
+2026-09-17 10:38:39,294 - [32mINFO[0m livekit.agents - HTTP server listening on :44319 [90m[0m
+2026-09-17 10:38:39,610 INFO    livekit.agents: registered worker
+2026-09-17 10:38:39,610 - [32mINFO[0m livekit.agents - registered worker [90m{"agent_name": "medihive", "deployment": "", "id": "AW_3sKrUk9fDUiM", "url": "wss://ash10-n1k1vc5v.livekit.cloud", "region": "India South", "protocol": 17}[0m
+2026-09-17 10:39:28,410 INFO    livekit.agents: shutting down worker
+2026-09-17 10:39:28,410 - [32mINFO[0m livekit.agents - shutting down worker [90m{"id": "AW_3sKrUk9fDUiM"}[0m

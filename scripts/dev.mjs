@@ -156,6 +156,29 @@ function readEnvLocal() {
 
 const portOf = (url, fallback) => Number(new URL(url).port || fallback);
 
+const hostOf = (url) => {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+};
+
+/**
+ * Whether `LIVEKIT_URL` points at a media server this script should start.
+ *
+ * Loopback and the machine's own LAN address both count — they are two ways of
+ * naming the same container, and which one is configured depends on whether a
+ * handset has to reach it. Anything else is somebody else's server: LiveKit
+ * Cloud, or a shared one on the network.
+ */
+function isLocalLivekit(url) {
+  if (!url) return false;
+  const host = hostOf(url);
+  if (!host) return false;
+  return host === 'localhost' || host === '127.0.0.1' || host === lanAddress();
+}
+
 /** First non-internal IPv4 address - what a phone on the same Wi-Fi dials. */
 function lanAddress() {
   for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
@@ -214,6 +237,16 @@ async function ensureInfra(cfg) {
     composeArgs.push('-f', 'docker-compose.local.ports.yml');
     log('  using host-port override');
   }
+  // The media server comes up only when `LIVEKIT_URL` names *this* machine.
+  //
+  // Pointed at LiveKit Cloud — which is what a real deployment does, and what
+  // .env.local says today — a local one would be a second media server nothing
+  // dials: a container holding memory on a box that has been OOM-killed before,
+  // and a name in `docker ps` that invites somebody debugging a silent room to
+  // read the logs of a server neither the phone nor the agent ever connected to.
+  const services = ['postgres', 'redis', 'minio'];
+  if (isLocalLivekit(cfg.livekitUrl)) services.push('livekit');
+
   // `LIVEKIT_NODE_IP` is interpolated into the livekit service's command by
   // Compose, and Compose reads it from *this* process's environment. It is the
   // address the media server advertises in its ICE candidates, so getting it
@@ -223,14 +256,15 @@ async function ensureInfra(cfg) {
   const composeEnv = {
     LIVEKIT_NODE_IP: cfg.livekitNodeIp || lanAddress() || '127.0.0.1',
   };
-  const up = sh(
-    'docker',
-    [...composeArgs, 'up', '-d', 'postgres', 'redis', 'minio', 'livekit'],
-    { env: composeEnv },
-  );
+  const up = sh('docker', [...composeArgs, 'up', '-d', ...services], {
+    env: composeEnv,
+  });
   if (up.status !== 0) {
     warn(`compose up failed:\n${up.stderr || up.stdout}`);
     return false;
+  }
+  if (!services.includes('livekit')) {
+    log(`  livekit: using ${hostOf(cfg.livekitUrl) || 'the configured server'}, not starting a local one`);
   }
   // On a single-drive MinIO a directory under /data *is* a bucket, so this is
   // exactly what `mc mb` would do - and it means the first upload cannot fail
@@ -264,10 +298,25 @@ async function ensureOllama(cfg) {
       stdio: 'ignore',
       env: { ...process.env, OLLAMA_HOST: `0.0.0.0:${port}` },
     });
+    // A spawn that cannot find its binary reports asynchronously, as an 'error'
+    // event — and an unhandled one on a ChildProcess is a thrown exception that
+    // took the whole script down. It did: with `ollama` not on PATH, a dev run
+    // died here with a raw ENOENT stack, after Postgres and before the API,
+    // which reads as "the dev script is broken" rather than "install ollama".
+    //
+    // Ollama is an enhancement to the interview, not a precondition for it —
+    // the questions are chosen by a deterministic engine and nothing on the hot
+    // path waits on a model — so a missing one is a warning, exactly like a
+    // model that is present but never answers.
+    let spawnFailed = false;
+    child.on('error', (error) => {
+      spawnFailed = true;
+      warn(`could not start ollama: ${error.message}`);
+    });
     child.unref();
-    if (!(await waitPort(port, 'ollama', 60))) {
+    if (spawnFailed || !(await waitPort(port, 'ollama', 60))) {
       warn('ollama did not start - AI features will fail.');
-      warn('install:  winget install --id Ollama.Ollama -e');
+      warn('install: https://ollama.com/download  (or start it yourself and re-run)');
       return false;
     }
   }

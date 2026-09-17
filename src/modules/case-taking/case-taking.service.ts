@@ -1047,6 +1047,24 @@ export class CaseTakingService {
       canPublishData: false,
       roomCreate: false,
       roomAdmin: false,
+      // The app sets `inputLanguage` and `outputLanguage` as participant
+      // attributes on join, so an agent reading them needs no round trip. That
+      // is a metadata write, LiveKit defaults the permission to false, and
+      // without it the join fails outright:
+      //
+      //     NOT_ALLOWED - does not have permission to update own metadata
+      //
+      // — after the media path is fully up, which made it look like a broken
+      // microphone rather than a missing claim on a token.
+      //
+      // Safe to grant, and narrowly so: it permits a participant to write its
+      // *own* attributes in its *own* room, and nothing downstream trusts them.
+      // The authority on what the patient speaks is the session row — that is
+      // why `languages` above is read off the session and not off `dto`, and
+      // why the same pair travels in this token's metadata and on the dispatch.
+      // These attributes are a convenience for the agent, not a second source
+      // of truth it could be talked into believing.
+      canUpdateOwnMetadata: true,
     });
 
     await this.dispatchVoiceAgent(

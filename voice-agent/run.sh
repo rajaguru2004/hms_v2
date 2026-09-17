@@ -21,20 +21,30 @@ EOF
   exit 1
 fi
 
-# Every one of these is a default, never an override: `${VAR:-default}` leaves a
-# value already in the environment alone. That is what makes
-# `SILERO_MIN_SILENCE_MS=1500 ./run.sh` work for a single run, and it is also
-# why .env.local wins — agent.py loads it at import, and anything it sets is
-# already in the environment by the time config.py reads it.
-export AI_SIDECAR_URL="${AI_SIDECAR_URL:-http://127.0.0.1:8801}"
-export MEDIHIVE_API_URL="${MEDIHIVE_API_URL:-http://127.0.0.1:3000/api}"
-export SILERO_MIN_SILENCE_MS="${SILERO_MIN_SILENCE_MS:-650}"
-export SILERO_ACTIVATION="${SILERO_ACTIVATION:-0.26}"
-export SILERO_DEACTIVATION="${SILERO_DEACTIVATION:-0.16}"
-export SILERO_PREFIX_PAD_MS="${SILERO_PREFIX_PAD_MS:-900}"
-export SILERO_MIN_SPEECH_MS="${SILERO_MIN_SPEECH_MS:-50}"
-export BARGE_MIN_SEC="${BARGE_MIN_SEC:-0.2}"
-export AGENT_HEALTH_PORT="${AGENT_HEALTH_PORT:-9090}"
+# ── Nothing is defaulted here, and that is the whole point ───────────────────
+#
+# `run.ps1` opens with a block of `if (-not $env:X) { $env:X = '<default>' }`
+# for the sidecar URL, the API URL and every Silero tuning value. Mirroring it
+# was the obvious thing to do and it was wrong, measurably: it makes .env.local
+# dead for every variable it names.
+#
+# The chain is short and one-directional. `config.py` calls
+# `load_dotenv(ENV_FILE, override=False)` — deliberately, so a value set for one
+# run wins — and then reads each variable with its own default. A launcher that
+# exports `SILERO_MIN_SILENCE_MS=650` first has *already set it in the shell*,
+# so `override=False` keeps 650 and the 1000 in .env.local is never read. It was
+# not read: the agent logged `SILERO_MIN_SILENCE_MS 650` with 1000 sitting in
+# the file.
+#
+# So the defaults live in exactly one place, `config.py`, which already had all
+# of them. The precedence that leaves is the one the README documents:
+#
+#     shell for one run  >  .env.local  >  config.py
+#
+#     SILERO_MIN_SILENCE_MS=1500 ./run.sh   # still works, and now means it
+#
+# run.ps1 has the same defect. It is untouched here only because it cannot be
+# run or tested on this machine.
 
 # `dev` takes whatever room is dispatched to this worker, which is what Nest's
 # `dispatchVoiceAgent` does when a patient taps the microphone.
@@ -46,8 +56,12 @@ fi
 # still works by tap and keyboard — but speech in and out is the whole point of
 # this process, so starting it against a sidecar that is not there deserves a
 # line rather than a silent session where every answer fails to transcribe.
-if ! curl -sf -m 3 "${AI_SIDECAR_URL}/health" >/dev/null 2>&1; then
-  echo "  ! AI sidecar not answering at ${AI_SIDECAR_URL} — speech in and out will fail." >&2
+# Read for the probe only, and deliberately not exported: the value config.py
+# resolves is the one that matters, and this must not become the shell default
+# the block above exists to explain.
+sidecar_probe="${AI_SIDECAR_URL:-http://127.0.0.1:8801}"
+if ! curl -sf -m 3 "${sidecar_probe}/health" >/dev/null 2>&1; then
+  echo "  ! AI sidecar not answering at ${sidecar_probe} — speech in and out will fail." >&2
   echo "    Start it with ../ai-sidecar/run.sh" >&2
 fi
 
