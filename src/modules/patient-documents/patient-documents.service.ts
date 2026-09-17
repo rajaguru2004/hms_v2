@@ -29,7 +29,10 @@ import {
   readCorrections,
   readExtractionValue,
 } from './document-corrections';
-import { PatientDocumentsRepository } from './patient-documents.repository';
+import {
+  PatientDocumentsRepository,
+  PatientDocumentWithOriginal,
+} from './patient-documents.repository';
 import { readExistingRecord } from './pipeline/contradictions';
 import { DocumentPipelineService } from './pipeline/document-pipeline.service';
 import { documentSha256, findTextDuplicate } from './pipeline/duplicates';
@@ -37,6 +40,7 @@ import {
   AWAITING_REVIEW,
   CORRECTION_RECORDED,
   DUPLICATE_DOCUMENT,
+  DUPLICATE_OF_UNREADABLE,
   NOTHING_EXTRACTED,
   PROCESSING,
   UNREADABLE_DOCUMENT,
@@ -850,7 +854,9 @@ export class PatientDocumentsService {
    * patient reads is always the one that matches the status beside it. A stored
    * message goes stale the first time a status changes without it.
    */
-  private toResponse(document: PatientDocument): PatientDocumentResponse {
+  private toResponse(
+    document: PatientDocumentWithOriginal,
+  ): PatientDocumentResponse {
     const corrections = readCorrections(document.corrections);
 
     return {
@@ -926,8 +932,27 @@ export function messageFor(document: {
   failureReason: string | null;
   extraction: unknown;
   corrections: unknown;
+  duplicateOf?: { status: string; failureReason: string | null } | null;
 }): string {
-  if (document.duplicateOfId) return DUPLICATE_DOCUMENT;
+  if (document.duplicateOfId) {
+    // A duplicate has no outcome of its own — the pipeline never ran for it —
+    // so its sentence comes from the copy it points at. When that copy was
+    // rejected, the reason is the only thing on the screen the patient can act
+    // on, and saying "we have kept it with the first copy" instead tells them
+    // a rejected photograph is safely filed. They then send the identical
+    // photograph again, dedupe catches it again, and nothing ever says the
+    // picture was too small.
+    const original = document.duplicateOf;
+    if (
+      original &&
+      (original.status === 'rejected_quality' || original.status === 'failed')
+    ) {
+      return original.failureReason
+        ? `${DUPLICATE_OF_UNREADABLE} ${original.failureReason}`
+        : `${DUPLICATE_OF_UNREADABLE} ${UNREADABLE_DOCUMENT}`;
+    }
+    return DUPLICATE_DOCUMENT;
+  }
 
   switch (document.status) {
     case 'uploaded':

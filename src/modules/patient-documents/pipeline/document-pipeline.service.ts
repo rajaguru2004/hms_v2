@@ -21,6 +21,7 @@ import { assessImageQuality } from './image-quality';
 import { readDocumentText, readPageText } from './layout';
 import {
   AWAITING_REVIEW,
+  EXTRACTION_UNAVAILABLE,
   IMAGE_TOO_BLURRY,
   NO_TEXT_FOUND,
   NOTHING_EXTRACTED,
@@ -119,8 +120,24 @@ export interface PipelineOutcome {
  * word for the same state is how they stop meeting cleanly.
  */
 export interface DocumentExtractionEnvelope extends ExtractedDocument {
-  /** §19, and the reason this whole pipeline is not a JSON transform. */
-  facts: ReturnType<typeof describeFacts>;
+  /**
+   * §19, and the reason this whole pipeline is not a JSON transform.
+   *
+   * Absent when [extractionFailed] is set, and that is load-bearing rather
+   * than tidy: every label in here is a sentence about the document, and there
+   * is no honest sentence to write about a document nothing has read.
+   */
+  facts?: ReturnType<typeof describeFacts>;
+  /**
+   * The extractor did not run — it failed, timed out, or the model was
+   * unreachable. Never set because a document turned out to be empty.
+   *
+   * Recorded on the row because the alternative is inferring it from an empty
+   * extraction, which is exactly the inference that produced "This document
+   * does not mention medications" for a prescription listing three drugs while
+   * the model was down.
+   */
+  extractionFailed?: true;
   /** §16: every extracted value, and where on the page it came from. */
   sources: ValueProvenance[];
   /** Values the model produced that are not in the source text. §17. */
@@ -236,18 +253,26 @@ export class DocumentPipelineService {
     const classification = await classifyDocument(text, this.llm);
 
     let extraction: ExtractedDocument;
+    let extractionFailed = false;
     try {
       extraction = await extractDocument(text, classification.type, this.llm);
     } catch (error) {
       // A document that was read but could not be structured is still worth
       // keeping — the original is evidence and the OCR text is searchable — so
       // this is `needs_review` with an empty extraction rather than a failure.
+      //
+      // What it must NOT become is a set of findings. The empty extraction
+      // below is a placeholder for "nobody looked", and everything downstream
+      // that turns an extraction into sentences reads an absent value as "the
+      // document does not mention this". So the flag travels with it and the
+      // facts block is skipped entirely.
       this.logger.warn(
         `Extraction failed for document ${input.documentId}: ${
           error instanceof Error ? error.message : 'unknown'
         }`,
       );
       extraction = emptyExtraction(classification.type);
+      extractionFailed = true;
     }
 
     const pageTexts = visionFallbackUsed
@@ -258,13 +283,17 @@ export class DocumentPipelineService {
 
     const envelope: DocumentExtractionEnvelope = {
       ...extraction,
-      facts: describeFacts(
-        buildDocumentFacts(extraction, text, {
-          documentId: input.documentId,
-          ocrConfidence,
-          recordedAt: input.now.toISOString(),
-        }),
-      ),
+      ...(extractionFailed
+        ? { extractionFailed: true as const }
+        : {
+            facts: describeFacts(
+              buildDocumentFacts(extraction, text, {
+                documentId: input.documentId,
+                ocrConfidence,
+                recordedAt: input.now.toISOString(),
+              }),
+            ),
+          }),
       sources: provenance.sources,
       ungrounded: provenance.ungrounded,
       contradictions: findContradictions(extraction, input.record),
@@ -291,7 +320,11 @@ export class DocumentPipelineService {
       extraction: envelope,
       extractionConfidence: provenance.extractionConfidence,
       visionFallbackUsed,
-      message: hasAnyFinding(extraction) ? AWAITING_REVIEW : NOTHING_EXTRACTED,
+      message: extractionFailed
+        ? EXTRACTION_UNAVAILABLE
+        : hasAnyFinding(extraction)
+          ? AWAITING_REVIEW
+          : NOTHING_EXTRACTED,
     };
   }
 

@@ -57,9 +57,19 @@ export class PrismaService
       // open. It costs a few packets a minute per connection.
       keepAlive: true,
       keepAliveInitialDelayMillis: 10_000,
-      // Recycle idle connections well inside the window in which anything in
-      // the path might quietly discard one.
-      idleTimeoutMillis: 30_000,
+      // Was 30s, and 30s was wrong. With keepAlive above, an idle connection
+      // is no longer being discarded by anything in the path, so recycling
+      // aggressively buys nothing — and it introduced a failure of its own.
+      //
+      // Measured: an upload whose S3 round-trip straddled the 30s boundary
+      // came back to a pool that had just torn down the connection its own
+      // previous query released, and the INSERT failed 30,097 ms in. Postgres
+      // logged nothing, because the statement never reached it.
+      idleTimeoutMillis: 300_000,
+      // Stated rather than left to node-postgres' default of 10. A pool size
+      // is a capacity decision and reads as one here, next to the timeouts it
+      // interacts with.
+      max: 10,
       // Fail a connection attempt rather than hanging a request forever when
       // the database is genuinely down.
       connectionTimeoutMillis: 10_000,

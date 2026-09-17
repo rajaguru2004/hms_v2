@@ -41,8 +41,16 @@ export class OllamaDocumentLlm implements DocumentLlm {
     this.baseUrl = (
       this.configService.get<string>('OLLAMA_URL') || 'http://127.0.0.1:11434'
     ).replace(/\/$/, '');
+    // MEDIHIVE_DOCUMENT_MODEL first so this pipeline can be pinned to its own
+    // model, then OLLAMA_MODEL — which is what .env.local and every deployment
+    // actually set, and what the rest of the app reads. Without that second
+    // step the two halves silently disagree: changing OLLAMA_MODEL moved the
+    // AI module and left document extraction on the hardcoded default, which
+    // only looked correct because the default happened to match.
     this.model =
-      this.configService.get<string>('MEDIHIVE_DOCUMENT_MODEL') || 'gemma3:4b';
+      this.configService.get<string>('MEDIHIVE_DOCUMENT_MODEL') ||
+      this.configService.get<string>('OLLAMA_MODEL') ||
+      'gemma3:4b';
   }
 
   async extractJson<T>(request: ExtractJsonRequest): Promise<T> {
