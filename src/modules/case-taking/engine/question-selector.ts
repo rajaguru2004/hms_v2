@@ -46,17 +46,166 @@ export interface SelectedQuestion {
 }
 
 /**
- * Every field that still owes an answer: applicable to this patient and not yet
- * assessed. `unknown`, `declined` and `not_applicable` all count as answered —
- * re-asking a question the patient has already declined is how a well-meaning
- * interview becomes an interrogation.
+ * How many questions one interview may put to a patient.
+ *
+ * The registry holds fifty fields and a chest-pain filter still leaves around
+ * seventy applicable slots once the HPI branches open. Asked end to end that is
+ * a sixty-nine question interview, which is what a real session produced: the
+ * patient answered every one of them, on a phone, and the last screen they saw
+ * said "Question 68 of 69". Nobody finishes that, and an interview nobody
+ * finishes collects less than a short one everybody does.
+ *
+ * Ten is a product decision, not a clinical ceiling. Nothing here caps what a
+ * *clinician* may record, and nothing caps what extraction may bank when a
+ * patient volunteers it — `extractionMenu` and `renderCase` both still read the
+ * full applicable set, so an answer that arrives unasked is still filed. This
+ * governs one thing: how many times the interview opens its mouth.
+ */
+export const QUESTION_BUDGET = 10;
+
+/**
+ * A budget that constrains nothing, for callers that want the pre-budget set —
+ * the relevance and ordering properties the registry guarantees, which are
+ * still true of the whole applicable set and are what the selector's own tests
+ * pin down. Spelled rather than passed as a bare `Infinity` so a reader meets
+ * the intent before the arithmetic.
+ */
+export const NO_QUESTION_BUDGET = Number.POSITIVE_INFINITY;
+
+/**
+ * The fields this interview will actually spend its budget on.
+ *
+ * Two orderings are in play here and conflating them is the trap. `compareFields`
+ * decides *when* a question is asked and is dominated by section order, which is
+ * what makes the conversation flow chief complaint → history → review. Choosing
+ * the ten by that same key would spend the whole budget on the first section and
+ * a half: one chief-complaint question and nine of the thirteen HPI slots, with
+ * `allergies.reported` — red-flag weight 85, and the one field this codebase
+ * calls out as a permanent hole in a chart if it goes unasked — never reached at
+ * all. A short interview must be short on narrative, not short on safety.
+ *
+ * So the ten are *chosen* by clinical weight (red-flag first, then priority) and
+ * *asked* in `compareFields` order. For a generic adult that lands on the
+ * complaint, its onset and severity, the associated symptoms a red-flag rule
+ * reads, self-harm screening, current medications, allergies and an age band —
+ * a defensible ten-question triage.
+ *
+ * ── Why answered and in-flight fields are kept unconditionally
+ *
+ * The applicable set moves as facts arrive: answering the chief complaint opens
+ * the branch for its category, and those fields can outweigh ones already in the
+ * budget. If the budget were recomputed purely by weight each turn, a field the
+ * patient had already answered could fall out of it — `expected` would drop
+ * below `addressed`, progress would run backwards, and a question already put to
+ * the patient could be asked again after its extraction landed. Retaining
+ * everything assessed or in flight makes the set monotonic in exactly the way
+ * the progress bar and the selector both assume, and leaves the budget's free
+ * slots to be refilled adaptively, which is the part worth keeping adaptive.
+ *
+ * The consequence is that the set can exceed [QUESTION_BUDGET] only by fields
+ * that were already asked under a previous budget — never by ones the interview
+ * is still about to ask.
+ */
+export function budgetedFields(
+  state: ClinicalState,
+  budget: number = QUESTION_BUDGET,
+): readonly FieldDefinition[] {
+  const applicable = applicableFields(state);
+
+  const spoken: FieldDefinition[] = [];
+  const free: FieldDefinition[] = [];
+  for (const field of applicable) {
+    if (isPending(state, field.key) || wasAsked(state, field.key)) {
+      spoken.push(field);
+    } else if (!isAssessed(readFactAt(state, field.key))) {
+      free.push(field);
+    }
+    // Assessed, but never asked: known from a document or an existing record.
+    // In neither list — see `wasAsked`.
+  }
+
+  const room = Math.max(0, budget - spoken.length);
+  const chosen = free.slice().sort(compareByClinicalWeight).slice(0, room);
+
+  return [...spoken, ...chosen].sort(compareFields);
+}
+
+/**
+ * The sources that mean *the interview asked, and the patient answered*.
+ *
+ * `patient_correction` is deliberately absent, and it is the interesting one. A
+ * correction is the patient disagreeing with something already on file — the
+ * printed prescription said 500 mg, they say it is 1000 — and the interview
+ * never spent a question to get it. Counting it would charge the budget for a
+ * conversation it did not have.
+ */
+const ASKED_SOURCES: readonly string[] = [
+  'patient_voice',
+  'patient_text',
+  'patient_choice',
+];
+
+/**
+ * Whether this field cost the interview one of its questions.
+ *
+ * The budget governs how many times the interview opens its mouth, so only what
+ * came back from an opened mouth may spend it. A fact lifted off an uploaded
+ * prescription, or read from the patient's existing record, was never a
+ * question — and charging it to the question budget produces the exact
+ * inversion of what a patient expects: bringing your paperwork gets you *fewer*
+ * questions answered about the things the paperwork does not cover.
+ *
+ * That is not hypothetical either. The demo patient who uploads a prescription
+ * and a lab report arrives with sixteen facts on file, nine of them from the
+ * documents and his own record. Counted flat, the budget was full before the
+ * interview asked him anything, and the seed that builds him failed outright.
+ *
+ * Such a field is in neither list in `budgetedFields`: not spent, and not
+ * offered — `outstandingFields` filters assessed fields out anyway, so it can
+ * never be re-asked. It simply is not part of the question set, which is the
+ * honest reading of a question nobody asked.
+ */
+function wasAsked(state: ClinicalState, fieldPath: string): boolean {
+  const fact = readFactAt(state, fieldPath);
+  // Discriminated on `presence` rather than through `isAssessed`, which returns
+  // a plain boolean and so does not narrow the union — `not_assessed` is the
+  // one member with no provenance to read.
+  if (fact.presence === 'not_assessed') return false;
+  return ASKED_SOURCES.includes(fact.provenance.source);
+}
+
+/**
+ * Which questions matter most, ignoring where they sit in the conversation.
+ *
+ * `compareFields` with its leading section term removed. Used only to choose the
+ * budget's members; the asking order stays `compareFields`.
+ */
+export function compareByClinicalWeight(
+  a: FieldDefinition,
+  b: FieldDefinition,
+): number {
+  const byRedFlag = b.redFlagWeight - a.redFlagWeight;
+  if (byRedFlag !== 0) return byRedFlag;
+
+  const byPriority = b.priority - a.priority;
+  if (byPriority !== 0) return byPriority;
+
+  return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+}
+
+/**
+ * Every field that still owes an answer: within this interview's budget and not
+ * yet assessed. `unknown`, `declined` and `not_applicable` all count as
+ * answered — re-asking a question the patient has already declined is how a
+ * well-meaning interview becomes an interrogation.
  *
  * Fields still in flight are outstanding but not *askable*: see `askableFields`.
  */
 export function outstandingFields(
   state: ClinicalState,
+  budget: number = QUESTION_BUDGET,
 ): readonly FieldDefinition[] {
-  return applicableFields(state)
+  return budgetedFields(state, budget)
     .filter((field) => !isAssessed(readFactAt(state, field.key)))
     .slice()
     .sort(compareFields);
@@ -177,10 +326,13 @@ export function isComplete(state: ClinicalState): boolean {
 }
 
 export function interviewProgress(state: ClinicalState): CompletionReport {
-  // The completion denominator is the applicable set, not the whole registry:
-  // a chest-pain interview never asks the GI review, and must still be able to
-  // reach 100%.
-  return computeCompletion(state, applicableFields(state));
+  // The completion denominator is the budgeted set, not the whole registry and
+  // not even the whole applicable set: a chest-pain interview never asks the GI
+  // review, and a ten-question interview never asks most of what is left. The
+  // denominator has to be what will actually be asked or the bar cannot reach
+  // 100% — which is the same reason it was the applicable set and not the
+  // registry before the budget existed.
+  return computeCompletion(state, budgetedFields(state));
 }
 
 /**
