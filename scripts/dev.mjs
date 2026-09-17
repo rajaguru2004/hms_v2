@@ -396,6 +396,35 @@ async function freeApiPort(cfg) {
   return false;
 }
 
+/**
+ * What the Flutter app is compiled against, read out of its own source.
+ *
+ * This exists because the address is DHCP and the failure is silent: the lease
+ * moves, the constant does not, and the handset shows "Can't reach the server"
+ * with nothing to say the address it dialled stopped existing. The three files
+ * that have to agree are listed here rather than remembered.
+ */
+function bakedInApiHost() {
+  const endpoints = path.join(
+    root,
+    '..',
+    'medihive',
+    'lib',
+    'app',
+    'data',
+    'network',
+    'endpoints.dart',
+  );
+  if (!existsSync(endpoints)) return null;
+  const text = readFileSync(endpoints, 'utf8');
+  // The `MEDIHIVE_API` default, which is the one a build with no --dart-define
+  // uses.
+  const match = text.match(
+    /'MEDIHIVE_API',\s*defaultValue:\s*'https?:\/\/([^:/']+)/,
+  );
+  return match?.[1] ?? null;
+}
+
 function banner(cfg) {
   const lan = lanAddress();
   const base = lan ? `http://${lan}:${cfg.apiPort}/` : `http://localhost:${cfg.apiPort}/`;
@@ -404,13 +433,31 @@ function banner(cfg) {
   if (lan) console.log(`  lan     : http://${lan}:${cfg.apiPort}/api`);
   console.log(`  swagger : http://localhost:${cfg.apiPort}/api/docs`);
   console.log(`  minio   : http://localhost:${cfg.s3Port + 1}  (minio_admin / minio_password)`);
-  console.log('\n  the app is compiled against the LAN url by default; to override without a rebuild:');
+  // The check that turns a silent handset failure into a line here. The app's
+  // default is a DHCP address; when the lease moves, the phone dials a host
+  // that no longer exists and shows only "Can't reach the server".
+  const baked = bakedInApiHost();
+  if (lan && baked && baked !== lan) {
+    console.log('');
+    warn(`the app is built for http://${baked}:${cfg.apiPort}/ — this machine is now ${lan}.`);
+    warn('a handset on that build cannot reach this API. Either rebuild with:');
+    warn(`  --dart-define=MEDIHIVE_API=${base} --dart-define=MEDIHIVE_FILES=${base}`);
+    warn('or change the default, which means all three of these files:');
+    warn('  medihive/lib/app/data/network/endpoints.dart          (both defaults)');
+    warn('  medihive/android/app/src/main/res/xml/network_security_config.xml');
+    warn('  medihive/android/app/src/debug/res/xml/network_security_config.xml');
+    warn('the two XML files name the address for Android\'s cleartext policy;');
+    warn('changing only the Dart default fails with no explanation attached.');
+  } else if (lan && baked) {
+    console.log(`\n  the app is built for http://${baked}:${cfg.apiPort}/ — matches this machine.`);
+  }
+
+  console.log('\n  to point a build somewhere else without changing the default:');
   console.log(
     `    flutter run -d <device> --dart-define=MEDIHIVE_API=${base} --dart-define=MEDIHIVE_FILES=${base}`,
   );
   if (lan) {
-    console.log(`\n  a phone needs inbound TCP ${cfg.apiPort} allowed through the Windows firewall.`);
-    console.log(`  if this address is not ${'192.168.163.97'}, rebuild the app with the --dart-define above.`);
+    console.log(`\n  a phone also needs inbound TCP ${cfg.apiPort} through the Windows firewall.`);
   }
   console.log('');
 }
