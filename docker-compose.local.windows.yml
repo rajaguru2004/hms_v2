@@ -1,0 +1,31 @@
+# Untracked local override for docker-compose.local.yml on this Windows box.
+#
+# The other half of the P1017 fix.
+#
+# On Windows the host reaches these containers through Docker Desktop's port
+# proxy, which discards a TCP mapping it thinks is idle. Postgres ships with
+# `tcp_keepalives_idle = 0`, meaning the OS default - two hours before the
+# first probe - so it happily holds a connection the proxy threw away minutes
+# ago. The client finds out at the next query, as
+# "Server has closed the connection" (Prisma P1017), and the retry works, which
+# is what makes it read as a flake instead of a configuration problem.
+#
+# The API already enables TCP keepalive on its own sockets (see
+# src/prisma/prisma.service.ts). This does the same from the server side, so
+# psql, Prisma Studio, a GUI client and the seeds are all covered too rather
+# than only the one caller that was fixed in code.
+#
+# 60s idle before the first probe, then 3 probes 15s apart before the
+# connection is declared dead: an order of magnitude below any idle timeout in
+# the path, and a few packets a minute.
+
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - tcp_keepalives_idle=60
+      - -c
+      - tcp_keepalives_interval=15
+      - -c
+      - tcp_keepalives_count=3

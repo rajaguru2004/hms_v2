@@ -196,11 +196,20 @@ async function ensureDocker() {
 async function ensureInfra(cfg) {
   step('2/6', 'Postgres / Redis / MinIO');
   const composeArgs = ['compose', '-f', 'docker-compose.local.yml'];
-  // Untracked and optional: it only remaps host-side ports away from the ones
-  // other projects' containers already hold. Absent means those were free.
-  if (existsSync(path.join(root, 'docker-compose.local.ports.yml'))) {
-    composeArgs.push('-f', 'docker-compose.local.ports.yml');
-    log('  using host-port override');
+  // Both overrides are untracked, machine-local and optional.
+  //   .ports.yml   remaps host-side ports away from the ones other projects'
+  //                containers already hold. Absent means those were free.
+  //   .windows.yml turns on Postgres TCP keepalives, without which idle
+  //                connections are dropped by Docker Desktop's port proxy and
+  //                surface later as P1017.
+  for (const [file, why] of [
+    ['docker-compose.local.ports.yml', 'host-port override'],
+    ['docker-compose.local.windows.yml', 'windows keepalive override'],
+  ]) {
+    if (existsSync(path.join(root, file))) {
+      composeArgs.push('-f', file);
+      log(`  using ${why}`);
+    }
   }
   const up = sh('docker', [...composeArgs, 'up', '-d', 'postgres', 'redis', 'minio']);
   if (up.status !== 0) {
