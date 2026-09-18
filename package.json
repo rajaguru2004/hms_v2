@@ -11,7 +11,8 @@
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",
-    "dev": "nest start --watch",
+    "dev": "node scripts/dev.mjs",
+    "dev:deps": "node scripts/dev.mjs --no-api",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/src/main",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
@@ -35,6 +36,9 @@
     "prepare": "husky",
     "verify:mobile": "ts-node -r tsconfig-paths/register test/verify-mobile-contract.ts",
     "verify:case-taking": "ts-node -r tsconfig-paths/register test/verify-case-taking.ts",
+    "verify:hindi": "ts-node -r tsconfig-paths/register test/verify-hindi-interview.ts",
+    "verify:language-split": "ts-node -r tsconfig-paths/register test/verify-language-split.ts",
+    "verify:languages": "ts-node -r tsconfig-paths/register test/verify-languages.ts",
     "verify:patient-documents": "ts-node -r tsconfig-paths/register test/verify-patient-documents.ts"
   },
   "prisma": {
@@ -66,6 +70,7 @@
     "helmet": "^8.2.0",
     "ioredis": "^5.11.1",
     "joi": "^18.2.1",
+    "livekit-server-sdk": "^2.19.0",
     "nestjs-pino": "^4.6.1",
     "papaparse": "^5.5.3",
     "passport": "^0.7.0",

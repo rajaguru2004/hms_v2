@@ -8,6 +8,11 @@ import { ConfigService } from '@nestjs/config';
 import { Logger } from 'nestjs-pino';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import {
+  ALLOW_UNREVIEWED_PHRASEBOOKS_ENV,
+  PHRASEBOOKS,
+  unreviewedLanguagesInUse,
+} from './modules/case-taking/engine/phrasebook';
 
 /**
  * Bootstrap — application entry point.
@@ -105,6 +110,41 @@ async function bootstrap(): Promise<void> {
   logger.log(`🚀 HMS v2 API running on http://localhost:${port}/${apiPrefix}`);
   logger.log(`📚 Swagger docs: http://localhost:${port}/${apiPrefix}/docs`);
   logger.log(`🌱 Environment: ${config.get('app.nodeEnv')}`);
+
+  warnAboutUnreviewedTranslations(logger);
+}
+
+/**
+ * Say out loud, once per boot, which patients are being asked clinical
+ * questions in wording nobody has checked.
+ *
+ * `MEDIHIVE_ALLOW_UNREVIEWED_PHRASEBOOKS` is a demonstration override: it lets
+ * a machine-drafted translation reach a patient so the pipeline can be proved
+ * before a clinician spends an afternoon on it. That is a defensible thing to
+ * do on a demo box and an indefensible one in a waiting room, and the
+ * difference between the two is whether anybody noticed the flag was on. A
+ * silent override is how a demo setting survives into production, so this is a
+ * `warn` naming every affected language and its provenance — not a `log` line
+ * that scrolls past with the Swagger URL.
+ */
+function warnAboutUnreviewedTranslations(logger: Logger): void {
+  const unreviewed = unreviewedLanguagesInUse();
+  if (unreviewed.length === 0) return;
+
+  logger.warn(
+    {
+      flag: ALLOW_UNREVIEWED_PHRASEBOOKS_ENV,
+      languages: unreviewed.map((code) => ({
+        code,
+        source: PHRASEBOOKS[code].source,
+        reviewedAt: PHRASEBOOKS[code].reviewedAt,
+      })),
+    },
+    `${ALLOW_UNREVIEWED_PHRASEBOOKS_ENV}=true — patients will be asked clinical ` +
+      `questions in UNREVIEWED translations (${unreviewed.join(', ')}). No ` +
+      'clinician has signed this wording off. Do not run this where real ' +
+      'patients are being interviewed.',
+  );
 }
 
 void bootstrap();

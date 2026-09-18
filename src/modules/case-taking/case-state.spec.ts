@@ -1,6 +1,11 @@
 import type { CaseFact, CaseTurn } from '@prisma/client';
 import { factFromRow, rebuildState, rowDataFromFact } from './case-state';
-import { isPending, readFactAt } from './engine/clinical-state';
+import {
+  expirePending,
+  isPending,
+  pendingFieldPaths,
+  readFactAt,
+} from './engine/clinical-state';
 import {
   isRecorded,
   recorded,
@@ -59,7 +64,19 @@ function turnRow(overrides: Partial<CaseTurn> = {}): CaseTurn {
   };
 }
 
-const base = { sessionId: 's1', facts: [], turns: [] };
+/**
+ * `now` is pinned half a minute after the fixture rows' own timestamps, so the
+ * default rebuild sees a freshly asked question rather than a three-day-old one.
+ * Without it every fixture would trip the lost-extraction clock, which is a real
+ * behaviour and a terrible default for tests about something else — the tests
+ * that do mean to exercise that clock set `now` themselves.
+ */
+const base = {
+  sessionId: 's1',
+  facts: [],
+  turns: [],
+  now: new Date('2026-09-14T10:00:30Z'),
+};
 
 describe('factFromRow', () => {
   it('reads a recorded value', () => {
@@ -297,6 +314,125 @@ describe('rebuildState', () => {
         turns: [turnRow({ sequence: 1, fieldKey: 'not a path' })],
       });
       expect(Object.keys(state.pending)).toEqual([]);
+    });
+
+    /**
+     * The deadlock, reproduced from the session that produced it.
+     *
+     * Two questions were asked and their extractions never landed; twenty-nine
+     * more were asked and answered after them. The revision counted only the
+     * unanswered ones, so the two lost fields sat at ages 1 and 0 and
+     * `expirePending` — which releases at an age above two — could never reach
+     * them. With nothing askable and something pending forever, the interview
+     * reported `awaiting_extraction` on every load and the patient was left on
+     * a screen with no question and no way forward.
+     *
+     * The ages are what this pins. A staleness measured in questions asked has
+     * to see twenty-nine of them.
+     */
+    it('ages a lost extraction by every question since, not just the unanswered ones', () => {
+      const lost = ['past_medical.thyroid_disorder', 'past_medical.epilepsy'];
+
+      // Two questions asked and never answered...
+      const turns: CaseTurn[] = lost.map((fieldKey, index) =>
+        turnRow({ sequence: index + 1, section: 'past_medical', fieldKey }),
+      );
+      // ...then twenty-nine that were, all on one field so the fixture stays
+      // readable: what matters is the count of asked-and-answered turns after
+      // the lost pair, not which fields they were.
+      for (let i = 0; i < 29; i += 1) {
+        turns.push(
+          turnRow({
+            sequence: lost.length + i + 1,
+            section: 'hpi',
+            fieldKey: 'hpi.duration',
+          }),
+        );
+      }
+
+      const state = rebuildState({
+        ...base,
+        facts: [factRow({ fieldPath: 'hpi.duration' })],
+        turns,
+      });
+
+      // Still in flight on the raw rebuild — expiry is the loader's job.
+      expect(isPending(state, 'past_medical.thyroid_disorder')).toBe(true);
+      expect(isPending(state, 'past_medical.epilepsy')).toBe(true);
+
+      // But old enough to be released, which is what was impossible before:
+      // the revision counts all 31 questions, so the lost pair sit at ages 30
+      // and 29 rather than 1 and 0.
+      const released = expirePending(state);
+      expect(isPending(released, 'past_medical.thyroid_disorder')).toBe(false);
+      expect(isPending(released, 'past_medical.epilepsy')).toBe(false);
+      expect(pendingFieldPaths(released)).toEqual([]);
+    });
+
+    /**
+     * The blind spot at the end of an interview, and the clock that covers it.
+     *
+     * `expirePending` counts questions, and when everything left is in flight
+     * there are no more questions to count — the age freezes and the interview
+     * reports `awaiting_extraction` on every load for ever. A restart of the API
+     * produces exactly this: the background job lived in the process, and the
+     * process is gone.
+     */
+    it('presumes an extraction lost once it has been in flight too long', () => {
+      const asked = new Date('2026-09-17T04:00:00Z');
+      const turns = [
+        turnRow({
+          sequence: 1,
+          section: 'hpi',
+          fieldKey: 'hpi.onset',
+          createdAt: asked,
+        }),
+      ];
+
+      // Still inside the window the API's own extraction timeout allows.
+      const running = rebuildState({
+        ...base,
+        turns,
+        now: new Date(asked.getTime() + 30_000),
+      });
+      expect(isPending(running, 'hpi.onset')).toBe(true);
+
+      // Well past it: nobody is coming back with this answer.
+      const lost = rebuildState({
+        ...base,
+        turns,
+        now: new Date(asked.getTime() + 300_000),
+      });
+      expect(isPending(lost, 'hpi.onset')).toBe(false);
+    });
+
+    it('does not release an answered field on the clock, having already cleared it', () => {
+      // The two releases must not fight: an answered field leaves `pending` in
+      // the loop, and the clock must find nothing left to do for it.
+      const asked = new Date('2026-09-17T04:00:00Z');
+      const state = rebuildState({
+        ...base,
+        facts: [factRow({ fieldPath: 'hpi.duration' })],
+        turns: [
+          turnRow({ sequence: 1, fieldKey: 'hpi.duration', createdAt: asked }),
+        ],
+        now: new Date(asked.getTime() + 300_000),
+      });
+      expect(isPending(state, 'hpi.duration')).toBe(false);
+      expect(readFactAt(state, 'hpi.duration').presence).toBe('recorded');
+    });
+
+    it('keeps a question asked moments ago in flight', () => {
+      // The other half of the same rule. Expiry must not race the extraction it
+      // is there to backstop: a field asked on the most recent turn is age
+      // zero, and two more questions have to go by before it is released.
+      const state = rebuildState({
+        ...base,
+        turns: [
+          turnRow({ sequence: 1, section: 'hpi', fieldKey: 'hpi.onset' }),
+        ],
+      });
+      expect(isPending(expirePending(state), 'hpi.onset')).toBe(true);
     });
   });
 });

@@ -11,3 +11,4 @@ export * from './extraction.prompt';
 export * from './question-phrasing.prompt';
 export * from './review-summary.prompt';
 export * from './document-extraction.prompt';
+export * from './translation.prompt';

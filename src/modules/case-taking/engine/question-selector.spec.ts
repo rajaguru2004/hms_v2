@@ -4,11 +4,15 @@ import {
   createClinicalState,
   isPending,
   markAsked,
+  sectionRank,
   ClinicalState,
 } from './clinical-state';
 import { STATIC_FIELDS, applicableFields } from './field-registry';
 import {
+  NO_QUESTION_BUDGET,
+  QUESTION_BUDGET,
   askableFields,
+  budgetedFields,
   compareFields,
   fallbackPhrasing,
   interviewStatus,
@@ -48,6 +52,170 @@ function answerEverything(start: ClinicalState): ClinicalState {
   }
   throw new Error('interview did not terminate within 50 passes');
 }
+
+describe('the question budget', () => {
+  /**
+   * The reason the budget exists. A real chest-pain session put sixty-nine
+   * questions to a patient on a phone; the interview must now stop at ten,
+   * whatever the complaint opens up.
+   */
+  it('never asks more than the budget, whatever the complaint', () => {
+    for (const complaint of [
+      'chest pain',
+      'stomach pain',
+      'headache since morning',
+      'burning when I pass urine',
+      'sore throat',
+    ]) {
+      const state = withComplaint(complaint);
+      expect(budgetedFields(state).length).toBeLessThanOrEqual(QUESTION_BUDGET);
+      expect(interviewProgress(state).expected).toBeLessThanOrEqual(
+        QUESTION_BUDGET,
+      );
+    }
+  });
+
+  it('runs a whole interview in at most ten questions', () => {
+    // End to end through the real selector rather than by counting the set:
+    // this is the number the patient actually experiences.
+    let state = createClinicalState({ sessionId: 's' });
+    const asked: string[] = [];
+    for (let pass = 0; pass < 100; pass += 1) {
+      const next = selectNext(state);
+      if (!next) break;
+      asked.push(next.field.key);
+      state = applyFact(state, next.field.key, assertedNone(voice));
+    }
+    expect(asked.length).toBeLessThanOrEqual(QUESTION_BUDGET);
+    expect(isComplete(state)).toBe(true);
+    expect(interviewProgress(state).percent).toBe(100);
+  });
+
+  /**
+   * The trap the two sort orders exist to avoid. Ten questions taken in asking
+   * order would be the chief complaint and nine HPI slots, and `allergies.
+   * reported` — the field this codebase singles out as a permanent hole in a
+   * chart when it goes unasked — would never be reached.
+   */
+  it('spends the budget on the red flags, not on the first section', () => {
+    const keys = budgetedFields(withComplaint('chest pain')).map((f) => f.key);
+    expect(keys).toContain('allergies.reported');
+    expect(keys).toContain('chief_complaint.symptom');
+    expect(new Set(keys.map((k) => k.split('.')[0])).size).toBeGreaterThan(2);
+  });
+
+  it('still asks them in conversational order', () => {
+    // Chosen by weight, asked by section: the budget must not reshuffle the
+    // interview into a red-flag-first interrogation.
+    const sections = budgetedFields(withComplaint('chest pain')).map(
+      (f) => f.section,
+    );
+    const ranks = sections.map((section) => sectionRank(section));
+    expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
+  });
+
+  /**
+   * The monotonicity the progress bar depends on. Answering the chief complaint
+   * opens its category's branch, and those fields can outweigh ones already in
+   * the budget — so a set recomputed purely by weight could drop a field the
+   * patient had already answered, and `addressed` would exceed `expected`.
+   */
+  it('never drops a field the patient has already answered', () => {
+    let state = createClinicalState({ sessionId: 's' });
+    const answered: string[] = [];
+    for (let pass = 0; pass < 100; pass += 1) {
+      const next = selectNext(state);
+      if (!next) break;
+      state = applyFact(state, next.field.key, assertedNone(voice));
+      answered.push(next.field.key);
+
+      const keys = new Set(budgetedFields(state).map((f) => f.key));
+      for (const key of answered) expect(keys.has(key)).toBe(true);
+
+      const progress = interviewProgress(state);
+      expect(progress.addressed).toBeLessThanOrEqual(progress.expected);
+    }
+  });
+
+  it('keeps a field that is still in flight inside the budget', () => {
+    // Otherwise a question could be asked, fall out of the budget while its
+    // extraction was still running, and have its answer land against a field
+    // the interview no longer counted.
+    const state = markAsked(withComplaint('chest pain'), 'allergies.reported');
+    expect(isPending(state, 'allergies.reported')).toBe(true);
+    expect(budgetedFields(state).map((f) => f.key)).toContain(
+      'allergies.reported',
+    );
+  });
+
+  /**
+   * The inversion this rule exists to prevent: a patient who brings their
+   * paperwork getting *fewer* questions about everything the paperwork does not
+   * cover. The demo patient with an uploaded prescription and a lab report
+   * arrives with nine facts he was never asked for; counted flat, his budget was
+   * full before the interview opened its mouth.
+   */
+  it('does not spend the budget on facts the interview never asked for', () => {
+    const fromDocument = {
+      source: 'uploaded_document',
+      verification: 'unverified',
+    } as const;
+    const fromRecord = {
+      source: 'existing_record',
+      verification: 'unverified',
+    } as const;
+
+    let state = withComplaint('chest pain');
+    const asked = budgetedFields(state).length;
+
+    // Four facts nobody asked for. The budget must not move.
+    state = applyFact(
+      state,
+      'medications.any_current',
+      recorded(true, fromDocument),
+    );
+    state = applyFact(
+      state,
+      'past_medical.diabetes',
+      recorded(true, fromDocument),
+    );
+    state = applyFact(
+      state,
+      'past_medical.hypertension',
+      recorded(true, fromRecord),
+    );
+    state = applyFact(state, 'social.age_band', recorded('40_59', fromRecord));
+
+    const after = budgetedFields(state);
+    expect(after.length).toBe(asked);
+    // And none of them is offered back as a question: they are already answered.
+    expect(after.map((f) => f.key)).not.toContain('medications.any_current');
+    expect(outstandingFields(state).map((f) => f.key)).not.toContain(
+      'past_medical.diabetes',
+    );
+  });
+
+  it('does spend the budget on an answer the patient actually gave', () => {
+    // The other side of the same rule, so it cannot be satisfied by ignoring
+    // provenance altogether.
+    let state = withComplaint('chest pain');
+    const before = outstandingFields(state).length;
+    const next = selectNext(state)!;
+    state = applyFact(state, next.field.key, assertedNone(voice));
+    expect(outstandingFields(state).length).toBe(before - 1);
+    expect(budgetedFields(state).map((f) => f.key)).toContain(next.field.key);
+  });
+
+  it('leaves the full applicable set reachable for callers that need it', () => {
+    // The chart and the extraction menu still read everything: the budget caps
+    // what is asked, not what may be recorded.
+    const state = withComplaint('chest pain');
+    expect(applicableFields(state).length).toBeGreaterThan(QUESTION_BUDGET);
+    expect(outstandingFields(state, NO_QUESTION_BUDGET).length).toBeGreaterThan(
+      QUESTION_BUDGET,
+    );
+  });
+});
 
 describe('selectNext', () => {
   it('asks what is wrong before it asks anything about it', () => {
@@ -95,12 +263,20 @@ describe('the selector never asks an irrelevant question', () => {
 
   it('does ask about radiation, which a chest complaint makes relevant', () => {
     // The mirror of the test above: adaptive means narrowing *and* widening.
-    const keys = outstandingFields(withComplaint('chest pain')).map(
-      (f) => f.key,
-    );
+    //
+    // Unbudgeted, because this is a statement about `appliesWhen` and not about
+    // the ten questions the interview can afford. `hpi.radiation` is relevant to
+    // a chest complaint and irrelevant to a sore throat whatever the budget is;
+    // whether it makes the cut is `budgetedFields`' business, tested separately.
+    const keys = outstandingFields(
+      withComplaint('chest pain'),
+      NO_QUESTION_BUDGET,
+    ).map((f) => f.key);
     expect(keys).toContain('hpi.radiation');
     expect(
-      outstandingFields(withComplaint('sore throat')).map((f) => f.key),
+      outstandingFields(withComplaint('sore throat'), NO_QUESTION_BUDGET).map(
+        (f) => f.key,
+      ),
     ).not.toContain('hpi.radiation');
   });
 
@@ -168,7 +344,15 @@ describe('ordering', () => {
   it('puts the red-flag questions first within a section', () => {
     // Breathlessness (weight 90) before duration (weight 40), even though
     // duration has the higher conversational priority.
-    const hpi = outstandingFields(withComplaint('chest pain'))
+    //
+    // Unbudgeted for the same reason as the relevance test above: this pins the
+    // sort key, and `hpi.duration` and `hpi.character` are exactly the kind of
+    // narrative field a ten-question interview drops. Ordering has to hold over
+    // the whole applicable set or it is not the sort key that is being tested.
+    const hpi = outstandingFields(
+      withComplaint('chest pain'),
+      NO_QUESTION_BUDGET,
+    )
       .filter((f) => f.section === 'hpi')
       .map((f) => f.key);
     expect(hpi.indexOf('hpi.associated.breathlessness')).toBeLessThan(

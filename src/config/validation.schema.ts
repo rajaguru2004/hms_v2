@@ -68,6 +68,43 @@ export const validationSchema = Joi.object({
   // measured twenty seconds warm, seventy-four cold. It exists so a wedged
   // model releases the request, not to make the call fast.
   AI_TIMEOUT_MS: Joi.number().default(90000),
+
+  // Whether an unreviewed question translation may be spoken to a patient.
+  //
+  // Declared here so it is documented in one place and so a misspelt value is a
+  // boot failure rather than a flag that is silently off. It is read in
+  // `case-taking/engine/phrasebook.ts` rather than through ConfigService, for
+  // the reason set out there: the question selector is a pure synchronous
+  // function with no injector, and `load-env.ts` already guarantees the
+  // variable is populated before it is imported.
+  //
+  // `false` is the default and the only value a deployment with real patients
+  // should carry. `true` opens the gate on every phrasebook whose `reviewedAt`
+  // is null — today Hindi (machine-drafted, complete) and Tamil (hand-drafted,
+  // four questions) — so that a translation can be proved end to end before a
+  // clinician is asked to review it. It never counts as a review, and the boot
+  // log names every language it is serving unreviewed.
+  MEDIHIVE_ALLOW_UNREVIEWED_PHRASEBOOKS: Joi.string()
+    .valid('true', 'false')
+    .default('false'),
+
+  // ── LiveKit, for the streaming voice session ────────────────────────────────
+  //
+  // Optional, all three, and deliberately so: a box with no media server still
+  // boots and still runs a complete interview. The patient taps, types, or
+  // records-and-uploads exactly as before, and the room is an enhancement that
+  // simply never opens. Making these required would let a missing third-party
+  // credential stop a hospital taking a history.
+  //
+  // The SECRET is read here and never leaves the server. The phone is issued a
+  // short-lived room token minted against its own bearer token; it never sees
+  // the key or the secret, because a credential shipped inside an APK is a
+  // credential held by anyone who has the APK.
+  LIVEKIT_URL: Joi.string()
+    .uri({ scheme: ['ws', 'wss'] })
+    .optional(),
+  LIVEKIT_API_KEY: Joi.string().optional(),
+  LIVEKIT_API_SECRET: Joi.string().optional(),
 });
 
 export const validationOptions = {

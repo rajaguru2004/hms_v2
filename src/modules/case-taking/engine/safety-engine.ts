@@ -20,6 +20,7 @@ import { ClinicalState, readFactAt } from './clinical-state';
 import {
   STATIC_FIELDS,
   complaintCategories,
+  complaintUnreadable,
   ComplaintCategory,
 } from './field-registry';
 import {
@@ -180,6 +181,39 @@ export function evaluateCondition(
       const hits = condition.anyOf.filter((category: ComplaintCategory) =>
         active.includes(category),
       );
+
+      // A complaint written in a script the classifier cannot read is not a
+      // complaint that has been ruled out. Treat it as "cannot exclude" rather
+      // than as "does not match".
+      //
+      // This is safe **because every rule here is a conjunction.** ACS_TRIAD is
+      // cardiac-complaint AND breathlessness AND sweating; the two structured
+      // answers are real evidence the patient gave, and they are what actually
+      // carries the rule. A patient with a sprained ankle answers no to
+      // breathlessness and the rule stays silent whatever their complaint says.
+      //
+      // Both of the obvious alternatives were tried and measured, and both are
+      // worse. Classifying unreadable text as every category fired ACS_TRIAD on
+      // a Tamil sprained ankle — every red flag then carried no information for
+      // any non-English interview, which is the alarm fatigue
+      // `safety-engine.spec.ts` opens by calling the engine's single most
+      // important property. Treating it as no-match missed a Tamil chest pain
+      // that had the whole triad recorded.
+      //
+      // The evidence string says which happened, so a clinician reading the
+      // alert is never told the complaint was classified when it was not.
+      if (hits.length === 0 && complaintUnreadable(state)) {
+        return {
+          matched: true,
+          facts: [
+            factEvidence(
+              state,
+              'chief_complaint.symptom',
+              'not in a language this rule could read; not excluded',
+            ),
+          ],
+        };
+      }
       return {
         matched: hits.length > 0,
         facts:

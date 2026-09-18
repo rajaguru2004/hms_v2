@@ -77,6 +77,7 @@ describe('SidecarClient', () => {
           stt: true,
           tts: false,
           ocr: true,
+          ttsLanguages: [],
         }),
       );
 
@@ -91,7 +92,46 @@ describe('SidecarClient', () => {
         stt: true,
         tts: false,
         ocr: true,
+        sttLanguages: [],
+        ttsLanguages: [],
+        languages: {},
+        ttsProviders: [],
       });
+    });
+
+    /**
+     * The bare `tts` boolean is true when *any* voice loads, so it answered
+     * "can we speak?" with yes while Tamil was missing. Which languages can
+     * actually be spoken is a separate list and a separate question.
+     */
+    it('reports which languages have a voice, not just that some voice exists', async () => {
+      fetchMock.mockResolvedValue(
+        jsonReply({
+          stt: true,
+          tts: true,
+          ocr: true,
+          ttsLanguages: ['en', 'hi'],
+        }),
+      );
+
+      const health = await client.health();
+
+      expect(health?.tts).toBe(true);
+      expect(health?.ttsLanguages).toEqual(['en', 'hi']);
+    });
+
+    /**
+     * An older sidecar does not send the field. Empty is the honest reading of
+     * that — we do not know what it can speak — and it must NOT be filled in
+     * from the supported set, because assuming a voice exists is how a Tamil
+     * question gets read aloud in English.
+     */
+    it('reads a missing language list as unknown rather than as everything', async () => {
+      fetchMock.mockResolvedValue(
+        jsonReply({ stt: true, tts: true, ocr: true }),
+      );
+
+      expect((await client.health())?.ttsLanguages).toEqual([]);
     });
 
     /**
@@ -218,6 +258,206 @@ describe('SidecarClient', () => {
       await client.transcribe(Buffer.from('wav'));
 
       expect(client.circuitState().consecutiveFailures).toBe(0);
+    });
+  });
+
+  /**
+   * One breaker per capability, and the outage that forced it.
+   *
+   * Nine of the eleven languages have no voice on a given box, and a language
+   * with no voice answers 503. With one shared counter, a patient whose phone
+   * is set to Tamil tapping "read aloud" three times switched off speech
+   * recognition and document reading for everybody for thirty seconds. A
+   * missing reference recording is configuration, not sickness.
+   */
+  describe('the breakers are per capability', () => {
+    async function failTts(times: number): Promise<void> {
+      for (let attempt = 0; attempt < times; attempt++) {
+        await refusal(() => client.speak('hello', 'ta'));
+      }
+    }
+
+    it('does not let a failing capability disable an unrelated one', async () => {
+      fetchMock.mockRejectedValue(new Error('ECONNREFUSED'));
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await refusal(() => client.speak('hello'));
+      }
+
+      expect(client.circuitStates().tts.open).toBe(true);
+      expect(client.circuitStates().stt.open).toBe(false);
+      expect(client.circuitStates().ocr.open).toBe(false);
+
+      // OCR is still asked, rather than refused on TTS's evidence.
+      const callsBefore = fetchMock.mock.calls.length;
+      await refusal(() => client.readDocument(Buffer.from('x')));
+      expect(fetchMock.mock.calls.length).toBe(callsBefore + 1);
+    });
+
+    it('still reports the service as troubled when any one capability is open', async () => {
+      fetchMock.mockRejectedValue(new Error('ECONNREFUSED'));
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await refusal(() => client.readDocument(Buffer.from('x')));
+      }
+
+      expect(client.circuitState().open).toBe(true);
+      expect(client.circuitState('ocr').open).toBe(true);
+      expect(client.circuitState('stt').open).toBe(false);
+    });
+
+    /**
+     * A 503 from `/tts` means "no provider can speak that language" — a
+     * permanent, correct, cheap answer about configuration. Counting it would
+     * cost an English patient their read-aloud because somebody else asked for
+     * Tamil.
+     */
+    it('treats a missing voice as a refusal, not as the service being unwell', async () => {
+      fetchMock.mockResolvedValue(
+        jsonReply({ detail: 'We cannot read this aloud in Tamil yet.' }, 503),
+      );
+
+      await failTts(5);
+
+      expect(client.circuitStates().tts.open).toBe(false);
+      expect(client.circuitStates().tts.consecutiveFailures).toBe(0);
+    });
+
+    it("passes the sidecar's sentence through when it refuses a language", async () => {
+      fetchMock.mockResolvedValue(
+        jsonReply({ detail: 'We cannot read this aloud in Tamil yet.' }, 503),
+      );
+
+      const error = await refusal(() => client.speak('hello', 'ta'));
+      expect(error.patientMessage).toBe(
+        'We cannot read this aloud in Tamil yet.',
+      );
+    });
+
+    /**
+     * Deliberately narrow. The recogniser refuses Odia with a 400 by name, so a
+     * 503 from `/stt` is a model that will not load — which is exactly what the
+     * breaker is for.
+     */
+    it('still counts a 503 from speech recognition and from document reading', async () => {
+      fetchMock.mockResolvedValue(jsonReply({ detail: 'model loading' }, 503));
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await refusal(() => client.transcribe(Buffer.from('wav')));
+      }
+
+      expect(client.circuitStates().stt.open).toBe(true);
+      expect(client.circuitStates().tts.open).toBe(false);
+    });
+
+    it('lets a health probe fail without touching the models', async () => {
+      fetchMock.mockRejectedValue(new Error('ECONNREFUSED'));
+
+      for (let attempt = 0; attempt < 5; attempt++) {
+        expect(await client.health()).toBeNull();
+      }
+
+      // The language picker calls `/health`. Before the split, opening it a few
+      // times against a down sidecar pushed the one counter towards cutting off
+      // document reading.
+      expect(client.circuitStates().health.open).toBe(true);
+      expect(client.circuitStates().stt.open).toBe(false);
+      expect(client.circuitStates().ocr.open).toBe(false);
+    });
+  });
+
+  /**
+   * The per-language capability table. `available` is the sidecar's word for
+   * "a provider can speak this now"; `preferred` names the provider that
+   * *should* and is true for eleven languages that mostly cannot be spoken yet.
+   * Reading the preference would put a speaker button in front of a patient who
+   * would then hear nothing.
+   */
+  describe('the language capability table', () => {
+    it('reads availability rather than preference', async () => {
+      fetchMock.mockResolvedValue(
+        jsonReply({
+          stt: true,
+          tts: true,
+          ocr: true,
+          sttLanguages: ['en', 'ta'],
+          ttsLanguages: ['en'],
+          languages: {
+            en: {
+              available: true,
+              preferred: 'piper',
+              provider: 'piper',
+              stt: true,
+            },
+            ta: {
+              available: false,
+              preferred: 'indicf5',
+              provider: null,
+              stt: true,
+            },
+            or: {
+              available: true,
+              preferred: 'indicf5',
+              provider: 'indicf5',
+              stt: false,
+            },
+          },
+        }),
+      );
+
+      const health = await client.health();
+
+      expect(health?.sttLanguages).toEqual(['en', 'ta']);
+      expect(health?.languages.ta).toEqual({
+        stt: true,
+        tts: false,
+        provider: null,
+      });
+      expect(health?.languages.or).toEqual({
+        stt: false,
+        tts: true,
+        provider: 'indicf5',
+      });
+    });
+
+    it('reads a malformed or missing table as nothing known', async () => {
+      fetchMock.mockResolvedValue(
+        jsonReply({ stt: true, tts: true, ocr: true, languages: 'yes' }),
+      );
+
+      const health = await client.health();
+      expect(health?.languages).toEqual({});
+      expect(health?.ttsProviders).toEqual([]);
+    });
+
+    it('keeps each provider’s own account of itself for the health check', async () => {
+      fetchMock.mockResolvedValue(
+        jsonReply({
+          stt: true,
+          tts: true,
+          ocr: true,
+          ttsProviders: [
+            {
+              id: 'indicf5',
+              ready: false,
+              detail: 'torch is not installed',
+              languages: [],
+            },
+            { id: 'piper', ready: true, detail: '', languages: ['en', 'hi'] },
+          ],
+        }),
+      );
+
+      const health = await client.health();
+
+      expect(health?.ttsProviders).toEqual([
+        {
+          id: 'indicf5',
+          ready: false,
+          detail: 'torch is not installed',
+          languages: [],
+        },
+        { id: 'piper', ready: true, detail: '', languages: ['en', 'hi'] },
+      ]);
     });
   });
 

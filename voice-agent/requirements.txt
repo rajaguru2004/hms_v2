@@ -1,0 +1,82 @@
+# MediHive voice agent — the LiveKit worker that joins the patient's room.
+#
+# Python 3.12, its own venv, deliberately NOT ../ai-sidecar/.venv. The reason is
+# not tidiness, it is that this process does not run a model.
+#
+# ## Why a separate venv
+#
+# The obvious argument for sharing the sidecar's venv is that the weights are
+# already downloaded there: faster-whisper, Piper, the HF cache. That argument
+# evaporates once you notice this worker never loads them. STT is `POST
+# 127.0.0.1:8801/stt` and TTS is `POST 127.0.0.1:8801/tts` — the models stay in
+# the sidecar's process, loaded once, and this venv holds an HTTP client instead
+# of a copy of ctranslate2. Sharing the venv would not share the *memory*; it
+# would only share the disk, and then only for packages we do not import.
+#
+# Against sharing there are two concrete costs:
+#
+#   1. `pip install livekit-agents` into ai-sidecar/.venv is a resolver run over
+#      that venv's whole dependency graph. livekit-agents wants numpy, protobuf,
+#      aiohttp and onnxruntime — four of the packages the sidecar is holding at
+#      specific versions, one of them (numpy==2.2.6) pinned against Smart App
+#      Control. A resolver that decides to move numpy breaks OCR, torch and
+#      transformers in the way ai-sidecar/requirements.txt spends forty lines
+#      explaining, and it breaks them in the sidecar, not here.
+#   2. The sidecar is a uvicorn service that must keep running while this is
+#      being developed. Installing into its venv mutates a live process's
+#      site-packages.
+#
+# Separate venv costs ~450 MB of disk and duplicates zero model weights.
+#
+# ## Smart App Control, and why several versions below are pinned
+#
+# Read ai-sidecar/requirements.txt first — it documents the failure mode. The
+# short version: SAC refuses to load an unsigned native binary it has not seen
+# before, so a freshly published wheel fails at import with "An Application
+# Control policy has blocked this file", often surfacing far from the package
+# that is actually blocked.
+#
+# The reputation is per-binary and machine-wide, not per-venv. That gives a
+# cheap safety rule for a *new* venv on an *old* box: resolve every native
+# wheel to a version the box has already loaded successfully. Thirteen of the
+# twenty-one native wheels below match ai-sidecar/.venv exactly without being
+# asked to. Four are pinned here to force the match:
+#
+#   numpy       2.2.6    the SAC pin from ai-sidecar/requirements.txt, restated
+#                        because pip would otherwise take the newest 2.x
+#   onnxruntime 1.30.0   Silero VAD's runtime. The sidecar's copy loads today
+#   propcache   0.5.2    resolver wanted 0.5.4; 0.5.2 is what the box knows
+#   yarl        1.24.5   resolver wanted 1.25.1; same reason
+#
+# Five native wheels are unavoidably new to this box — livekit, grpcio, jiter,
+# livekit-blingfire, livekit-local-inference, sounddevice — because nothing
+# else here has ever needed them. They are verified by `tools/verify_imports.py`
+# straight after install for exactly this reason.
+
+# The worker, the room SDK and the token minter.
+livekit-agents
+livekit-plugins-silero
+# Only used by tools/ to mint a developer token while the Nest endpoint that
+# will mint the real one is still being built. The worker itself authenticates
+# with LIVEKIT_API_KEY/SECRET through livekit-agents.
+livekit-api
+
+# livekit-plugins-turn-detector is deliberately NOT here. It is in the reference
+# implementation's requirements, and it loads a transformer end-of-turn model
+# into the worker process. This box has been running with 1-3 GB free; Silero
+# VAD endpointing at SILERO_MIN_SILENCE_MS is the tradeoff that fits.
+
+# Talking to the sidecar (STT/TTS) and to Nest (/turns).
+httpx
+
+# Reading hms_v2/.env.local. The values are never written to a log.
+python-dotenv
+
+# RSS for the health endpoint. The whole point of that endpoint on this box.
+psutil
+
+# ── Pinned against Smart App Control; see the note above ────────────────────
+numpy==2.2.6
+onnxruntime==1.30.0
+propcache==0.5.2
+yarl==1.24.5

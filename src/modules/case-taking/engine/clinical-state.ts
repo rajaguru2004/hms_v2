@@ -141,8 +141,31 @@ export interface ClinicalState {
   readonly sessionId: string;
   /** ISO-8601 or any caller-chosen stamp; never read from the clock here. */
   readonly startedAt?: string;
-  /** Interview language (§5), carried so the fallback phrasing layer can use it. */
+  /**
+   * The language the interview SPEAKS — what the questions are worded in, and
+   * what the voice reads out. Carried so the fallback phrasing layer can use
+   * it, which is the only thing that reads it.
+   *
+   * This is the session's `outputLanguage`, and it is `en` for every session
+   * today; see `DEFAULT_OUTPUT_LANGUAGE`. It is deliberately NOT the language
+   * the patient speaks — those were one field until the day a Tamil patient
+   * needed their speech recognised as Tamil and their questions worded in
+   * English, and one field could only give them both or neither.
+   */
   readonly language?: string;
+  /**
+   * The language the patient's own WORDS are in — what `derivePresence` is
+   * matching "no", "I don't know" and "yes" against.
+   *
+   * Separate from `language` above because the phrase lists are about the
+   * answer and the phrasebooks are about the question. A Tamil answer read
+   * against the English phrase lists is an unmatched answer, which the engine
+   * already reports honestly as `languageCovered: false` and
+   * `needsPatientConfirmation`. Feeding it the OUTPUT language instead would
+   * claim the Tamil was covered by English phrase lists, and a "no" that was
+   * never matched would become a recorded negative.
+   */
+  readonly inputLanguage?: string;
   readonly facts: Readonly<Record<string, Fact<FactValue>>>;
   /**
    * Questions that have been put to the patient but whose answer has not been
@@ -173,6 +196,7 @@ export function createClinicalState(init?: {
   sessionId?: string;
   startedAt?: string;
   language?: string;
+  inputLanguage?: string;
   facts?: Readonly<Record<string, Fact<FactValue>>>;
 }): ClinicalState {
   const facts: Record<string, Fact<FactValue>> = Object.create(null) as Record<
@@ -187,6 +211,7 @@ export function createClinicalState(init?: {
     sessionId: init?.sessionId ?? 'session',
     startedAt: init?.startedAt,
     language: init?.language,
+    inputLanguage: init?.inputLanguage,
     facts: Object.freeze(facts),
     pending: Object.freeze(Object.create(null) as Record<string, number>),
     revision: 0,

@@ -1,0 +1,83 @@
+# MediHive TTS — which engines run, in what order, against what on disk.
+#
+# Everything here is deployment truth rather than code: which provider to try
+# first, which device to put a model on, where the weights are. Changing a
+# language's engine should be an edit to this file and a restart, never a
+# patch.
+#
+# ## No absolute paths, ever
+#
+# Every path below is relative and is resolved against the directory this file
+# lives in (`base.resolve_dir`). An absolute path committed here would be
+# correct on exactly one machine and this service runs on three: a Windows venv
+# during development, `run.sh` on the demo box, and `/app` in the container.
+# Where the weights really live is the deployment's business, which is what the
+# environment variables are for — they win over anything set here.
+#
+# | Variable                     | Overrides                        |
+# | ---------------------------- | -------------------------------- |
+# | `MEDIHIVE_VOICE_DIR`         | `piper.voice_dir`                |
+# | `MEDIHIVE_TTS_REFERENCE_DIR` | `indicf5.reference_dir`          |
+# | `MEDIHIVE_TTS_DEVICE`        | `indicf5.device`                 |
+# | `MEDIHIVE_TTS_PROVIDERS`     | `providers.order` (comma-listed) |
+
+providers:
+  # Tried in order; the first one that says it supports the language speaks.
+  # IndicF5 first because it is the reason this package exists — it is the only
+  # engine here that has the eleven Indian languages at all. Piper is the
+  # fallback, and only ever for a language it has a real voice file for.
+  #
+  # Removing `indicf5` from this list is the one-line way to take it out of
+  # service on a box where it is misbehaving, without uninstalling anything:
+  # `MEDIHIVE_TTS_PROVIDERS=piper` does the same for one run.
+  order:
+    - indicf5
+    - piper
+
+indicf5:
+  # Pinned by name rather than tracked: this is the model the reference audio in
+  # voices/ was recorded against, and a silently newer one is a different voice.
+  model_id: ai4bharat/IndicF5
+
+  # `cpu`, deliberately, and the same argument stt.py makes: this box has 4 GB
+  # of VRAM and Ollama is holding it for gemma3:4b. A question that takes three
+  # seconds to generate instead of one costs a patient nothing; an interview
+  # that stalls because the language model got evicted mid-answer costs them
+  # the thread of what they were saying. Set `cuda` here (or
+  # MEDIHIVE_TTS_DEVICE=cuda) on a box with a GPU to spare.
+  device: cpu
+
+  # Reference recordings, one directory per language, relative to the package.
+  # These are small — a few seconds of speech each — so unlike the ~63 MB Piper
+  # voices they live with the code rather than with the deployment.
+  reference_dir: voices
+
+  # IndicF5 generates at 24 kHz. Stated rather than inferred because the WAV
+  # header is written from it, and a header that disagrees with the samples
+  # plays back at the wrong pitch rather than failing.
+  sample_rate: 24000
+
+  # The imports that have to resolve before this provider will claim a
+  # language. Probed with `importlib.util.find_spec`, so nothing heavy is
+  # loaded just to answer /health. In config rather than in code because
+  # IndicF5 is being installed alongside this and the shape of that install is
+  # not settled yet: if it lands as a package of its own, add its name here
+  # rather than editing indicf5.py.
+  requires:
+    - torch
+    - transformers
+
+piper:
+  # Up one level from this package to `ai-sidecar/voices`, which is where the
+  # two voices already on disk live and what MEDIHIVE_VOICE_DIR has always
+  # pointed at — in run.sh, run.ps1, the Dockerfile and
+  # docker-compose.demo.yml. Kept exactly so a running deployment does not have
+  # to move 123 MB of weights to pick up this change.
+  voice_dir: ../voices
+
+  # Normally empty: voices are found by scanning voice_dir for `<code>_<REGION>-*.onnx`,
+  # so dropping `ta_IN-something-medium.onnx` in makes Tamil available without
+  # a restart or an edit. This map is the escape hatch for a file named
+  # something else entirely. Keys are quoted because `no` (Norwegian) is a
+  # boolean in YAML 1.1 and `or` reads like one.
+  voices: {}

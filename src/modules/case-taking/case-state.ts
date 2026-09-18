@@ -3,6 +3,7 @@ import type { CaseFact, CaseTurn } from '@prisma/client';
 import {
   ClinicalState,
   applyFact,
+  clearPending,
   createClinicalState,
   isSectionKey,
   markAsked,
@@ -61,11 +62,19 @@ const logger = new Logger('CaseState');
 export interface StateSources {
   readonly sessionId: string;
   readonly startedAt?: Date | null;
+  /** The OUTPUT language: what the questions are worded in. */
   readonly language?: string | null;
+  /** The INPUT language: what the patient's own words are in. */
+  readonly inputLanguage?: string | null;
   /** Unsuperseded facts only, oldest first. */
   readonly facts: readonly CaseFact[];
   /** Every turn for the session, oldest first. */
   readonly turns: readonly CaseTurn[];
+  /**
+   * The clock, for presuming a long-running extraction lost. Injected so the
+   * rebuild stays a function of its inputs in tests; defaults to now.
+   */
+  readonly now?: Date;
 }
 
 /**
@@ -83,6 +92,7 @@ export function rebuildState(sources: StateSources): ClinicalState {
     sessionId: sources.sessionId,
     startedAt: sources.startedAt?.toISOString(),
     language: sources.language ?? undefined,
+    inputLanguage: sources.inputLanguage ?? undefined,
   });
 
   for (const row of sources.facts) {
@@ -99,7 +109,7 @@ export function rebuildState(sources: StateSources): ClinicalState {
     }
   }
 
-  return applyPending(state, sources.turns);
+  return applyPending(state, sources.turns, sources.now ?? new Date());
 }
 
 /**
@@ -110,25 +120,114 @@ export function rebuildState(sources: StateSources): ClinicalState {
  * after this loop counts questions asked rather than facts recorded — which is
  * the unit `expirePending` wants, since staleness here means "how many
  * questions ago", not "how many answers ago".
+ *
+ * ── Why every asked turn bumps the revision, answered or not
+ *
+ * That paragraph describes what this loop is *for*, and for a long time it did
+ * not describe what it did: an answered field took an early `continue`, so the
+ * revision counted only the questions still unanswered. The consequence was a
+ * deadlock, and a deterministic one rather than a race.
+ *
+ * `expirePending` releases a field once `revision - askedAt > 2`. With the
+ * revision counting only unanswered questions, the *last* thing asked always
+ * sits at `askedAt === revision` — age zero — and the one before it at age one,
+ * no matter how many questions have really been asked since. Fewer than four
+ * lost extractions could therefore never age out. An interview that lost two
+ * of them, then answered everything else, ended with two fields in flight, none
+ * askable and none expirable: `interviewStatus` returned `awaiting_extraction`
+ * forever and the patient sat on "we are finishing writing down your last
+ * answer" with no question to answer and no way forward.
+ *
+ * A real session reached exactly that state — `past_medical.thyroid_disorder`
+ * and `past_medical.epilepsy`, asked at turn sequences 78 and 80, still in
+ * flight after twenty-nine later questions had been asked and answered. Their
+ * ages were 1 and 0.
+ *
+ * So the revision is bumped for every question the log says was asked, and the
+ * pending entry is cleared afterwards for the ones that came back. The ordering
+ * matters: `markAsked` records `askedAt` against the bumped revision, so the
+ * clear has to come after it rather than in place of it.
  */
 function applyPending(
   state: ClinicalState,
   turns: readonly CaseTurn[],
+  now: Date,
 ): ClinicalState {
   let next = state;
+  /** When each still-pending field was last put to the patient. */
+  const askedAt = new Map<string, Date>();
+
   for (const turn of turns) {
     if (turn.role !== 'assistant' || !turn.fieldKey) continue;
-    // An answered field is not in flight, whatever the turn log says. This is
-    // what releases the question the patient has just answered, and it is why
-    // the facts are applied before this runs.
-    if (isAssessed(readFactSafely(next, turn.fieldKey))) continue;
     try {
       next = markAsked(next, turn.fieldKey);
     } catch {
       // A turn naming a field path the registry no longer parses. It cannot
-      // block a question that does not exist, so there is nothing to do.
+      // block a question that does not exist, so there is nothing to do — and
+      // it must not advance the revision either, or a registry rename would
+      // start ageing out live extractions.
       continue;
     }
+    askedAt.set(turn.fieldKey, turn.createdAt);
+    // An answered field is not in flight, whatever the turn log says. This is
+    // what releases the question the patient has just answered, and it is why
+    // the facts are applied before this runs. The revision bump above stands:
+    // the question was still asked, and staleness is counted in questions.
+    if (isAssessed(readFactSafely(next, turn.fieldKey))) {
+      next = clearPending(next, turn.fieldKey);
+      askedAt.delete(turn.fieldKey);
+    }
+  }
+
+  return releaseLostExtractions(next, askedAt, now);
+}
+
+/**
+ * How long an extraction may be in flight before the answer is presumed lost.
+ *
+ * Above `AI_TIMEOUT_MS` (90s in the demo stack) by a margin, because releasing a
+ * field whose extraction is still legitimately running would ask the patient a
+ * question they are in the middle of answering.
+ */
+const LOST_EXTRACTION_AFTER_MS = 120_000;
+
+/**
+ * The backstop for the one case `expirePending` cannot see.
+ *
+ * `expirePending` measures staleness in questions asked, which is the right unit
+ * while the interview is moving: a lost extraction is released two questions
+ * later and the patient never notices. It has a blind spot at the end, and the
+ * blind spot is total. When every remaining field is in flight there is nothing
+ * askable, so no further question can be asked, so the revision can never
+ * advance, so the age of those fields is frozen wherever it stood. They cannot
+ * expire, `interviewStatus` answers `awaiting_extraction` on every load, and the
+ * interview is over in the only sense that matters — the patient is looking at a
+ * screen with no question on it and no way to get one.
+ *
+ * That is not hypothetical. It is what a restart of the API does to whatever was
+ * being extracted at the time: the background job lives in the process, the
+ * process goes away, and nothing is left to clear the pending entry or to notice
+ * that nobody will.
+ *
+ * So the wall clock is consulted too. It is a worse unit — it needs a clock in
+ * what is otherwise a pure rebuild, and it is why `now` is a parameter rather
+ * than a call to `Date.now()` in here — but it is the only one that keeps
+ * running when the interview has stopped.
+ */
+function releaseLostExtractions(
+  state: ClinicalState,
+  askedAt: ReadonlyMap<string, Date>,
+  now: Date,
+): ClinicalState {
+  let next = state;
+  for (const [fieldPath, at] of askedAt) {
+    if (now.getTime() - at.getTime() <= LOST_EXTRACTION_AFTER_MS) continue;
+    logger.warn(
+      `releasing ${fieldPath}: asked ${Math.round(
+        (now.getTime() - at.getTime()) / 1000,
+      )}s ago and still in flight; presuming the extraction was lost`,
+    );
+    next = clearPending(next, fieldPath);
   }
   return next;
 }

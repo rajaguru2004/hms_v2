@@ -33,6 +33,8 @@ import {
   SubmitTurnDto,
   TranscribeDto,
 } from './dto/case-taking.dto';
+import { LanguageOptionDto } from './dto/language.dto';
+import { VoiceGrantDto, VoiceTokenDto } from './dto/voice-token.dto';
 import { ReviewQueryDto } from './dto/review-query.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -76,6 +78,88 @@ import { ErrorCodes } from '../../common/exceptions/error-codes';
 @Controller('case-taking')
 export class CaseTakingController {
   constructor(private readonly caseTakingService: CaseTakingService) {}
+
+  /**
+   * The one route here that is not about one patient's interview, and the only
+   * one that does not call `self()`.
+   *
+   * A staff caller reaches it — `@PatientScope()` is undefined for them and
+   * that is fine, because there is no patient record in the answer. The list is
+   * the same twelve rows for everybody; it is behind the token only because the
+   * whole controller is, and a language picker is not worth a second auth
+   * story.
+   */
+  @Get('languages')
+  @Permissions(Permission.CASE_TAKING_READ)
+  @ApiOperation({
+    summary: 'The languages an interview can be taken in',
+    description:
+      'The single source of truth for the picker, so the client does not keep ' +
+      'a second copy that drifts. A row is an INPUT language — a language the ' +
+      'patient may speak — and `stt` is the flag that decides whether it can ' +
+      'be picked at all: Odia is false, because no Odia speech model exists ' +
+      'anywhere, and an Odia interview is read aloud and typed. Every other ' +
+      'row is fully usable, because what the patient READS AND HEARS is ' +
+      '`outputLanguage` (`en` today) and not the language they picked. `tts` ' +
+      "and `questions` describe what exists for that row's own language — " +
+      'coverage facts, not what this patient gets — and `outputTts` is the ' +
+      'flag a speaker button belongs on. The flags are read from the speech ' +
+      'service itself where it can be reached, so they describe this box ' +
+      'rather than an ideal one.',
+  })
+  @ApiResponse({ status: 200, type: LanguageOptionDto, isArray: true })
+  async languages(): Promise<LanguageOptionDto[]> {
+    const catalogue = await this.caseTakingService.languages();
+
+    // The rows, not the catalogue object around them.
+    //
+    // This route answers a collection, and the client reads collections the way
+    // every other one here is read: `data` is the array itself. Returning
+    // `{default, source, languages}` put an object where the array belonged, and
+    // the failure was silent rather than loud — the client's envelope wraps a
+    // lone object as a one-element list, that object has no `code`, the row is
+    // discarded as empty, and the picker quietly falls back to the catalogue it
+    // shipped with. A language the sidecar reports as unavailable would then
+    // still be offered, which is the whole thing this endpoint exists to stop.
+    //
+    // `default` and `source` are diagnostics, not payload: the default is `en`
+    // on both sides already, and which source answered is a question for the
+    // sidecar's own `/health`, which reports it in more detail than a flag here
+    // could.
+    return catalogue.languages;
+  }
+
+  /**
+   * A pass into this patient's own live voice room.
+   *
+   * Patient-scoped like every other route here. The room name and the
+   * participant identity are derived server-side from the session, never taken
+   * from the request — a client that could name its own room could name
+   * somebody else's.
+   *
+   * A site with no media server answers this with a written refusal, and a
+   * patient there is meant to notice nothing: the microphone still records,
+   * `/stt` still answers, and the tiles and the keyboard were never
+   * conditional on any of it.
+   */
+  @Post('voice/token')
+  @Permissions(Permission.CASE_TAKING_UPDATE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'A short-lived pass into the live voice room',
+    description:
+      'Mints a LiveKit room token scoped to the caller’s own interview. The ' +
+      'API key and secret never leave the server; what the client receives is ' +
+      'one narrowly-granted, short-lived credential for one room.',
+  })
+  @ApiResponse({ status: 200, type: VoiceGrantDto })
+  async voiceToken(
+    @Body() dto: VoiceTokenDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @PatientScope() patientId: string | undefined,
+  ): Promise<VoiceGrantDto> {
+    return this.caseTakingService.voiceToken(dto, user, self(patientId));
+  }
 
   @Post('sessions')
   @Permissions(Permission.CASE_TAKING_CREATE)
@@ -265,6 +349,7 @@ export class CaseTakingController {
       properties: {
         file: { type: 'string', format: 'binary' },
         language: { type: 'string' },
+        sessionId: { type: 'string' },
       },
     },
   })
@@ -273,13 +358,20 @@ export class CaseTakingController {
     description:
       'A refusal here is a 400 with a written sentence, not a 500: voice is ' +
       'never the only way to answer a question, so the client falls back to ' +
-      'the keyboard.',
+      "the keyboard. Send `sessionId` and the interview's own language is " +
+      'used rather than whatever the phone put in `language`.',
   })
   async transcribe(
     @UploadedFile() file: Express.Multer.File,
     @Body() dto: TranscribeDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @PatientScope() patientId: string | undefined,
   ): Promise<Record<string, unknown>> {
-    return this.caseTakingService.transcribe(file, dto.language);
+    // `self()` is deliberately not called: this route has always been reachable
+    // without a patient scope and still is. The scope is only needed to look a
+    // session up, and the service refuses there — where the refusal can say
+    // what it was refusing.
+    return this.caseTakingService.transcribe(file, dto, user, patientId);
   }
 
   /**
@@ -292,10 +384,21 @@ export class CaseTakingController {
   @Post('tts')
   @Permissions(Permission.CASE_TAKING_READ)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Read a question aloud' })
+  @ApiOperation({
+    summary: 'Read a question aloud',
+    description:
+      "Send `sessionId` and the interview's own language is used rather than " +
+      'whatever the phone put in `language`. Without it the body decides, ' +
+      'which is what the consent screen and the language picker need.',
+  })
   @ApiResponse({ status: 200, description: 'audio/wav' })
-  async speak(@Body() dto: SpeakDto, @Res() res: Response): Promise<void> {
-    const audio = await this.caseTakingService.speak(dto.text, dto.language);
+  async speak(
+    @Body() dto: SpeakDto,
+    @CurrentUser() user: AuthenticatedUser,
+    @PatientScope() patientId: string | undefined,
+    @Res() res: Response,
+  ): Promise<void> {
+    const audio = await this.caseTakingService.speak(dto, user, patientId);
     res.setHeader('Content-Type', 'audio/wav');
     res.setHeader('Content-Length', audio.length);
     res.send(audio);

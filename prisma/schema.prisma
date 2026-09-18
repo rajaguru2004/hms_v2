@@ -2037,10 +2037,28 @@ model CaseSession {
 
   kind String @default("new_consultation") // new_consultation, follow_up
 
-  /// Carried end to end — chosen by the patient, sent on every model call,
-  /// stored on the case. Only `en` is offered today; the field is real from the
-  /// start so turning on more is a value change and not a migration.
-  language String @default("en")
+  /// The interview has TWO languages, because it has two directions.
+  ///
+  /// `inputLanguage` is what the patient SPEAKS: the code the recogniser is
+  /// told, so a Tamil answer is transcribed as Tamil rather than guessed at.
+  /// `outputLanguage` is what the patient READS AND HEARS: the wording of the
+  /// questions and the voice that reads them. They are separate columns because
+  /// they are separate decisions — the patient makes the first one, the product
+  /// makes the second — and one column forced them to be the same answer.
+  ///
+  /// `outputLanguage` is `en` for every session today. That is
+  /// `DEFAULT_OUTPUT_LANGUAGE` in `language.constants.ts`, where the reasoning
+  /// is written down; answering in the patient's language again is a change to
+  /// what this column is set to, not a migration.
+  ///
+  /// `language` is RETAINED, not replaced: it holds the same value as
+  /// `inputLanguage` and is what every reader written before the split — the
+  /// mobile client, the demo seed, an exported case — still reads. Nothing
+  /// routes off it any more. Dropping it would have been a silent breakage in
+  /// clients this schema cannot see.
+  language       String @default("en")
+  inputLanguage  String @default("en")
+  outputLanguage String @default("en")
 
   status String @default("in_progress") // in_progress, review, submitted, abandoned
 
