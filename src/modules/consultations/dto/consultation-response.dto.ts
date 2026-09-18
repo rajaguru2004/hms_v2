@@ -1,5 +1,21 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
+/**
+ * The nested shapes a consultation carries are prefixed `Consultation*`.
+ *
+ * Swagger keys `components.schemas` by class name alone, so the unprefixed
+ * names collided with the full DTOs in laboratory/, pharmacy/ and radiology/ —
+ * which are different schemas, not copies: what is embedded in a consultation
+ * is the summary a clinician reads in context (a lab order is a number, a
+ * status and its results), not the whole record. On a collision Swagger keeps
+ * one definition and logs `Duplicate DTO detected`, so half the documented
+ * shapes were the wrong ones, and the warning says it will be a hard error in
+ * the next major.
+ *
+ * Only the OpenAPI schema names change. No response body does: class names
+ * are never serialized.
+ */
+
 export class DoctorMinimalResponseDto {
   @ApiProperty()
   id: string;
@@ -40,7 +56,7 @@ export class PatientMinimalResponseDto {
   bloodGroup?: string;
 }
 
-export class PrescriptionResponseDto {
+export class ConsultationPrescriptionResponseDto {
   @ApiProperty()
   id: string;
 
@@ -90,7 +106,7 @@ export class PrescriptionResponseDto {
   updatedAt: Date;
 }
 
-export class LabResultResponseDto {
+export class ConsultationLabResultResponseDto {
   @ApiProperty()
   id: string;
 
@@ -107,7 +123,7 @@ export class LabResultResponseDto {
   test?: Record<string, any>;
 }
 
-export class LabOrderResponseDto {
+export class ConsultationLabOrderResponseDto {
   @ApiProperty()
   id: string;
 
@@ -117,11 +133,11 @@ export class LabOrderResponseDto {
   @ApiProperty()
   status: string;
 
-  @ApiPropertyOptional({ type: [LabResultResponseDto] })
-  results?: LabResultResponseDto[];
+  @ApiPropertyOptional({ type: [ConsultationLabResultResponseDto] })
+  results?: ConsultationLabResultResponseDto[];
 }
 
-export class RadiologyOrderResponseDto {
+export class ConsultationRadiologyOrderResponseDto {
   @ApiProperty()
   id: string;
 
@@ -246,12 +262,12 @@ export class ConsultationResponseDto {
   @ApiPropertyOptional({ type: DoctorMinimalResponseDto })
   doctor?: DoctorMinimalResponseDto;
 
-  @ApiPropertyOptional({ type: [PrescriptionResponseDto] })
-  prescriptions?: PrescriptionResponseDto[];
+  @ApiPropertyOptional({ type: [ConsultationPrescriptionResponseDto] })
+  prescriptions?: ConsultationPrescriptionResponseDto[];
 
-  @ApiPropertyOptional({ type: [LabOrderResponseDto] })
-  labOrders?: LabOrderResponseDto[];
+  @ApiPropertyOptional({ type: [ConsultationLabOrderResponseDto] })
+  labOrders?: ConsultationLabOrderResponseDto[];
 
-  @ApiPropertyOptional({ type: [RadiologyOrderResponseDto] })
-  radiologyOrders?: RadiologyOrderResponseDto[];
+  @ApiPropertyOptional({ type: [ConsultationRadiologyOrderResponseDto] })
+  radiologyOrders?: ConsultationRadiologyOrderResponseDto[];
 }

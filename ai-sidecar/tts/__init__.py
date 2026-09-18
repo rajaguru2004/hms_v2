@@ -41,7 +41,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .base import TTSProvider, UnsupportedLanguage
 from .base import resolve_dir as _resolve_dir
@@ -275,6 +275,55 @@ def speak_with_provider(text: str, language: str = "en") -> tuple[bytes, str]:
     raise UnsupportedLanguage("chain", code)
 
 
+def stream_with_provider(
+    text: str, language: str = "en"
+) -> tuple[Iterator[bytes], str, int]:
+    """(PCM chunks, provider id, sample rate) — the streaming half of [speak].
+
+    Same routing as [speak_with_provider] and the same refusals: the chain is
+    asked in order, the first provider that supports the language streams, and a
+    language nobody supports raises rather than being served by somebody else's
+    voice.
+
+    The provider id and the sample rate are resolved and returned **before** the
+    first chunk, because the HTTP layer has to put both in response headers and
+    headers go out before the body. That is also why the fall-forward story is
+    weaker here than in [speak_with_provider]: a provider that claims a language
+    and then throws on its *first* chunk still falls through to the next
+    provider for the same language, because nothing has been sent yet — but one
+    that throws halfway through cannot, since a 200 with half a Hindi question
+    in it has already left. That failure ends the stream, and the worker treats
+    a short stream the same way it treats a barge-in: it stops and listens.
+
+    The generator is not started here. `provider.synthesize_stream` is a Python
+    generator function, so calling it does no work; the first `next()` is the
+    first synthesis, and that happens in the threadpool the route iterates it
+    from rather than on the event loop.
+    """
+    code = normalise(language)
+    if not is_supported(code):
+        raise UnsupportedLanguage("chain", code)
+
+    failure: Exception | None = None
+    for provider in providers():
+        if not provider.supports(code):
+            continue
+        try:
+            rate = provider.sample_rate(code)
+            return provider.synthesize_stream(text, code), provider.id, int(rate)
+        except Exception as error:  # noqa: BLE001 — the next provider is the handler
+            failure = error
+            logger.exception(
+                "tts provider %s could not start a stream for %s; trying the rest",
+                provider.id,
+                code,
+            )
+
+    if failure is not None:
+        raise failure
+    raise UnsupportedLanguage("chain", code)
+
+
 def voice_path(language: str) -> Path | None:
     """The Piper voice file for this language, or None if there is not one.
 
@@ -338,5 +387,6 @@ __all__ = [
     "providers",
     "speak",
     "speak_with_provider",
+    "stream_with_provider",
     "voice_path",
 ]

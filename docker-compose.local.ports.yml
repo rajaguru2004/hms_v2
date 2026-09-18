@@ -1,0 +1,37 @@
+# Untracked host-port override for docker-compose.local.yml on this machine.
+#
+# docker-compose.local.yml publishes the canonical ports — 5432 for Postgres,
+# 9000/9001 for MinIO — and on this box all three are already held by unrelated
+# containers (`postgres`, `tnroa-minio`). Docker does not merge a conflicting
+# mapping, it fails the `up`; and when the stale container is the one holding
+# the port, the API connects to *somebody else's* Postgres and dies with
+# `password authentication failed for user "db_user"` — a wrong-server error
+# that reads like a wrong-password one.
+#
+# So the host side moves and the container side does not: nothing inside the
+# compose network, and nothing in the images, needs to know.
+#
+# `ports:` is carried by `!override`. Compose *appends* list fields across -f
+# files by default, so without it the canonical 5432/9000/9001 mappings survive
+# alongside the new ones and the `up` fails on the very conflict this file
+# exists to avoid.
+#
+#   Postgres   5442 -> 5432     (`.env.local` DATABASE_URL names 5442)
+#   MinIO API  9010 -> 9000     (`.env.local` S3_ENDPOINT names 9010)
+#   MinIO UI   9011 -> 9001     console, browser only
+#
+# Redis is not remapped: 6379 is held by this stack's own hms_v2_redis_local.
+#
+# `npm run dev` (scripts/dev.mjs) adds this file to every compose invocation
+# when it exists. A bare `docker compose -f docker-compose.local.yml up` does
+# not, and will fight the other projects' containers for the canonical ports.
+
+services:
+  postgres:
+    ports: !override
+      - '5442:5432'
+
+  minio:
+    ports: !override
+      - '9010:9000'
+      - '9011:9001'

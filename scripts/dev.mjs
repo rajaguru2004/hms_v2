@@ -461,15 +461,33 @@ async function ensureVoiceAgent(cfg) {
     return true;
   }
 
+  // A venv's interpreter is at Scripts\python.exe on Windows and bin/python
+  // everywhere else - the same split ensureSidecar() already makes. Checking
+  // only the POSIX path meant this box, which has run.ps1 and installs to
+  // .venv\Scripts, was told it had no venv however many times it made one,
+  // and was then handed a `.venv/bin/pip` line that cannot work here.
   const runner = path.join(agentDir, 'run.sh');
-  const venv = path.join(agentDir, '.venv', 'bin', 'python');
+  const isWin = process.platform === 'win32';
+  const venv = isWin
+    ? path.join(agentDir, '.venv', 'Scripts', 'python.exe')
+    : path.join(agentDir, '.venv', 'bin', 'python');
   if (!existsSync(venv)) {
     warn('voice-agent has no venv; live conversation will not start. Create it with:');
-    warn('  cd voice-agent && python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt');
+    if (isWin) {
+      warn('  cd voice-agent');
+      warn('  & "$env:LOCALAPPDATA\\Programs\\Python\\Python312\\python.exe" -m venv .venv');
+      warn('  .\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt');
+      warn('  (not into ai-sidecar\\.venv - voice-agent/requirements.txt says why)');
+    } else {
+      warn('  cd voice-agent && python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt');
+    }
     return false;
   }
-  if (process.platform === 'win32' || !existsSync(runner)) {
-    warn(`start it yourself: ${process.platform === 'win32' ? 'voice-agent\\run.ps1' : runner}`);
+  // run.sh is bash and drives the POSIX venv; Windows has run.ps1, which this
+  // script does not spawn because the worker wants a console it can be stopped
+  // from.
+  if (isWin || !existsSync(runner)) {
+    warn(`start it yourself: ${isWin ? 'voice-agent\\run.ps1' : runner}`);
     return false;
   }
 

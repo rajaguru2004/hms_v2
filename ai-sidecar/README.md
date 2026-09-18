@@ -75,8 +75,51 @@ GET  /health  → {ollama, ollamaModels[], stt, sttLanguages[], tts, ttsLanguage
                  ttsProviders[], languages{}, ocr}
 POST /stt     multipart file + language?  → {text, confidence, language, segments[], durationMs}
 POST /tts     {text, language}            → audio/wav + X-TTS-Provider
+POST /tts/stream {text, language}         → audio/L16 chunked + X-TTS-Sample-Rate
 POST /ocr     multipart file (image|pdf)  → {pageCount, pages:[{text, meanConfidence, blocks[]}]}
 ```
+
+### `/tts` and `/tts/stream` are the same voice for two different callers
+
+`/tts` is unchanged and returns one complete WAV. The phone needs that: it is
+handed bytes and hands them to a decoder, so it needs a header and a length.
+
+`/tts/stream` returns **raw little-endian 16-bit mono PCM, chunked**, for the
+LiveKit worker, which is playing the audio live and will re-frame whatever
+arrives to 20 ms anyway. Both take the same body, route by language through the
+same provider chain, and give the same three refusals — 400 for nothing to say,
+400 over `MAX_SPEAK_CHARS`, 503 for a language no engine here can speak. A
+caller must not be able to reach a voice through one that the other would refuse.
+
+Piper streams for real (`PiperVoice.synthesize` is a per-sentence generator).
+IndicF5 has no incremental API, so it is chunked a sentence at a time: not true
+streaming, but the first sentence plays while the second is still generating, and
+abandoning the generator stops the next sentence being made at all. That is what
+makes a barge-in cancel the synthesiser and not just the speaker.
+
+The rate has to be known before the first chunk, since it goes in a header — so
+`TTSProvider.sample_rate(language)` answers it separately. Piper reads it off the
+loaded voice (22050 Hz for the medium voices on disk); IndicF5 states its 24000.
+
+### One Piper synthesis at a time, process-wide
+
+Both routes now run their blocking work in a threadpool rather than on the event
+loop, so a Whisper decode can no longer stall a live call. That made two Piper
+syntheses able to overlap for the first time, and Piper phonemises through
+espeak-ng — a C library that keeps the **current voice in a process-wide
+global**. Overlapping calls share one voice setting, the loser gets its text
+phonemised by the other one's language, and Devanagari handed to `en-us`
+produces no phonemes, no audio, and the same misleading
+`wave.Error: # channels not specified` as a truncated voice file.
+
+`tts/piper.py` therefore holds `_espeak_lock` across the whole of `synthesize`
+and `synthesize_stream`. Measured: 16 interleaved `/tts` and `/tts/stream`
+requests alternating English and Hindi, 0 failures. Before the lock, an English
+call followed immediately by a Hindi one failed reliably.
+
+A worker per language is the shape that scales; this is one uvicorn holding one
+Whisper on a 16 GB box, so serialising costs a queue on the rare overlap and the
+alternative costs a second copy of every model.
 
 `/health`'s `languages` is one row per configured language and is the only
 place that answers "why is Tamil unavailable" rather than just "is it":
@@ -130,3 +173,100 @@ exception`.
 Every path in `tts/config.yaml` is relative and resolved against the package
 directory; the variables above are how a deployment points at somewhere else.
 No absolute path is committed anywhere in it.
+
+### IndicF5 on Windows needs two things the container gets for free
+
+The eleven Indic languages come from `ai4bharat/IndicF5`, and on a Windows venv
+three separate things have to be true before it will speak. Each fails in a way
+that does not name the cause.
+
+**1. A Hugging Face token that is actually authorised.** The repo is
+`gated: auto`, so acceptance is automatic _on request_ — but somebody has to
+request it, while signed in, at <https://huggingface.co/ai4bharat/IndicF5>. And
+a **fine-grained** token additionally needs the _"Read access to contents of all
+public gated repos you can access"_ permission; without it the token
+authenticates and the fetch still 403s. The two failures are distinguishable:
+`401` is no token, `403` is a token that is not authorised.
+
+`run.ps1` reads `HF_TOKEN` from `hms_v2/.env.local` and says what it found.
+
+**2. FFmpeg's shared libraries.** `torchaudio` 2.11 removed its own backends and
+routes every `load()` through TorchCodec, which is a wrapper over FFmpeg's
+`av*.dll`. The Dockerfile installs `ffmpeg`, so Linux never sees this. On
+Windows, note that **PATH is not enough** — since Python 3.8 the interpreter
+does not search PATH for an extension module's dependencies, so a directory of
+DLLs on PATH is invisible to the DLL that needs them. The directory is passed by
+name instead and `tts/indicf5.py` registers it with `os.add_dll_directory`.
+
+A **shared** build is required; `winget install Gyan.FFmpeg` is static and has no
+DLLs at all. One-time fetch:
+
+```powershell
+$dst = 'C:\Users\user\.medihive\ffmpeg'
+New-Item -ItemType Directory -Force $dst | Out-Null
+$zip = "$env:TEMP\ffmpeg-shared.zip"
+Invoke-WebRequest -UseBasicParsing -OutFile $zip `
+  'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-lgpl-shared-8.1.zip'
+Expand-Archive $zip "$env:TEMP\ffmpeg-extract" -Force
+Get-ChildItem "$env:TEMP\ffmpeg-extract" -Recurse -Filter *.dll |
+  ForEach-Object { Copy-Item $_.FullName $dst -Force }
+```
+
+`run.ps1` picks that path up automatically; `MEDIHIVE_FFMPEG_DIR` overrides it.
+Any major from 4 to 9 works — `torchcodec` ships a `libtorchcodec_core<N>.dll`
+per major and loads whichever matches what it finds.
+
+**3. `torchcodec` itself**, which is not in `requirements.txt` for the same
+reason torch is not:
+
+```
+.venv\Scripts\pip install torchcodec
+```
+
+### Do not keep the voices in OneDrive
+
+On this machine the repository lives under `C:\Users\user\OneDrive\...`, and
+OneDrive Files On-Demand turns a file it has not seen you use into a **cloud
+placeholder**: a reparse point with `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`
+(`0x80000`) and no data behind it. Reading it from Windows triggers a recall and
+you never notice. Reading it from inside a Docker bind mount does not reliably
+trigger one, and the container gets a short file.
+
+A truncated `.onnx` does not fail to load. onnxruntime builds a session from it,
+`PiperVoice.load` returns, `supports()` says yes, `/health` reports the language
+as available — and then every synthesis produces **zero samples**, which
+surfaces as
+
+    wave.Error: # channels not specified
+
+and reaches the patient as `503 This voice is unavailable.` on a box where the
+voice file is right there on disk. It comes and goes, because opening the file
+from Windows rehydrates it and OneDrive later evicts it again. The same
+placeholder mechanism breaks `docker build` in this tree, with
+`transferring dockerfile: 31B` for a 4 KB Dockerfile.
+
+So the weights live outside the synced tree and are mounted from there:
+
+```powershell
+# once
+New-Item -ItemType Directory -Force C:\Users\user\.medihive\voices
+Get-ChildItem .\voices -File | ForEach-Object {
+  [System.IO.File]::WriteAllBytes(
+    "C:\Users\user\.medihive\voices\$($_.Name)",
+    [System.IO.File]::ReadAllBytes($_.FullName))   # forces a full recall
+}
+```
+
+```
+-v "C:\Users\user\.medihive\voices:/app/voices:ro"     # container
+$env:MEDIHIVE_VOICE_DIR = 'C:\Users\user\.medihive\voices'   # venv
+```
+
+Check a suspect deployment by size from inside the container, not from Windows:
+
+```sh
+docker exec medihive_sidecar_dev python -c \
+  "import os;[print(f, os.path.getsize('/app/voices/'+f)) for f in os.listdir('/app/voices')]"
+```
+
+A medium voice is ~63 MB. Anything much smaller is a placeholder.

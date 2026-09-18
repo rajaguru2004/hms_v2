@@ -96,6 +96,17 @@ class Settings:
     interim_every: float
     interim_min_speech: float
 
+    # ── Streaming synthesis ─────────────────────────────────────────────────
+    tts_streaming: bool
+
+    # ── Gemma, for wording only ─────────────────────────────────────────────
+    llm_phrasing: bool
+    ollama_url: str
+    ollama_model: str
+    llm_timeout: float
+    llm_first_token_timeout: float
+    llm_max_chars: int
+
     # ── Session ─────────────────────────────────────────────────────────────
     language: str
     session_id: str
@@ -189,6 +200,45 @@ class Settings:
             # is almost every clinical answer. At 1.5 it lands ~1.6-1.9 s and
             # covers most of them. A cancelled interim now costs ~90-140 ms.
             interim_min_speech=_float("MEDIHIVE_INTERIM_MIN_SPEECH_SEC", 1.5),
+            # `/tts/stream` rather than `/tts`. On by default: it is the same
+            # audio from the same provider, cut into pieces, and it is what
+            # makes a barge-in stop the synthesiser as well as the speaker.
+            # Set to 0 to fall back to whole-WAV synthesis — which is worth
+            # doing exactly once, to find out whether a stutter is the stream
+            # or the box.
+            tts_streaming=_bool("MEDIHIVE_TTS_STREAMING", True),
+            # OFF by default, and this is a clinical decision rather than a
+            # performance one.
+            #
+            # With it on, gemma3:4b rewords each question before it is spoken.
+            # The engine still chooses the field, the phrasebook still supplies
+            # the meaning, red flags still fire on the engine's own text, and a
+            # model failure falls back to the reviewed wording — see llm.py. But
+            # a fluent rewording that asks something subtly different is not
+            # detectable by any guard in that file, and nobody has reviewed it.
+            #
+            # So: on for a demo, on for a box where somebody is listening to
+            # every question, and off by default in front of a patient until a
+            # clinician has signed the phrasing path off the way they sign a
+            # phrasebook off.
+            llm_phrasing=_bool("MEDIHIVE_LLM_PHRASING", False),
+            # 8080 on this deployment, not Ollama's stock 11434. Same value the
+            # sidecar reads, and the same trap: a default that points at 11434
+            # produces a worker that starts cleanly and silently never phrases.
+            ollama_url=_str("OLLAMA_URL", "http://127.0.0.1:8080").rstrip("/"),
+            ollama_model=_str("MEDIHIVE_LLM_MODEL", "gemma3:4b"),
+            # The whole generation. Long, because it is not the thing the
+            # patient waits on — the first-token deadline below is.
+            llm_timeout=_float("MEDIHIVE_LLM_TIMEOUT", 20.0),
+            # What the patient actually waits on, and the number to tune.
+            # gemma3:4b warm answers in a few hundred milliseconds; cold it
+            # takes ~31 s to load, which this is designed to give up on rather
+            # than sit through. Every give-up is a question asked in the
+            # engine's own words, which is a complete question.
+            llm_first_token_timeout=_float("MEDIHIVE_LLM_FIRST_TOKEN_SEC", 2.5),
+            # About two spoken sentences. A reworded clinical question that is
+            # longer than this is not a rewording.
+            llm_max_chars=_int("MEDIHIVE_LLM_MAX_CHARS", 320),
             language=_str("MEDIHIVE_SESSION_LANGUAGE", "en"),
             session_id=_str("MEDIHIVE_SESSION_ID", ""),
             room_prefix=_str("MEDIHIVE_ROOM_PREFIX", "case-"),
@@ -240,6 +290,12 @@ def describe(settings: Settings) -> list[tuple[str, str]]:
         ("BARGE_MIN_SILENCE_MS", f"{s.barge_min_silence * 1000:.0f}"),
         ("MEDIHIVE_INTERIM_TRANSCRIPTS", "1" if s.interim_enabled else "0"),
         ("MEDIHIVE_INTERIM_EVERY_SEC", f"{s.interim_every}"),
+        ("MEDIHIVE_TTS_STREAMING", "1" if s.tts_streaming else "0"),
+        ("MEDIHIVE_LLM_PHRASING", "1" if s.llm_phrasing else "0"),
+        ("OLLAMA_URL", s.ollama_url),
+        ("MEDIHIVE_LLM_MODEL", s.ollama_model),
+        ("MEDIHIVE_LLM_FIRST_TOKEN_SEC", f"{s.llm_first_token_timeout}"),
+        ("MEDIHIVE_LLM_MAX_CHARS", str(s.llm_max_chars)),
         ("AGENT_HEALTH_PORT", str(s.health_port)),
         ("MEDIHIVE_FRAME_MS", str(s.frame_ms)),
     ]

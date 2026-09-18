@@ -1128,6 +1128,217 @@ describe('CaseTakingService', () => {
         language: 'ta',
       });
     });
+
+    /**
+     * The other side of the gate.
+     *
+     * Every test above asserts the shipped default: the phrasebooks have
+     * `reviewedAt: null`, `phrasebookFor` therefore returns undefined, and
+     * `resolveOutputLanguage` falls back to English for every language. These
+     * assert what happens once a deployment opens the gate — which is what
+     * `MEDIHIVE_ALLOW_UNREVIEWED_PHRASEBOOKS` does for a demo and what a real
+     * `reviewedAt` date does for a clinician sign-off.
+     *
+     * They are the tests that would catch the routing being wired one way (the
+     * column written in Tamil) and not the other (the questions still English),
+     * which is the failure mode that would put `outputLanguage: 'ta'` on a
+     * record whose every question was in English.
+     */
+    describe('with the phrasebook review gate open', () => {
+      const FLAG = 'MEDIHIVE_ALLOW_UNREVIEWED_PHRASEBOOKS';
+      let previous: string | undefined;
+
+      /**
+       * A health reply that says which languages can be read aloud here, and
+       * nothing else this test cares about. Separate from `healthWith` in the
+       * catalogue block below because that one populates `languages` and leaves
+       * `ttsLanguages` empty, which is the opposite of what these need.
+       */
+      function healthReporting(
+        ttsLanguages: string[],
+      ): Awaited<ReturnType<SidecarClient['health']>> {
+        return {
+          ollama: true,
+          ollamaModels: [],
+          stt: true,
+          tts: true,
+          ocr: true,
+          sttLanguages: [],
+          ttsLanguages,
+          ttsProviders: [],
+          languages: {},
+        };
+      }
+
+      beforeEach(() => {
+        previous = process.env[FLAG];
+        process.env[FLAG] = 'true';
+      });
+
+      afterEach(() => {
+        if (previous === undefined) delete process.env[FLAG];
+        else process.env[FLAG] = previous;
+      });
+
+      it('answers a Tamil session in Tamil', async () => {
+        const h = harness();
+
+        await h.service.startOrResume({ language: 'ta' }, USER, PATIENT_ID);
+
+        expect(h.repo.create.mock.calls[0][0]).toMatchObject({
+          inputLanguage: 'ta',
+          outputLanguage: 'ta',
+        });
+      });
+
+      it('answers a Hindi session in Hindi', async () => {
+        const h = harness();
+
+        await h.service.startOrResume({ language: 'hi' }, USER, PATIENT_ID);
+
+        expect(h.repo.create.mock.calls[0][0]).toMatchObject({
+          inputLanguage: 'hi',
+          outputLanguage: 'hi',
+        });
+      });
+
+      /**
+       * The gate is per language, not global. Malayalam has no phrasebook at
+       * all, so opening the gate changes nothing for it — and it must not,
+       * because the alternative is a session whose column claims `ml` and
+       * whose every question is English.
+       */
+      it('still answers in English for a language with no phrasebook', async () => {
+        const h = harness();
+
+        await h.service.startOrResume({ language: 'ml' }, USER, PATIENT_ID);
+
+        expect(h.repo.create.mock.calls[0][0]).toMatchObject({
+          inputLanguage: 'ml',
+          outputLanguage: 'en',
+        });
+      });
+
+      /**
+       * The second gate, and the incident it exists for.
+       *
+       * On the demo box IndicF5 cannot load — `ai4bharat/IndicF5` is gated and
+       * no Hugging Face token is set — so `/health.ttsLanguages` is
+       * `['en','hi']`. Without this gate a Tamil session stored
+       * `outputLanguage: 'ta'`, every `/tts` answered "[400] This voice is
+       * unavailable.", and a patient who had dialled in heard nothing for the
+       * whole interview.
+       */
+      it('answers in English when this box has no voice for the language', async () => {
+        const h = harness();
+        h.sidecar.health.mockResolvedValue(healthReporting(['en', 'hi']));
+
+        await h.service.startOrResume({ language: 'ta' }, USER, PATIENT_ID);
+
+        expect(h.repo.create.mock.calls[0][0]).toMatchObject({
+          inputLanguage: 'ta',
+          outputLanguage: 'en',
+        });
+      });
+
+      /** Same box, a language it *can* speak. The gate is per language. */
+      it('answers in Hindi when this box does have the voice', async () => {
+        const h = harness();
+        h.sidecar.health.mockResolvedValue(healthReporting(['en', 'hi']));
+
+        await h.service.startOrResume({ language: 'hi' }, USER, PATIENT_ID);
+
+        expect(h.repo.create.mock.calls[0][0]).toMatchObject({
+          inputLanguage: 'hi',
+          outputLanguage: 'hi',
+        });
+      });
+
+      /**
+       * A health probe that failed must not be able to change what language a
+       * patient is interviewed in. `health()` answers `null` when the sidecar
+       * is unreachable, and the only gate left is the phrasebook.
+       */
+      it('falls back to the phrasebook gate when the sidecar is unreachable', async () => {
+        const h = harness();
+        h.sidecar.health.mockResolvedValue(null);
+
+        await h.service.startOrResume({ language: 'ta' }, USER, PATIENT_ID);
+
+        expect(h.repo.create.mock.calls[0][0]).toMatchObject({
+          outputLanguage: 'ta',
+        });
+      });
+
+      /**
+       * The live row that proved the resume path was half-wired:
+       *
+       *     id=cmu6jmwbg0004rgcy04yfjw34  inputLanguage=en  outputLanguage=ta
+       *
+       * Started in Tamil, resumed in English, and only the input language
+       * moved — so it listened in English and tried to speak Tamil, which on
+       * that box is silence.
+       */
+      it('re-derives the output language when a resumed session changes language', async () => {
+        const h = harness();
+        h.repo.seedSession({
+          language: 'ta',
+          inputLanguage: 'ta',
+          outputLanguage: 'ta',
+        });
+
+        const view = await h.service.startOrResume(
+          { language: 'en' },
+          USER,
+          PATIENT_ID,
+        );
+
+        expect(view).toMatchObject({
+          resumed: true,
+          inputLanguage: 'en',
+          outputLanguage: 'en',
+        });
+      });
+
+      /** And the other direction, on a box that can speak it. */
+      it('moves a resumed session into the new language when it can be spoken', async () => {
+        const h = harness();
+        h.repo.seedSession({
+          language: 'en',
+          inputLanguage: 'en',
+          outputLanguage: 'en',
+        });
+
+        const view = await h.service.startOrResume(
+          { language: 'ta' },
+          USER,
+          PATIENT_ID,
+        );
+
+        expect(view).toMatchObject({
+          resumed: true,
+          inputLanguage: 'ta',
+          outputLanguage: 'ta',
+        });
+      });
+
+      /** The column is not the claim; the question is. */
+      it('asks a Tamil session its questions in Tamil', async () => {
+        const h = harness();
+
+        const view = await h.service.startOrResume(
+          { language: 'ta' },
+          USER,
+          PATIENT_ID,
+        );
+        const question = view.currentQuestion as { prompt: string } | null;
+
+        expect(question).not.toBeNull();
+        // The inverse of the English assertion above: at least one character
+        // outside ASCII means this came out of the Tamil phrasebook.
+        expect(question!.prompt).not.toMatch(/^[ -~]+$/);
+      });
+    });
   });
 
   describe('the language catalogue', () => {

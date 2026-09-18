@@ -27,6 +27,31 @@ header included, because the HTTP layer stamps `audio/wav` on whatever it is
 given and the Flutter player is handed bytes rather than a URL (see
 `speech_player.dart`). Raw PCM would reach the phone as a file it cannot open.
 [wav_bytes] is here so no provider has to get the header right twice.
+
+## The streaming half, and why it is a second method rather than a replacement
+
+[TTSProvider.synthesize_stream] yields raw 16-bit mono PCM in pieces, with no
+container at all, for the one caller that wants audio *before* the sentence has
+finished synthesising: the LiveKit worker, which pushes each piece into the room
+as it arrives. It is deliberately not the only method:
+
+  * The phone still wants a file. `speech_player.dart` is handed bytes and hands
+    them to a decoder; a chunked PCM body would reach it as something it cannot
+    open. `/tts` therefore keeps returning a whole WAV and keeps calling
+    [TTSProvider.synthesize].
+  * The sample rate has to be knowable *before* the first chunk, because the
+    HTTP layer puts it in a response header and the worker builds its
+    `rtc.AudioFrame`s from it. That is [TTSProvider.sample_rate], and it must
+    answer without loading anything heavy.
+
+The default [TTSProvider.synthesize_stream] is the honest fallback for an engine
+with no streaming API of its own: split the text into sentences, synthesise each
+one whole, strip its header and yield the samples. That is not true streaming —
+the first chunk still costs one whole sentence — but it is bounded by a sentence
+rather than by a paragraph, it starts playback while the rest is still being
+generated, and the interface is already the right shape for the day an engine
+grows a real token-by-token API. IndicF5 uses exactly this; Piper overrides it
+because `PiperVoice.synthesize` is genuinely a generator.
 """
 
 from __future__ import annotations
@@ -34,10 +59,11 @@ from __future__ import annotations
 import io
 import logging
 import os
+import re
 import wave
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Iterator
 
 from .language_config import SUPPORTED_LANGUAGES, normalise
 
@@ -81,6 +107,34 @@ class TTSProvider(ABC):
         the second lock on the same door: the chain checks first, and this
         catches the caller that did not.
         """
+
+    def sample_rate(self, language: str) -> int:
+        """The rate [synthesize_stream] will emit for this language.
+
+        Answered *before* anything is synthesised, because the HTTP layer sends
+        it as a header and the worker builds every `rtc.AudioFrame` from it. A
+        provider whose rate is a property of a voice file on disk has to be able
+        to read it without generating audio; one whose rate is fixed just states
+        it. Getting this wrong is not a failure, it is a pitch shift — the
+        samples play back at the wrong speed and nothing raises.
+        """
+        raise NotImplementedError
+
+    def synthesize_stream(self, text: str, language: str) -> Iterator[bytes]:
+        """Raw 16-bit mono PCM at [sample_rate], in pieces, as it is made.
+
+        The default is sentence-at-a-time via [synthesize]. See the note at the
+        top of this file for why that counts as streaming for our purposes and
+        where it stops counting.
+
+        Chunks are whatever size the engine produced; the worker re-frames them
+        to 20 ms before they reach LiveKit, so a provider must not try to hit a
+        frame boundary. It must, however, yield **whole samples** — a chunk with
+        an odd byte count splits an int16 down the middle, and every sample
+        after it in the stream is noise.
+        """
+        for sentence in split_sentences(text):
+            yield pcm_from_wav(self.synthesize(sentence, language))
 
     def languages(self) -> list[str]:
         """Every configured language this provider can speak right now."""
@@ -130,6 +184,98 @@ def wav_bytes(samples: Any, sample_rate: int) -> bytes:
         out.setframerate(sample_rate)
         out.writeframes(pcm.reshape(-1).tobytes())
     return buffer.getvalue()
+
+
+def pcm_from_wav(data: bytes) -> bytes:
+    """The sample bytes out of a RIFF/WAVE body, mono 16-bit, header discarded.
+
+    Used by the default [TTSProvider.synthesize_stream] to un-wrap what an
+    engine that only knows how to make files just made. The width and channel
+    handling mirrors `voice-agent/audio.py:wav_to_frames` rather than assuming
+    every engine emits mono int16, because the two are the same conversion at
+    opposite ends of the same wire and a disagreement between them is audible.
+    """
+    if not data:
+        return b""
+
+    import numpy as np
+
+    with wave.open(io.BytesIO(data), "rb") as handle:
+        channels = handle.getnchannels()
+        width = handle.getsampwidth()
+        raw = handle.readframes(handle.getnframes())
+
+    if width == 2:
+        samples = np.frombuffer(raw, dtype=np.int16)
+    elif width == 4:
+        samples = (np.frombuffer(raw, dtype=np.int32) >> 16).astype(np.int16)
+    elif width == 1:
+        samples = ((np.frombuffer(raw, dtype=np.uint8).astype(np.int16) - 128) << 8).astype(
+            np.int16
+        )
+    else:
+        raise ValueError(f"unsupported WAV sample width: {width} bytes")
+
+    if channels > 1:
+        samples = (
+            samples.reshape(-1, channels).astype(np.int32).mean(axis=1).astype(np.int16)
+        )
+    return samples.tobytes()
+
+
+# Sentence-ending punctuation for every script this service speaks: the Latin
+# stops, the Devanagari danda and double danda (Hindi, Marathi), and the
+# fullwidth stop that turns up in text pasted from an IME. Tamil, Telugu,
+# Kannada, Malayalam, Bengali, Gujarati, Punjabi, Assamese and Odia all use the
+# Latin full stop or the danda, so there is nothing further to add for them.
+_SENTENCE_END = re.compile(r"(?<=[.!?।॥。？！])\s+")
+
+# A ceiling, not a target. A "sentence" with no terminal punctuation — which is
+# most of what a 4B model streams before it reaches one — must still become
+# audio at some point, and 240 characters is roughly ten seconds of speech: long
+# enough that a real clinical question is never cut in half, short enough that a
+# runaway generation cannot hold the first audio chunk hostage.
+_LONGEST_CHUNK = 240
+
+
+def split_sentences(text: str, *, max_chars: int = _LONGEST_CHUNK) -> list[str]:
+    """Text into synthesisable pieces, at sentence boundaries where there are any.
+
+    The pieces are the streaming granularity: each one is a separate call into
+    the engine and a separate chunk on the wire, so this is the knob that trades
+    time-to-first-audio against how stilted the result sounds. Every seam is a
+    join between two independently generated pieces, and most engines pad both
+    ends of what they make with a little silence.
+    """
+    text = " ".join((text or "").split())
+    if not text:
+        return []
+
+    pieces: list[str] = []
+    current = ""
+    for sentence in _SENTENCE_END.split(text):
+        if not sentence:
+            continue
+        if current and len(current) + 1 + len(sentence) > max_chars:
+            pieces.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}".strip()
+    if current:
+        pieces.append(current)
+
+    out: list[str] = []
+    for piece in pieces:
+        while len(piece) > max_chars:
+            # At a word boundary. Breaking mid-word gives the engine half a word
+            # to phonemise, and it will confidently pronounce the half.
+            cut = piece.rfind(" ", 0, max_chars)
+            cut = cut if cut > 0 else max_chars
+            out.append(piece[:cut].strip())
+            piece = piece[cut:].strip()
+        if piece:
+            out.append(piece)
+    return out
 
 
 def resolve_dir(relative: str, package_dir: Path, env_var: str | None = None) -> Path:
@@ -317,6 +463,8 @@ def probe_wav(path: Path) -> dict[str, Any]:
 __all__ = [
     "TTSProvider",
     "UnsupportedLanguage",
+    "pcm_from_wav",
+    "split_sentences",
     "wav_bytes",
     "resolve_dir",
     "rss_mb",

@@ -32,8 +32,9 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 import ocr
 import stt
@@ -209,7 +210,20 @@ async def speech_to_text(
     try:
         handle.write(data)
         handle.close()
-        return JSONResponse(stt.transcribe(handle.name, language=language))
+        # `run_in_threadpool`, not a bare call. `stt.transcribe` is synchronous
+        # CTranslate2 work that holds the interpreter for the length of a decode
+        # — ~200 ms warm on CUDA, several seconds on this CPU — and this is an
+        # `async def`, so calling it directly runs it **on the event loop**.
+        #
+        # That is not a throughput nicety. While it ran, nothing else in this
+        # process moved: not `/health`, not a `/tts/stream` already halfway
+        # through pushing audio to a patient, not the interim transcript the
+        # worker fires in parallel with the final one. The live-call symptom is
+        # the speaker stuttering every time the microphone is endpointed, which
+        # reads as a network problem and is not one.
+        return JSONResponse(
+            await run_in_threadpool(stt.transcribe, handle.name, language=language)
+        )
     except HTTPException:
         raise
     except stt.LanguageNotSupported as refusal:
@@ -270,7 +284,12 @@ async def text_to_speech(request: SpeakRequest) -> Response:
         # answer this route may never give is somebody else's language at 200.
         raise HTTPException(status_code=503, detail="This voice is unavailable.")
     try:
-        audio, provider = tts.speak_with_provider(request.text, request.language)
+        # Off the event loop, for the same reason as `/stt` above: Piper is
+        # ONNX and IndicF5 is torch, and both hold the interpreter for the whole
+        # synthesis.
+        audio, provider = await run_in_threadpool(
+            tts.speak_with_provider, request.text, request.language
+        )
     except Exception:
         # Every engine that claimed this language has failed. The patient gets
         # the same sentence as a language with no voice at all, because from
@@ -290,6 +309,84 @@ async def text_to_speech(request: SpeakRequest) -> Response:
         # the outside, which is what let it run. One header makes it checkable
         # from curl, from the phone, and from a log of either.
         headers={"X-TTS-Provider": provider, "X-TTS-Language": tts.normalise(request.language)},
+    )
+
+
+@app.post("/tts/stream")
+async def text_to_speech_stream(request: SpeakRequest) -> Response:
+    """The same voice as `/tts`, in pieces, for a caller that is playing live.
+
+    ## Why this is a second route and not a flag on the first
+
+    The two callers want incompatible bodies. The phone wants a file: it is
+    handed bytes and hands them to a decoder, so it needs a RIFF header and a
+    known length. The LiveKit worker wants samples as soon as they exist, has no
+    use for a container, and will re-frame whatever arrives to 20 ms anyway. One
+    route serving both would mean a header nobody could write until the audio it
+    describes had finished — which is the whole thing this route exists to avoid.
+
+    So `/tts` is unchanged and still returns a complete WAV. This returns raw
+    little-endian 16-bit mono PCM, chunked, with the rate in a header:
+
+        X-TTS-Provider      which engine actually spoke — same header as `/tts`
+        X-TTS-Language      the normalised code, so a substitution is checkable
+        X-TTS-Sample-Rate   22050 for Piper's voices, 24000 for IndicF5
+
+    `audio/L16` is the registered type for exactly this — linear 16-bit PCM with
+    the rate as a parameter — so the body is self-describing to anything that
+    reads media types, and the header is there for everything that does not.
+
+    ## Refusals are identical, deliberately
+
+    Same 400 for nothing to say, same 400 over the length cap, same 503 for a
+    language no engine on this box can speak. A caller must not be able to reach
+    a voice through this route that `/tts` would have refused, or the streaming
+    path becomes the way a Tamil session quietly gets an English voice.
+
+    The one asymmetry is *when* a failure can be reported. Headers are sent
+    before the first chunk, so an engine that dies halfway through has already
+    returned 200 and can only truncate. The worker treats a truncated stream the
+    same way it treats a barge-in — stop, listen — and the question is on the
+    patient's screen as text either way, so a half-spoken question is a
+    degradation rather than a lost question.
+    """
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="There was nothing to say.")
+    if len(request.text) > MAX_SPEAK_CHARS:
+        raise HTTPException(
+            status_code=400, detail="That is too long to read aloud in one go."
+        )
+    if not tts.available(request.language):
+        raise HTTPException(status_code=503, detail="This voice is unavailable.")
+
+    try:
+        # In the threadpool because resolving the provider may load a voice —
+        # `PiperTTS.sample_rate` reads the rate off the loaded model — and that
+        # is a ~63 MB file read on the first call for a language. The generator
+        # itself is not advanced here; Starlette iterates it in a threadpool of
+        # its own, so no synthesis ever runs on the event loop.
+        chunks, provider, sample_rate = await run_in_threadpool(
+            tts.stream_with_provider, request.text, request.language
+        )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "streaming synthesis failed for %s", tts.normalise(request.language)
+        )
+        raise HTTPException(status_code=503, detail="This voice is unavailable.")
+
+    return StreamingResponse(
+        chunks,
+        media_type=f"audio/L16; rate={sample_rate}; channels=1",
+        headers={
+            "X-TTS-Provider": provider,
+            "X-TTS-Language": tts.normalise(request.language),
+            "X-TTS-Sample-Rate": str(sample_rate),
+            # This body has no length and must not be buffered by anything in
+            # between — a proxy that collects it before forwarding turns a
+            # streaming route back into `/tts` with extra steps.
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

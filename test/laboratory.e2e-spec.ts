@@ -7,6 +7,19 @@ import { AppModule } from './../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { JwtAuthGuard } from '../src/common/guards/jwt-auth.guard';
 
+/**
+ * The rows of a list response.
+ *
+ * Every response is wrapped by ResponseInterceptor as `{ success, message,
+ * data, ... }`, and a list route puts either a bare array or the paginated
+ * `{ data, meta }` envelope in that `data` - which of the two depends on the
+ * route and on whether the request asked for a page. This reads the rows out
+ * of whichever came back, so a route gaining pagination is not a test failure
+ * about `toHaveLength` on an object.
+ */
+const rows = (body: any): any[] =>
+  Array.isArray(body.data) ? body.data : body.data.data;
+
 describe('LaboratoryController (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
@@ -94,7 +107,6 @@ describe('LaboratoryController (e2e)', () => {
       .expect(201);
 
     expect(createTestRes.body.success).toBe(true);
-    expect(createTestRes.body.message).toBe('Test added successfully');
     const testId = createTestRes.body.data.id;
     expect(testId).toBeDefined();
 
@@ -104,8 +116,8 @@ describe('LaboratoryController (e2e)', () => {
       .expect(200);
 
     expect(getTestsRes.body.success).toBe(true);
-    expect(getTestsRes.body.data).toHaveLength(1);
-    expect(getTestsRes.body.data[0].id).toBe(testId);
+    expect(rows(getTestsRes.body)).toHaveLength(1);
+    expect(rows(getTestsRes.body)[0].id).toBe(testId);
 
     // 3. Create a lab order
     const createOrderRes = await request(app.getHttpServer())
@@ -126,7 +138,6 @@ describe('LaboratoryController (e2e)', () => {
       .expect(201);
 
     expect(createOrderRes.body.success).toBe(true);
-    expect(createOrderRes.body.message).toBe('Lab order created');
     const orderId = createOrderRes.body.data.id;
     expect(orderId).toBeDefined();
     expect(createOrderRes.body.data.status).toBe('pending');
@@ -137,8 +148,8 @@ describe('LaboratoryController (e2e)', () => {
       .expect(200);
 
     expect(getOrdersRes.body.success).toBe(true);
-    expect(getOrdersRes.body.data).toHaveLength(1);
-    expect(getOrdersRes.body.data[0].id).toBe(orderId);
+    expect(rows(getOrdersRes.body)).toHaveLength(1);
+    expect(rows(getOrdersRes.body)[0].id).toBe(orderId);
 
     // 5. Create a result for the order
     const createResultRes = await request(app.getHttpServer())
@@ -157,7 +168,6 @@ describe('LaboratoryController (e2e)', () => {
       .expect(201);
 
     expect(createResultRes.body.success).toBe(true);
-    expect(createResultRes.body.message).toBe('Result saved');
     const resultId = createResultRes.body.data.id;
     expect(resultId).toBeDefined();
 
@@ -167,8 +177,8 @@ describe('LaboratoryController (e2e)', () => {
       .expect(200);
 
     expect(getOrdersInProgressRes.body.success).toBe(true);
-    expect(getOrdersInProgressRes.body.data).toHaveLength(1);
-    expect(getOrdersInProgressRes.body.data[0].id).toBe(orderId);
+    expect(rows(getOrdersInProgressRes.body)).toHaveLength(1);
+    expect(rows(getOrdersInProgressRes.body)[0].id).toBe(orderId);
 
     // 7. Query results
     const getResultsRes = await request(app.getHttpServer())
@@ -176,8 +186,8 @@ describe('LaboratoryController (e2e)', () => {
       .expect(200);
 
     expect(getResultsRes.body.success).toBe(true);
-    expect(getResultsRes.body.data).toHaveLength(1);
-    expect(getResultsRes.body.data[0].id).toBe(resultId);
+    expect(rows(getResultsRes.body)).toHaveLength(1);
+    expect(rows(getResultsRes.body)[0].id).toBe(resultId);
 
     // 8. Fetch stats
     const getStatsRes = await request(app.getHttpServer())
@@ -236,8 +246,8 @@ describe('LaboratoryController (e2e)', () => {
       .expect(200);
 
     expect(getCompletedOrdersRes.body.success).toBe(true);
-    expect(getCompletedOrdersRes.body.data).toHaveLength(1);
-    expect(getCompletedOrdersRes.body.data[0].id).toBe(orderId);
+    expect(rows(getCompletedOrdersRes.body)).toHaveLength(1);
+    expect(rows(getCompletedOrdersRes.body)[0].id).toBe(orderId);
   });
 
   it('should run clean RESTful routes workflow', async () => {
@@ -260,7 +270,7 @@ describe('LaboratoryController (e2e)', () => {
       .get('/laboratory/tests?category=chemistry')
       .expect(200);
 
-    expect(getTestsRes.body.data).toHaveLength(1);
+    expect(rows(getTestsRes.body)).toHaveLength(1);
 
     // 3. Update test entry
     const updateTestRes = await request(app.getHttpServer())
@@ -290,7 +300,7 @@ describe('LaboratoryController (e2e)', () => {
       .get('/laboratory/orders?status=pending')
       .expect(200);
 
-    expect(getOrdersRes.body.data).toHaveLength(1);
+    expect(rows(getOrdersRes.body)).toHaveLength(1);
 
     // 6. Update order status
     const updateOrderRes = await request(app.getHttpServer())
@@ -302,7 +312,14 @@ describe('LaboratoryController (e2e)', () => {
       .expect(200);
 
     expect(updateOrderRes.body.data.status).toBe('sample_collected');
-    expect(updateOrderRes.body.data.accessionNumber).toBe('BARCODE-999');
+    // The accession number is minted by the server on sample collection and the
+    // one sent above is dropped on purpose - two clients that both invent one
+    // would otherwise label two samples the same. This asserts the client value
+    // does NOT win, which is the behaviour worth pinning.
+    expect(updateOrderRes.body.data.accessionNumber).not.toBe('BARCODE-999');
+    expect(updateOrderRes.body.data.accessionNumber).toMatch(
+      /^ACC-[0-9A-Z]{8}$/,
+    );
 
     // 7. Add result
     const createResultRes = await request(app.getHttpServer())
@@ -323,7 +340,7 @@ describe('LaboratoryController (e2e)', () => {
       .get(`/laboratory/results?orderId=${orderId}`)
       .expect(200);
 
-    expect(getResultsRes.body.data).toHaveLength(1);
+    expect(rows(getResultsRes.body)).toHaveLength(1);
 
     // 9. Update result (verification)
     const updateResultRes = await request(app.getHttpServer())

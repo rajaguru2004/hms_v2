@@ -55,8 +55,10 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, AsyncIterator
 
+from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentServer,
@@ -69,13 +71,15 @@ from livekit.agents import (
 from livekit.plugins import silero
 
 import health
+import llm
 import timing
-from audio import frames_duration, frames_stream, wav_to_frames
+from audio import PcmFramer, frames_duration, frames_stream, wav_to_frames
 from config import Settings, describe, load_env_file
 from engine import (
     CaseTakingClient,
     EngineRejected,
     EngineUnavailable,
+    NextQuestion,
     TurnResult,
     utterances,
 )
@@ -109,6 +113,157 @@ AGENT_NAME = "medihive"
 # `@server.rtc_session()` decorator below, not on the constructor, and passing
 # it here is a TypeError rather than a no-op. See the note on `entrypoint`.
 server = AgentServer(initialize_process_timeout=120.0)
+
+
+@dataclass
+class TurnLatency:
+    """One turn's clock, from the patient opening their mouth to hearing audio.
+
+    `timing.py` already records every hop as NDJSON, and that is the file a
+    budget is built from. This is the other half of the same job: five numbers
+    on one INFO line, in the worker's own log, so an operator watching a live
+    call can see *which* hop is slow without joining two processes' timing logs
+    together after the fact.
+
+    Two kinds of number, and mixing them up is how a budget stops adding up.
+    `sttFirstPartial`, `sttFinal` and `total` are measured from `speech_start` —
+    the moment Silero says the patient began speaking, the only anchor the
+    patient shares with the system. `engine`, `llmFirstToken` and
+    `ttsFirstAudio` are measured from the end of the hop before them, so each is
+    the cost of that stage and not of everything preceding it. Reporting a
+    per-stage cost from `speech_start` makes a slow recogniser look like a slow
+    synthesiser.
+
+    `total` is time-to-first-audio rather than time-to-finish. It is what the
+    patient experiences as "the pause", and it is the number every setting in
+    config.py is tuned against.
+
+    `None` means "did not happen", and the three ways it can be None are all
+    ordinary: no interim (the answer was too short to reach
+    `MEDIHIVE_INTERIM_MIN_SPEECH_SEC`), no LLM (phrasing off, or it fell back),
+    no audio (TTS refused the language and the question went down as text).
+
+    ## One record per turn, snapshotted, and why that is not over-engineering
+
+    The event handlers write into a *live* record — they are the only things
+    that know when the patient started talking — and `run_turn` takes a copy of
+    it with [snapshot] before it posts anything. Everything downstream writes
+    into the copy.
+
+    Measured, before it did: a barge-in is a new utterance, so it calls [begin],
+    which resets the live record. The turn that was being interrupted then
+    reported the reset one, and the log line came out as
+
+        latency ros.constitutional.rigors: stt_partial=2094ms stt_final=3297ms
+              engine=31ms llm_first_token=- tts_first_audio=- total=-
+
+    on a turn whose audio had demonstrably played — the line above it in the
+    same log says `interrupted while saying: Have you had shaking chills…`. And
+    a turn cut off before it spoke reported six dashes, which reads as a dead
+    pipeline rather than as a patient who changed their mind.
+
+    A copy costs six floats, and the alternative is a budget that is wrong
+    exactly when somebody is reading it to find out why a call felt bad.
+    """
+
+    speech_start: float | None = None
+    stt_first_partial: float | None = None
+    stt_final: float | None = None
+    turn_posted: float | None = None
+    llm_first_token: float | None = None
+    tts_first_audio: float | None = None
+
+    def begin(self) -> None:
+        """The patient started talking. Everything else is measured from here.
+
+        Resets every stage, because this is a new utterance and the old numbers
+        belong to the turn before it. Safe to do only because whatever is still
+        reporting that turn is holding a [snapshot] rather than this object.
+        """
+        self.speech_start = time.monotonic()
+        self.stt_first_partial = None
+        self.stt_final = None
+        self.turn_posted = None
+        self.llm_first_token = None
+        self.tts_first_audio = None
+
+    def snapshot(self) -> "TurnLatency":
+        """A copy this turn owns, immune to the next utterance resetting things."""
+        return replace(self)
+
+    def measured(self) -> bool:
+        """Whether anything at all happened. False means there is nothing to log.
+
+        A turn superseded before it could be posted — the patient said something
+        new while the last answer was still being processed — has a
+        `speech_start` and nothing else. Its line would be six dashes, which
+        says less than the `stopping the reply` line already above it.
+        """
+        return self.speech_start is not None and any(
+            at is not None
+            for at in (
+                self.stt_first_partial,
+                self.stt_final,
+                self.turn_posted,
+                self.llm_first_token,
+                self.tts_first_audio,
+            )
+        )
+
+    def _since(self, at: float | None, start: float | None = None) -> float | None:
+        origin = self.speech_start if start is None else start
+        if at is None or origin is None:
+            return None
+        return (at - origin) * 1000.0
+
+    def summary(self) -> dict[str, float | None]:
+        # The synthesiser starts when the last thing before it finished, which
+        # is the LLM's first sentence when phrasing is on and the engine's reply
+        # when it is off. Taking `or` of the two rather than branching keeps the
+        # number meaning "how long until it made a sound" in both modes.
+        synthesis_start = self.llm_first_token or self.turn_posted
+        return {
+            "sttFirstPartialMs": _round(self._since(self.stt_first_partial)),
+            "sttFinalMs": _round(self._since(self.stt_final)),
+            "engineMs": _round(self._since(self.turn_posted, self.stt_final)),
+            "llmFirstTokenMs": _round(self._since(self.llm_first_token, self.turn_posted)),
+            "ttsFirstAudioMs": _round(self._since(self.tts_first_audio, synthesis_start)),
+            "totalMs": _round(self._since(self.tts_first_audio)),
+        }
+
+
+def _round(value: float | None) -> float | None:
+    return None if value is None else round(value, 1)
+
+
+def _ms(value: float | None) -> str:
+    """A millisecond field for the log line, or a dash when it did not happen."""
+    return "-" if value is None else f"{value:.0f}ms"
+
+
+# `ParticipantKind.PARTICIPANT_KIND_AGENT`, restated as the integer it is.
+#
+# Read off the protobuf enum rather than imported, for the same reason
+# case-taking.service.ts spells it out: `livekit.rtc` re-exports the enum
+# wrapper but not the member as an attribute — `rtc.ParticipantKind` has only
+# `DESCRIPTOR`, `Name`, `Value`, `items`, `keys`, `values` — so `.AGENT` is a
+# lookup, not a constant, and a wire value that cannot change without breaking
+# every LiveKit client in existence is safe to name here.
+_AGENT_KIND = 4
+
+
+def _is_agent(participant: Any) -> bool:
+    """Whether this participant is another agent rather than a person.
+
+    Defaults to False when `kind` is missing or unreadable: an unknown
+    participant is treated as a person, because the cost of getting that wrong
+    is a microphone linked to somebody who is not talking, and the cost of the
+    opposite is an interview conducted with a robot. See `_on_participant_joined`.
+    """
+    try:
+        return int(getattr(participant, "kind", -1)) == _AGENT_KIND
+    except (TypeError, ValueError):
+        return False
 
 
 def _vad(*, min_silence: float, min_speech: float, prefix_pad: float) -> silero.VAD:
@@ -290,6 +445,35 @@ async def entrypoint(ctx: JobContext) -> None:
 
     current_turn: asyncio.Task | None = None
     speaking_lock = asyncio.Lock()
+    latency = TurnLatency()
+
+    # The task that is currently synthesising and speaking, or None.
+    #
+    # Held as a task rather than a flag because the only reliable way to stop a
+    # reply that is half-spoken, half-synthesised and half-generated is to
+    # cancel the one coroutine that owns all three: cancelling it unwinds the
+    # `async with sidecar.speak_stream(...)`, which closes the HTTP stream,
+    # which is what stops the sidecar synthesising the *next* sentence. See
+    # `stop_speaking` below.
+    speaking: asyncio.Task | None = None
+
+    # Gemma, for wording, or None when `MEDIHIVE_LLM_PHRASING` is off — which is
+    # the default. Constructed either way is pointless; a None here is what the
+    # phrasing call checks, so the off path costs one comparison per question.
+    phrasing = (
+        llm.OllamaClient(
+            SETTINGS.ollama_url,
+            SETTINGS.ollama_model,
+            timeout=SETTINGS.llm_timeout,
+            first_token_timeout=SETTINGS.llm_first_token_timeout,
+            max_chars=SETTINGS.llm_max_chars,
+        )
+        if SETTINGS.llm_phrasing
+        else None
+    )
+    # Resolved once at join. A model that is not there must not cost every
+    # question a failed connection before it falls back.
+    phrasing_ready = False
 
     # The field the question on the table is asking about, or None before the
     # first question has been read.
@@ -346,6 +530,15 @@ async def entrypoint(ctx: JobContext) -> None:
     # see `run_turn`.
     pending_field_spoken: bool = False
 
+    # The patient's last finalised words, for the phrasing prompt only.
+    #
+    # It is what lets a reworded question follow on — "and how long has that
+    # been going on?" rather than "how long has the pain been going on?" — and
+    # it is never sent to the engine, which has the whole transcript already and
+    # does not need this worker's copy of one line of it. Trimmed, because the
+    # prompt is a budget and a patient's narrative can be a paragraph.
+    last_utterance: str | None = None
+
     def remember_pending(result: TurnResult) -> None:
         """Record which field the question we are about to ask is for."""
         nonlocal pending_field, pending_field_spoken
@@ -387,20 +580,151 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # ── Speaking ────────────────────────────────────────────────────────────
 
-    async def say(text: str) -> bool:
+    async def say(text: str, record: TurnLatency) -> bool:
         """Synthesise one piece and push it into the room. True if it was heard.
 
+        Streams by default — `/tts/stream`, PCM, first audio out while the rest
+        of the sentence is still being made — and falls back to the whole-WAV
+        `/tts` when `MEDIHIVE_TTS_STREAMING=0` or when the stream cannot be
+        opened. Both paths refuse identically.
+
         On a TTS refusal this returns False without speaking anything. It does
-        not fall back to another language's voice: Piper serves `en` and `hi`,
-        everything else 503s, and answering a Tamil session in English would be
-        a clinical record of a question the patient never understood. The text
-        still reaches the phone as a data message, so the question is there to
-        be read.
+        not fall back to another language's voice: IndicF5 serves the eleven
+        Indian languages and Piper serves `en` and `hi`; anything nobody serves
+        503s, and answering a Tamil session in English would be a clinical
+        record of a question the patient never understood. The text still
+        reaches the phone as a data message, so the question is there to be read.
         """
         text = text.strip()
         if not text:
             return False
-        timing.mark("say.begin", chars=len(text))
+        timing.mark("say.begin", chars=len(text), streaming=SETTINGS.tts_streaming)
+        if SETTINGS.tts_streaming:
+            return await say_streaming(text, record)
+        return await say_whole(text, record)
+
+    async def say_streaming(text: str, record: TurnLatency) -> bool:
+        """`/tts/stream` straight into the room, frame by frame as it arrives.
+
+        ## Why the frames are generated inside the response context
+
+        Because leaving it is what cancels the synthesiser. The async generator
+        below is consumed by livekit-agents' own forwarding task, but the
+        `async with` that owns the socket lives on *this* coroutine — so when
+        `stop_speaking` cancels this task, the context exits, `httpx` closes the
+        connection, and the sidecar's `StreamingResponse` stops being iterated
+        before it generates the next sentence.
+
+        The whole-WAV path cannot do that. There, a barge-in cut the playback
+        and the synthesis carried on to completion on the same CPU the next
+        transcription needed, so interrupting the agent made the box slower.
+
+        ## Why the handle is interrupted on the way out
+
+        `session.say` hands the generator to a task this one does not own. If
+        this coroutine is cancelled and the context closes underneath that task,
+        it is left iterating a dead socket. `handle.interrupt()` in the `finally`
+        tells it to stop first, in the one order that has no window in it.
+        """
+        try:
+            async with sidecar.speak_stream(text, language) as stream:
+                STATUS.spoken_via = stream.provider
+                STATUS.tts_refused = None
+                await publish(
+                    "speak",
+                    {
+                        "text": text,
+                        "spoken": True,
+                        "provider": stream.provider,
+                        "sampleRate": stream.sample_rate,
+                        "streaming": True,
+                    },
+                )
+
+                framer = PcmFramer(stream.sample_rate, frame_ms=SETTINGS.frame_ms)
+                spoke_any = False
+
+                async def frames() -> AsyncIterator[rtc.AudioFrame]:
+                    nonlocal spoke_any
+                    opened = timing.mark("say.stream_frames_begin")
+                    count = 0
+                    async for chunk in stream.chunks:
+                        for frame in framer.push(chunk):
+                            if not spoke_any:
+                                spoke_any = True
+                                record.tts_first_audio = (
+                                    record.tts_first_audio or time.monotonic()
+                                )
+                                timing.span(
+                                    "say.first_frame_out",
+                                    opened,
+                                    provider=stream.provider,
+                                    rate=stream.sample_rate,
+                                )
+                            count += 1
+                            yield frame
+                            # Yields to the event loop between frames so a
+                            # cancellation lands here rather than after the
+                            # whole chunk. See `frames_stream` in audio.py.
+                            await asyncio.sleep(0)
+                    for frame in framer.flush():
+                        count += 1
+                        yield frame
+                    timing.span("say.stream_frames_end", opened, frames=count)
+
+                handle = session.say(
+                    text=text,
+                    audio=frames(),
+                    allow_interruptions=SETTINGS.allow_interruptions,
+                    add_to_chat_ctx=True,
+                )
+                try:
+                    await handle
+                finally:
+                    # Both on the ordinary path (a no-op once it is done) and on
+                    # cancellation, where it is the thing that stops the
+                    # forwarding task before the socket goes away under it.
+                    if not handle.done():
+                        handle.interrupt()
+
+                timing.mark(
+                    "say.handle_done",
+                    interrupted=bool(handle.interrupted),
+                    provider=stream.provider,
+                )
+                if handle.interrupted:
+                    STATUS.interruptions += 1
+                    logger.info("interrupted while saying: %s", text[:60])
+                return spoke_any
+        except SidecarRefusal as refusal:
+            STATUS.tts_refused = language
+            STATUS.last_error = refusal.patient_message
+            logger.warning("no voice for %s; sending text only: %s", language, text)
+            await publish(
+                "speak",
+                {"text": text, "spoken": False, "reason": refusal.patient_message},
+            )
+            return False
+        except SidecarUnavailable as exc:
+            # One retry, on the other transport. A streaming body has more ways
+            # to fail than a file does — a proxy that buffers, a header that did
+            # not arrive — and `/tts` is the path that has been serving a real
+            # phone for months. Falling back to it costs the patient the
+            # streaming latency and keeps them a question.
+            STATUS.last_error = str(exc)
+            logger.warning("tts stream failed (%s); falling back to whole-WAV", exc)
+            timing.mark("say.stream_fallback", error=str(exc)[:120])
+            return await say_whole(text, record)
+
+    async def say_whole(text: str, record: TurnLatency) -> bool:
+        """The original path: one `/tts` call, one WAV, then frames.
+
+        Kept because it is the transport the Flutter client uses and the one
+        every measurement in MULTILINGUAL.md was taken against, so it is what a
+        streaming regression is compared to. It cannot cancel a synthesis in
+        flight; a barge-in stops the playback and the sidecar finishes making
+        audio nobody hears.
+        """
         try:
             wav, provider = await sidecar.speak(text, language)
         except SidecarRefusal as refusal:
@@ -448,6 +772,7 @@ async def entrypoint(ctx: JobContext) -> None:
             },
         )
         timing.mark("say.handle_create", chars=len(text))
+        record.tts_first_audio = record.tts_first_audio or time.monotonic()
         handle = session.say(
             text=text,
             audio=frames_stream(frames),
@@ -519,17 +844,183 @@ async def entrypoint(ctx: JobContext) -> None:
 
     stt.on_problem = report_stt_problem
 
-    async def say_all(lines: list[str]) -> None:
+    async def say_all(lines: list[str], record: TurnLatency) -> None:
         """Speak the engine's lines, in the engine's order, one at a time.
 
         Serialised behind a lock: two overlapping `say` calls put two voices in
         the room at once. The lock is also what makes a cancelled turn stop
         cleanly — the cancellation lands while waiting for it.
+
+        ## The loop stops on an interruption, and it did not used to
+
+        A red-flag turn is two lines: the routing instruction and the next
+        question. A patient who talks over the first one used to get the second
+        one anyway — `say` returned, the loop went round, and the agent started
+        a new utterance into a room where the patient was mid-sentence. From the
+        patient's side the agent ignored them and carried on, which is the exact
+        behaviour barge-in exists to prevent.
+
+        `handle.interrupted` is not checked here because `stop_speaking` is
+        cancelling this whole coroutine; the `CancelledError` unwinds the loop
+        and nothing after it runs. The remaining lines are dropped rather than
+        queued: the engine will re-send whatever is still outstanding on the
+        next turn, and a question the patient has already answered over is not
+        worth asking late.
         """
         async with speaking_lock:
             for line in lines:
                 for piece in split_for_speech(line):
-                    await say(piece)
+                    await say(piece, record)
+
+    async def speak_turn(
+        question: NextQuestion | None, lines: list[str], record: TurnLatency
+    ) -> None:
+        """Everything the engine wants said, with the LLM in front of the question.
+
+        The split is the clinical boundary and it is the reason this is not just
+        `say_all`:
+
+        * `patientMessage` — the routing instruction from the most severe
+          triggered red-flag rule, e.g. "stop and go to the front desk now" — is
+          checked-in, reviewed text and is spoken **verbatim**. It never goes
+          near the model.
+        * The next question is phrased by gemma3:4b when
+          `MEDIHIVE_LLM_PHRASING` is on, and by the phrasebook when it is not.
+          Either way it is the same clinical question about the same field; see
+          llm.py for what the model is and is not allowed to change.
+
+        `lines` still carries both, in the engine's severity order, so the
+        fallback path is `say_all(lines)` unchanged.
+        """
+        if not lines:
+            return
+        if not (phrasing and phrasing_ready and question and question.spoken_text):
+            await say_all(lines, record)
+            return
+
+        # Everything except the question — in practice the red-flag message —
+        # spoken first and verbatim, exactly as `utterances()` ordered it.
+        preamble = [line for line in lines if line != question.spoken_text]
+        async with speaking_lock:
+            for line in preamble:
+                for piece in split_for_speech(line):
+                    await say(piece, record)
+
+            spoke_phrased = False
+            request = llm.PhrasingRequest(
+                text=question.spoken_text,
+                language=language,
+                field_path=question.field_path,
+                choices=tuple(question.choices or ()),
+                last_patient_utterance=last_utterance,
+            )
+            try:
+                async for sentence in phrasing.phrase(request):
+                    if record.llm_first_token is None:
+                        record.llm_first_token = time.monotonic()
+                    # Straight to the synthesiser, one sentence at a time. This
+                    # is the whole point of streaming the model: the second
+                    # sentence is still being generated while the first is being
+                    # spoken, so the patient waits for a sentence rather than
+                    # for a reply.
+                    if await say(sentence, record):
+                        spoke_phrased = True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - the fallback is the point
+                logger.warning("phrasing failed mid-question (%s)", exc)
+
+            if not spoke_phrased:
+                # Nothing usable came back, or the model is down, or TTS refused
+                # every sentence it did produce. The engine's own wording is a
+                # complete, reviewed question and is what the patient gets.
+                timing.mark("llm.fallback", field=question.field_path or "")
+                logger.info(
+                    "phrasing produced nothing for %s; speaking the engine's wording",
+                    question.field_path or "?",
+                )
+                for piece in split_for_speech(question.spoken_text):
+                    await say(piece, record)
+
+    def report_latency(record: TurnLatency, field_path: str | None) -> None:
+        """One line per turn, with every stage of the budget on it.
+
+        The NDJSON in `timing.py` is the authority and the thing
+        `tools/report_budget.py` reads; this is the same measurement in the
+        place an operator is already looking. It costs one log line per turn and
+        it is the difference between "the agent feels slow" and "the engine
+        answers in 18 ms and Whisper is taking four seconds".
+
+        `-` rather than `0` for a stage that did not happen, because a zero here
+        would read as "instant" and mean "absent".
+        """
+        if not record.measured():
+            return
+        summary = record.summary()
+        timing.mark("turn.latency", field=field_path or "", **summary)
+        logger.info(
+            "latency %s: stt_partial=%s stt_final=%s engine=%s llm_first_token=%s "
+            "tts_first_audio=%s total=%s",
+            field_path or "-",
+            _ms(summary["sttFirstPartialMs"]),
+            _ms(summary["sttFinalMs"]),
+            _ms(summary["engineMs"]),
+            _ms(summary["llmFirstTokenMs"]),
+            _ms(summary["ttsFirstAudioMs"]),
+            _ms(summary["totalMs"]),
+        )
+        STATUS.last_latency = summary
+
+    def stop_speaking(reason: str) -> None:
+        """Cut the reply off now: playback, synthesis and generation together.
+
+        Called from the barge-in handler. Cancelling the task is what reaches
+        all three — `say_streaming` interrupts the `SpeechHandle` and closes the
+        `/tts/stream` socket on its way out, and `llm.phrase` propagates the
+        cancellation so Ollama stops generating for a patient who is already
+        talking over the answer.
+
+        Idempotent and cheap. `user_state_changed` fires on every transition
+        into speaking, including the ones where the agent is not saying
+        anything, and the ordinary case is that there is nothing to cancel.
+        """
+        nonlocal speaking
+        if speaking is None or speaking.done():
+            return
+        timing.mark("barge.cancel", reason=reason)
+        logger.info("patient started speaking; stopping the reply (%s)", reason)
+        speaking.cancel()
+
+    async def start_speaking(
+        question: NextQuestion | None, lines: list[str], record: TurnLatency
+    ) -> None:
+        """Run `speak_turn` as a cancellable task and wait for it.
+
+        The task handle is what `stop_speaking` needs. Awaiting it here keeps
+        `run_turn` reading top to bottom, and swallows the `CancelledError` that
+        a barge-in produces: an interruption is the system working, not a turn
+        that failed, and it must not take `run_turn`'s own cancellation
+        semantics with it.
+        """
+        nonlocal speaking
+        speaking = asyncio.create_task(speak_turn(question, lines, record))
+        try:
+            await speaking
+        except asyncio.CancelledError:
+            if speaking.cancelled():
+                # Ours: the patient interrupted. Swallowed.
+                timing.mark("barge.stopped")
+                return
+            # Somebody cancelled `run_turn` itself — a newer utterance arrived
+            # before this one finished being answered. The speaking task is not
+            # cancelled by that on its own; awaiting a task and being cancelled
+            # while awaiting leaves the task running. Orphaning it here would
+            # leave a voice in the room belonging to a turn that has been
+            # abandoned, so it is cancelled explicitly before the error goes up.
+            speaking.cancel()
+            raise
+        finally:
+            speaking = None
 
     # ── The turn ────────────────────────────────────────────────────────────
 
@@ -544,6 +1035,10 @@ async def entrypoint(ctx: JobContext) -> None:
             return
 
         started = time.monotonic()
+        # The turn's own copy of the budget. Taken here, before anything can
+        # await: from this line on, a barge-in resetting the live record cannot
+        # reach these numbers. See `TurnLatency`.
+        record = latency.snapshot()
         timing.mark("turn.begin", chars=len(text), confidence=round(confidence, 3))
         # Read once, before the await: `pending_field` is rebound by whichever
         # turn resolves next, and this answer belongs to the question that was
@@ -617,6 +1112,7 @@ async def entrypoint(ctx: JobContext) -> None:
             accepted.get("reason") or "-",
         )
 
+        record.turn_posted = time.monotonic()
         remember_pending(result)
         await publish_turn(result)
 
@@ -625,9 +1121,12 @@ async def entrypoint(ctx: JobContext) -> None:
         if not lines:
             logger.info("engine returned nothing to say (status=%s)", result.interview_status)
             return
-        await say_all(lines)
+        await start_speaking(result.next_question, lines, record)
         mark_pending_spoken()
         timing.mark("turn.spoken")
+        report_latency(
+            record, result.next_question.field_path if result.next_question else None
+        )
 
     async def publish_error(
         stage: str, *, detail: str, status: int | None, final: bool
@@ -719,6 +1218,37 @@ async def entrypoint(ctx: JobContext) -> None:
         STATUS.agent_state = str(new)
         logger.debug("agent state %s -> %s", old, new)
 
+    @session.on("user_state_changed")
+    def _on_user_state(event: Any) -> None:
+        """The patient started or stopped talking. Both edges do a job.
+
+        **Started** is the barge-in. `turn_handling.interruption` already stops
+        the *playback* — that is livekit-agents' own job and it does it after
+        `BARGE_MIN_SEC` of speech — but it knows nothing about the synthesiser
+        still generating the rest of the sentence or the model still generating
+        the rest of the question. `stop_speaking` cancels all three, and it is
+        wired to the same signal so it cannot lag the playback cut.
+
+        Doing it here rather than on `agent_false_interruption` or on the final
+        transcript is the point: by the time a transcript exists the patient has
+        finished a sentence, and an agent that keeps talking until then is an
+        agent that talks over them.
+
+        **Stopped** is not used to resume anything. A cut-off question is
+        re-asked by the engine on the next turn if it is still outstanding, and
+        re-playing audio the patient interrupted is what
+        `resume_false_interruption: False` above exists to prevent.
+        """
+        new = str(getattr(event, "new_state", "") or "")
+        timing.mark("user.state", old=str(getattr(event, "old_state", "?")), new=new)
+        if new != "speaking":
+            return
+        # The anchor for every number in `TurnLatency`. Set on the edge into
+        # speaking rather than on the first transcript, because the patient's
+        # clock starts when they open their mouth and Whisper's starts later.
+        latency.begin()
+        stop_speaking("user started speaking")
+
     @session.on("user_input_transcribed")
     def _on_transcribed(event: Any) -> None:
         text = (getattr(event, "transcript", "") or "").strip()
@@ -732,6 +1262,8 @@ async def entrypoint(ctx: JobContext) -> None:
             # every `user_input_transcribed` into the room as it forms. Nothing
             # is posted to the engine from a partial — see the note below.
             STATUS.interims += 1
+            if latency.stt_first_partial is None:
+                latency.stt_first_partial = time.monotonic()
             timing.mark("transcript.interim", chars=len(text))
             logger.debug("partial: %s", text)
             return
@@ -742,6 +1274,13 @@ async def entrypoint(ctx: JobContext) -> None:
         # so [SidecarSTT] parks it and the handler claims it by text. See the
         # note on `SidecarSTT._confidences`.
         confidence = stt.claim_confidence(text)
+
+        nonlocal last_utterance
+        latency.stt_final = time.monotonic()
+        # Capped, not stored whole: this exists only to give the phrasing prompt
+        # something to follow on from, and a patient's narrative can be long
+        # enough to crowd the actual question out of a 4B model's attention.
+        last_utterance = text[:200]
 
         timing.mark("transcript.final", chars=len(text), confidence=round(confidence, 3))
         timing.set_context(text[:60])
@@ -796,6 +1335,27 @@ async def entrypoint(ctx: JobContext) -> None:
     STATUS.extra = lambda: {"sttLastError": stt.last_error, "sttRefusedLanguage": stt.refused_language}
     logger.info("connected to %s as %s", ctx.room.name, ctx.room.local_participant.identity)
 
+    # Probed once, here, rather than per question. A model that is not loaded
+    # costs ~31 s on this box and the probe itself is a 3 s timeout; paying
+    # either on the first question of an interview is the worst place in the
+    # session to spend it. A `False` turns phrasing off for the whole call and
+    # every question comes out in the engine's reviewed wording — which is the
+    # shipped behaviour anyway, since `MEDIHIVE_LLM_PHRASING` defaults to off.
+    if phrasing is not None:
+        phrasing_ready = await phrasing.available()
+        STATUS.llm = (
+            f"{SETTINGS.ollama_model} at {SETTINGS.ollama_url}"
+            if phrasing_ready
+            else "unavailable; questions come out in the engine's wording"
+        )
+        logger.info(
+            "llm phrasing %s (%s)",
+            "on" if phrasing_ready else "off",
+            STATUS.llm,
+        )
+    else:
+        STATUS.llm = "off (MEDIHIVE_LLM_PHRASING=0)"
+
     # ── The question on the table ───────────────────────────────────────────
     #
     # Asked by fetching the session rather than by inventing an opener. The
@@ -847,7 +1407,12 @@ async def entrypoint(ctx: JobContext) -> None:
                 await publish_turn(current)
                 lines = utterances(current)
                 if lines:
-                    await say_all(lines)
+                    # A fresh record with no `speech_start`: the opening
+                    # question answers nobody, so there is no patient clock to
+                    # measure it against and `report_latency` is not called.
+                    await start_speaking(
+                        current.next_question, lines, TurnLatency()
+                    )
                     mark_pending_spoken()
                 else:
                     logger.info("session %s has no pending question", session_id)
@@ -912,6 +1477,29 @@ async def entrypoint(ctx: JobContext) -> None:
         identity = getattr(participant, "identity", None)
         if not identity:
             return
+        if _is_agent(participant):
+            # Never take audio from another agent, whatever else is true.
+            #
+            # Measured in a live room: a second `medihive` worker was dispatched
+            # to the same session — two `POST /voice/token` calls create two
+            # dispatches — and this handler, seeing the patient slot empty,
+            # handed it the microphone. The worker then transcribed the *other
+            # agent's questions* and posted them to `/turns` as the patient's
+            # answers:
+            #
+            #     final: On a scale of nothing at all to the worst you can
+            #            imagine, where would you put it right now? 0 to 10.
+            #            (confidence 0.82)
+            #
+            # Six turns were written into a clinical record with no patient in
+            # the room. Whatever else is wrong when two agents meet, an agent
+            # is never the thing being interviewed, so the microphone must not
+            # follow one — and that is knowable here, from `kind`, rather than
+            # guessable from an identity prefix a deployment could change.
+            logger.warning(
+                "%s is an agent, not a patient; not linking audio to it", identity
+            )
+            return
         if linked_identity is not None:
             logger.info(
                 "%s joined while we are still listening to %s; not re-linking",
@@ -964,8 +1552,14 @@ async def entrypoint(ctx: JobContext) -> None:
         STATUS.connected = False
         if current_turn is not None and not current_turn.done():
             current_turn.cancel()
+        # Before the clients close, not after: a speaking task still inside
+        # `async with sidecar.speak_stream(...)` when the client shuts down
+        # raises on a closed transport instead of unwinding cleanly.
+        stop_speaking("room closed")
         await sidecar.aclose()
         await engine.aclose()
+        if phrasing is not None:
+            await phrasing.aclose()
 
     ctx.add_shutdown_callback(_cleanup)
 

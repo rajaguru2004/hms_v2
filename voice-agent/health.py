@@ -49,6 +49,14 @@ class WorkerStatus:
     last_error: str | None = None
     spoken_via: str | None = None
     tts_refused: str | None = None
+    # Whether gemma3 is wording the questions this call, and which one. A plain
+    # string rather than a boolean because "off" and "on but Ollama is not
+    # answering" are the same silence from outside and different problems.
+    llm: str = "off"
+    # The last turn's stage-by-stage budget, as `TurnLatency.summary()` built
+    # it. On /healthz because the alternative is reading two processes' NDJSON
+    # to answer "why did that feel slow", which nobody does mid-call.
+    last_latency: dict[str, Any] | None = None
     models: dict[str, Any] = field(default_factory=dict)
     extra: Callable[[], dict[str, Any]] | None = None
 
@@ -72,6 +80,8 @@ class WorkerStatus:
             # not quietly substituted.
             "spokenVia": self.spoken_via,
             "ttsRefusedFor": self.tts_refused,
+            "llm": self.llm,
+            "lastLatency": self.last_latency,
             # No model is loaded *in this process* except Silero. Whisper and
             # Piper are the sidecar's, on purpose, and are reported as such so
             # nobody goes looking for them in this process's RSS.

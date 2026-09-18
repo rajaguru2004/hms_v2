@@ -23,7 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np  # noqa: E402
 from livekit import rtc  # noqa: E402
 
-from audio import frames_duration, frames_to_wav, wav_to_frames  # noqa: E402
+from audio import (  # noqa: E402
+    PcmFramer,
+    frames_duration,
+    frames_to_wav,
+    wav_to_frames,
+)
 from config import Settings, load_env_file  # noqa: E402
 from sidecar import (  # noqa: E402
     SidecarClient,
@@ -33,6 +38,12 @@ from sidecar import (  # noqa: E402
 )
 
 PHRASE = "The patient has had a headache for three days."
+
+# Two sentences, for the streaming checks only. See the note beside them.
+TWO_SENTENCES = (
+    "The patient has had a headache for three days. "
+    "It has not improved with rest."
+)
 
 results: list[tuple[str, bool, str]] = []
 
@@ -85,6 +96,95 @@ async def main() -> int:
         bool(frames) and frames[0].samples_per_channel == rate * 20 // 1000,
         f"{frames[0].samples_per_channel if frames else 0} samples/frame",
     )
+
+    # ── Streaming TTS: the same audio, arriving before it is finished ───────
+    #
+    # The check that matters is the last one. A streaming route that is
+    # collected into a buffer somewhere in the middle — by a proxy, by an
+    # `aread()` left in by accident — still returns correct audio and still
+    # passes every other assertion here, while delivering none of the latency
+    # it exists for. Comparing first-audio against whole-utterance is the only
+    # thing that catches it.
+    #
+    # `TWO_SENTENCES`, not `PHRASE`, and that is the whole reason this constant
+    # exists. The streaming granularity is a *sentence* — Piper's generator
+    # yields one chunk per sentence and IndicF5 is chunked the same way — so a
+    # single-sentence utterance streams in exactly one piece and its first audio
+    # legitimately arrives at the same moment as its last. Measured: `PHRASE`
+    # gives 1079 ms of 1079 ms, which looks like a broken stream and is not.
+    print("\n=== TTS streaming (en) ===")
+    t0 = time.monotonic()
+    first_audio_ms: float | None = None
+    total_frames = 0
+    chunks = 0
+    provider_id = ""
+    stream_rate = 0
+    async with client.speak_stream(TWO_SENTENCES, "en") as stream:
+        provider_id = stream.provider
+        stream_rate = stream.sample_rate
+        framer = PcmFramer(stream.sample_rate, frame_ms=20)
+        async for chunk in stream.chunks:
+            chunks += 1
+            produced = framer.push(chunk)
+            if produced and first_audio_ms is None:
+                first_audio_ms = (time.monotonic() - t0) * 1000
+            total_frames += len(produced)
+        total_frames += len(framer.flush())
+    stream_ms = (time.monotonic() - t0) * 1000
+
+    check(
+        "POST /tts/stream en",
+        total_frames > 0 and provider_id == "piper",
+        f"{chunks} chunks, {total_frames} frames via {provider_id} in {stream_ms:.0f} ms",
+    )
+    check(
+        "the stream reports its sample rate",
+        stream_rate == 22050,
+        f"X-TTS-Sample-Rate: {stream_rate}",
+    )
+    # One chunk per sentence, so two sentences must not arrive as one blob.
+    # This is what fails if `synthesize_stream` is ever quietly replaced by the
+    # base class's whole-text fallback.
+    check(
+        "the stream arrives in pieces",
+        chunks >= 2,
+        f"{chunks} chunks for 2 sentences",
+    )
+    # Deliberately NOT an exact frame-count comparison against `/tts` for the
+    # same text. Piper pads the start and end of every chunk with a little
+    # silence, so N sentences streamed is legitimately a few frames longer than
+    # N sentences synthesised as one — measured at 121 vs 117 for one sentence.
+    # A strict equality here fails on correct behaviour; what is worth checking
+    # is that the duration is in the right place at all.
+    streamed_seconds = total_frames * 0.02
+    check(
+        "streamed audio is a plausible length",
+        2.0 < streamed_seconds < 12.0,
+        f"{streamed_seconds:.2f}s of audio in {total_frames} frames",
+    )
+    check(
+        "first audio arrives before the utterance is finished",
+        first_audio_ms is not None and first_audio_ms < stream_ms * 0.9,
+        f"first audio {first_audio_ms:.0f} ms of {stream_ms:.0f} ms total"
+        if first_audio_ms is not None
+        else "no audio at all",
+    )
+
+    # A refusal must look the same on both transports, or the streaming route
+    # becomes the way a Tamil session quietly gets an English voice.
+    try:
+        async with client.speak_stream(TWO_SENTENCES, "ta") as bad:
+            async for _ in bad.chunks:
+                break
+        check("/tts/stream ta refused", False, "SUBSTITUTED — serious")
+    except SidecarRefusal as refusal:
+        check(
+            "/tts/stream ta refused",
+            refusal.status == 503,
+            f"{refusal.status}: {refusal.patient_message}",
+        )
+    except SidecarUnavailable as exc:
+        check("/tts/stream ta refused", False, f"transport: {exc}")
 
     # ── TTS refusals: a language with no voice must NOT be substituted ──────
     print("\n=== TTS refusals (must not substitute) ===")

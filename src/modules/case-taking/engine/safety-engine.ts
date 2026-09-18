@@ -17,6 +17,7 @@
  */
 
 import { ClinicalState, readFactAt } from './clinical-state';
+import { assertSafetyPhrasebooks, safetyMessageFor } from './safety-phrasebook';
 import {
   STATIC_FIELDS,
   complaintCategories,
@@ -294,8 +295,20 @@ export function evaluateRule(
     ruleId: rule.id,
     ruleVersion: rule.version,
     severity: rule.severity,
+    // English on every rule, in every language. This is the triage list a
+    // clinician reads, and it must not change shape with the patient's
+    // language — same rule as `field.label` in `phrasebook.ts`.
     title: rule.title,
-    patientMessage: rule.message,
+    // The one string here the patient hears. `state.language` is the session's
+    // OUTPUT language, set by `loadState`, so a red flag comes out in the same
+    // language as the question that preceded it rather than switching to
+    // English at the one moment the patient most needs to understand it.
+    //
+    // Falls back to `rule.message` for English, an unreviewed book with the
+    // gate shut, or a rule the book has no instruction for. A translation can
+    // never suppress a flag: everything above this line has already decided
+    // the rule fired.
+    patientMessage: safetyMessageFor(rule.id, rule.message, state.language),
     clinicianSummary: rule.clinicianSummary,
     recommendedAction: rule.recommendedAction,
     matched: dedupeEvidence(matched),
@@ -365,3 +378,10 @@ function assertRulesReferenceRealFields(): void {
 }
 
 assertRulesReferenceRealFields();
+
+// Here rather than in `safety-phrasebook.ts` itself, so the books are checked
+// against the rule set by the module that owns the join between them — and so
+// that importing the books for a test or a tool does not run the check twice.
+// A half-translated book, a translation for a rule that no longer exists, or a
+// crisis instruction with the helpline number dropped all fail this startup.
+assertSafetyPhrasebooks();

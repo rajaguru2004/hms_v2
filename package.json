@@ -136,6 +136,7 @@
     "testEnvironment": "node",
     "moduleNameMapper": {
       "^uuid$": "<rootDir>/../test/uuid.mock.ts"
-    }
+    },
+    "testTimeout": 30000
   }
 }

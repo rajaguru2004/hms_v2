@@ -328,17 +328,44 @@ export class CaseTakingService {
       // the wrong data: it sends the *session's* input language, which was not
       // the one the patient had just chosen.
       //
-      // Only the INPUT language moves. `outputLanguage` stays as it is, and
-      // the facts already recorded keep the language they were recorded in —
-      // this changes what the recogniser is told next, nothing retrospective.
+      // BOTH languages move, and the output one is re-derived rather than
+      // carried over.
+      //
+      // It used to stay, on the argument that "the facts already recorded keep
+      // the language they were recorded in". That argument was about the facts,
+      // and the facts do keep their language — they are rows, and nothing here
+      // touches them. `outputLanguage` governs the questions asked *next*, and
+      // leaving it behind produced this row in the live database:
+      //
+      //     id=cmu6jmwbg0004rgcy04yfjw34  inputLanguage=en  outputLanguage=ta
+      //
+      // A session listening in English and speaking in Tamil, which nobody
+      // chose and no code path writes deliberately: it was started in Tamil,
+      // then resumed in English by a patient who changed their mind, and only
+      // half of the change landed. Every `/tts` call it made answered
+      // "[400] This voice is unavailable." because Tamil has no voice on that
+      // box, so the patient sat through a silent interview in a language they
+      // had already switched away from.
+      //
+      // Re-deriving costs nothing and cannot invent a language: it runs the
+      // same two gates as a new session, so an unspeakable or untranslated
+      // choice still comes back as English.
       const chosen = normaliseLanguage(dto.language);
-      const resumed =
-        chosen && chosen !== sessionInputLanguage(existing)
-          ? await this.repository.touchSession(existing.id, {
-              language: chosen,
-              inputLanguage: chosen,
-            })
-          : existing;
+      const speakableOnResume = await this.speakableLanguages();
+      const nextOutput = chosen
+        ? resolveOutputLanguage(chosen, speakableOnResume)
+        : sessionOutputLanguage(existing);
+      const moved =
+        chosen &&
+        (chosen !== sessionInputLanguage(existing) ||
+          nextOutput !== sessionOutputLanguage(existing));
+      const resumed = moved
+        ? await this.repository.touchSession(existing.id, {
+            language: chosen,
+            inputLanguage: chosen,
+            outputLanguage: nextOutput,
+          })
+        : existing;
 
       const view = await this.describeSession(resumed);
       return { ...view, resumed: true };
@@ -358,18 +385,22 @@ export class CaseTakingService {
       kind: dto.kind ?? 'new_consultation',
       // Written three times on purpose, and only two of them mean anything.
       //
-      // `inputLanguage` is the patient's choice. `outputLanguage` is the
-      // product's — English, on every session, for the reasons written beside
-      // `DEFAULT_OUTPUT_LANGUAGE` — and it is not taken from the request, so a
-      // handset cannot put an unreviewed clinical translation in front of a
-      // patient by sending a field.
+      // `inputLanguage` is the patient's choice. `outputLanguage` is *derived*
+      // from it by `resolveOutputLanguage` and still never taken from the
+      // request, so a handset cannot put an unreviewed clinical translation in
+      // front of a patient by sending a field — it can only choose a language,
+      // and the phrasebook review gate decides whether that language is one
+      // this deployment will actually answer in.
       //
       // `language` is the legacy column, kept in step with `inputLanguage` so
       // that the mobile client, the demo seed and anything else written before
       // the split keeps reading the value it always read. Nothing routes off it.
       language: inputLanguage,
       inputLanguage,
-      outputLanguage: DEFAULT_OUTPUT_LANGUAGE,
+      outputLanguage: resolveOutputLanguage(
+        inputLanguage,
+        await this.speakableLanguages(),
+      ),
       appointmentId: dto.appointmentId,
       status: 'in_progress',
     });
@@ -922,12 +953,31 @@ export class CaseTakingService {
     const live = health?.languages ?? {};
     const known = Object.keys(live).length > 0;
 
-    // Resolved once, not per row: every row's output is the same language, and
-    // asking the same question twelve times would invite twelve answers.
-    const outputLanguage = DEFAULT_OUTPUT_LANGUAGE;
-    const outputTts = known
-      ? live[outputLanguage]?.tts === true
-      : findLanguage(outputLanguage)?.tts === true;
+    // Per row, not once. This used to be one value for the whole catalogue,
+    // because `startOrResume` wrote one value for every session; now
+    // `resolveOutputLanguage` derives it from what the patient picked, so the
+    // picker has to answer per row or it tells a Tamil patient they will be
+    // answered in English on the screen where they are choosing Tamil.
+    //
+    // Computed with the same function the session write uses, so the picker's
+    // promise and the stored column cannot drift.
+    // The same list `startOrResume` gates on, off the health reply this method
+    // already fetched. Passing it here is what stops the picker promising a
+    // Tamil interview that `startOrResume` will then store as English.
+    const speakable =
+      health?.ttsLanguages && health.ttsLanguages.length > 0
+        ? health.ttsLanguages
+        : undefined;
+
+    const outputFor = (code: string) => {
+      const outputLanguage = resolveOutputLanguage(code, speakable);
+      return {
+        outputLanguage,
+        outputTts: known
+          ? live[outputLanguage]?.tts === true
+          : findLanguage(outputLanguage)?.tts === true,
+      };
+    };
 
     return {
       default: DEFAULT_LANGUAGE,
@@ -953,13 +1003,11 @@ export class CaseTakingService {
           // Hindi" is reading the wrong flag. So the two are reported side by
           // side and separately.
           ...questionCapability(language.code),
-          // The two fields that say what this patient actually gets. They are
-          // the same on every row on purpose: the output language is a product
-          // decision, not a consequence of what the patient picked, and a
-          // client should be able to read it off the row it is rendering
-          // rather than infer it from a rule written down somewhere else.
-          outputLanguage,
-          outputTts,
+          // The two fields that say what this patient actually gets if they
+          // pick THIS row. A row whose phrasebook is missing or unreviewed
+          // still answers `outputLanguage: 'en'`, which is the honest thing to
+          // show: the microphone will be Malayalam and the questions will not.
+          ...outputFor(language.code),
         };
       }),
     };
@@ -1380,6 +1428,26 @@ export class CaseTakingService {
    * check as everything else, so somebody else's session id is not found rather
    * than being a way to learn what language they speak.
    */
+  /**
+   * What can be read aloud on the box serving this request, or `undefined`.
+   *
+   * `undefined` is a real answer and means "could not find out" — the sidecar
+   * is down, or this deployment has none configured. It is deliberately not an
+   * empty array: an empty array says "nothing can be spoken", which would send
+   * every session to English, and a health probe that timed out must not be
+   * able to change what language a patient is interviewed in.
+   *
+   * `SidecarClient.health()` already answers `null` rather than throwing and
+   * has its own circuit breaker, so this cannot fail a session start. It is a
+   * loopback GET that the language picker one screen earlier has usually just
+   * warmed.
+   */
+  private async speakableLanguages(): Promise<readonly string[] | undefined> {
+    const health = await this.sidecar.health();
+    const languages = health?.ttsLanguages;
+    return languages && languages.length > 0 ? languages : undefined;
+  }
+
   private async voiceLanguage(
     sessionId: string | undefined,
     requested: string | undefined,
@@ -2180,6 +2248,71 @@ function sessionInputLanguage(session: CaseSession): string | null {
 function sessionOutputLanguage(session: CaseSession): string {
   const code = normaliseLanguage(session.outputLanguage);
   return findLanguage(code) ? code : DEFAULT_OUTPUT_LANGUAGE;
+}
+
+/**
+ * The language a NEW session will read and hear, given what the patient speaks.
+ *
+ * This is the one decision that turns the multilingual voice path on. Until it
+ * existed, `startOrResume` wrote `DEFAULT_OUTPUT_LANGUAGE` unconditionally, so
+ * a Tamil session was transcribed in Tamil and answered in English — correct
+ * while nothing downstream could speak Tamil, and wrong now that IndicF5 can.
+ *
+ * `phrasebookFor` is the gate, and it is the *same* gate the interview itself
+ * asks on every question (`fallbackPhrasing` -> `phrasingFor` -> here). So the
+ * column can never promise a language the questions will not actually come out
+ * in: an unreviewed phrasebook is invisible to both unless a deployment has
+ * explicitly set `MEDIHIVE_ALLOW_UNREVIEWED_PHRASEBOOKS`, and a language with
+ * no phrasebook at all falls back to English here rather than producing a
+ * session whose `outputLanguage` says `ml` and whose every question is English.
+ *
+ * ## The second gate: a voice that exists on THIS box
+ *
+ * `speakable` is the sidecar's `/health.ttsLanguages` — what can actually be
+ * read aloud here, right now, which changes with the deployment rather than
+ * with the code.
+ *
+ * The first version of this function deliberately ignored it, on the argument
+ * that a language whose questions are written but whose voice file is missing
+ * should still come out written in that language, because the patient reads it
+ * and taps the answer. That argument is right for a client that is mostly a
+ * screen. It is wrong for the thing this actually shipped into, and the log
+ * that proved it reads:
+ *
+ *     [11:24:19.353] WARN  [400] This voice is unavailable.
+ *     [11:25:32.617] WARN  [400] This voice is unavailable.
+ *     [11:25:41.064] WARN  [400] This voice is unavailable.
+ *
+ * — one per question, for a whole interview, on a box where IndicF5 cannot
+ * load (`ai4bharat/IndicF5` is gated and no Hugging Face token is set). The
+ * patient had dialled in. In a voice call, a language with no voice is not a
+ * degraded interview, it is silence, and the honest answer is the one this
+ * system gave for months: transcribe them in Tamil and answer in English, on a
+ * session whose `outputLanguage` column says `en` so the record agrees with
+ * what happened.
+ *
+ * This is not the substitution the language module forbids. That is serving one
+ * language's voice under another language's label at HTTP 200. This is choosing
+ * English *and saying so*, in the column, in the catalogue and on the screen —
+ * and it reverts by itself the moment `/health.ttsLanguages` gains the
+ * language, with no code change.
+ *
+ * ## When the sidecar cannot be reached
+ *
+ * `speakable` is undefined and only the phrasebook gate applies, which is the
+ * behaviour above this paragraph. A sidecar that is down speaks nothing in any
+ * language, so refusing to start a session over it would trade a question the
+ * patient can read for no interview at all.
+ */
+function resolveOutputLanguage(
+  inputLanguage: string,
+  speakable?: readonly string[],
+): string {
+  const code = normaliseLanguage(inputLanguage);
+  if (!code || code === DEFAULT_OUTPUT_LANGUAGE) return DEFAULT_OUTPUT_LANGUAGE;
+  if (!phrasebookFor(code)) return DEFAULT_OUTPUT_LANGUAGE;
+  if (speakable && !speakable.includes(code)) return DEFAULT_OUTPUT_LANGUAGE;
+  return code;
 }
 
 /**

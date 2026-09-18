@@ -92,6 +92,60 @@ def wav_to_frames(data: bytes, *, frame_ms: int = 20) -> list[rtc.AudioFrame]:
     return frames
 
 
+class PcmFramer:
+    """Raw PCM arriving in whatever sizes the engine chose, out in 20 ms frames.
+
+    `/tts/stream` yields a chunk per synthesised piece — one Piper sentence is
+    about 48 KB, one IndicF5 sentence rather more — and `rtc.AudioFrame` wants
+    a fixed, small frame so that a barge-in is noticed between two of them
+    rather than after a whole sentence. So the chunks are concatenated into a
+    rolling buffer and cut at frame boundaries.
+
+    The leftover matters. A chunk almost never divides evenly into 20 ms of
+    samples, and it is not guaranteed to contain a whole number of samples
+    either: a tail of one byte, dropped, shifts the parity of the entire rest of
+    the stream by a byte and every sample after it is noise. It is carried
+    instead, and [flush] emits what is left at the end of the utterance.
+    """
+
+    def __init__(self, sample_rate: int, *, frame_ms: int = 20) -> None:
+        self.sample_rate = sample_rate
+        # Two bytes per sample, mono. The frame length is derived from the rate
+        # rather than fixed, so 22050 Hz (Piper) and 24000 Hz (IndicF5) both
+        # produce 20 ms of audio rather than 20 ms of one and 18 of the other.
+        self._frame_bytes = max(2, int(sample_rate * frame_ms / 1000)) * 2
+        self._buffer = bytearray()
+
+    def push(self, chunk: bytes) -> list[rtc.AudioFrame]:
+        """Every whole frame this chunk completes. Possibly none."""
+        self._buffer.extend(chunk)
+        frames: list[rtc.AudioFrame] = []
+        while len(self._buffer) >= self._frame_bytes:
+            frames.append(self._frame(bytes(self._buffer[: self._frame_bytes])))
+            del self._buffer[: self._frame_bytes]
+        return frames
+
+    def flush(self) -> list[rtc.AudioFrame]:
+        """The tail, padded to a whole sample. Called once, at end of stream."""
+        if len(self._buffer) < 2:
+            self._buffer.clear()
+            return []
+        # An odd byte is a truncated sample and there is nothing to pair it
+        # with; dropping one byte at the very end costs nothing audible.
+        usable = len(self._buffer) - (len(self._buffer) % 2)
+        frame = self._frame(bytes(self._buffer[:usable]))
+        self._buffer.clear()
+        return [frame]
+
+    def _frame(self, payload: bytes) -> rtc.AudioFrame:
+        return rtc.AudioFrame(
+            data=payload,
+            sample_rate=self.sample_rate,
+            num_channels=1,
+            samples_per_channel=len(payload) // 2,
+        )
+
+
 async def frames_stream(frames: Iterable[rtc.AudioFrame]) -> AsyncIterator[rtc.AudioFrame]:
     """Hand frames to `session.say` as fast as it will take them.
 

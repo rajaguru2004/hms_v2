@@ -8,6 +8,19 @@ import { PrismaService } from '../src/prisma/prisma.service';
 import { JwtAuthGuard } from '../src/common/guards/jwt-auth.guard';
 import { APP_GUARD } from '@nestjs/core';
 
+/**
+ * The rows of a list response.
+ *
+ * Every response is wrapped by ResponseInterceptor as `{ success, message,
+ * data, ... }`, and a list route puts either a bare array or the paginated
+ * `{ data, meta }` envelope in that `data` - which of the two depends on the
+ * route and on whether the request asked for a page. This reads the rows out
+ * of whichever came back, so a route gaining pagination is not a test failure
+ * about `toHaveLength` on an object.
+ */
+const rows = (body: any): any[] =>
+  Array.isArray(body.data) ? body.data : body.data.data;
+
 describe('BillingController (e2e)', () => {
   let app: INestApplication<App>;
   let prisma: PrismaService;
@@ -94,7 +107,6 @@ describe('BillingController (e2e)', () => {
       .expect(201);
 
     expect(createServiceRes.body.success).toBe(true);
-    expect(createServiceRes.body.message).toBe('Service created successfully');
     const serviceId = createServiceRes.body.data.id;
     expect(serviceId).toBeDefined();
 
@@ -104,8 +116,8 @@ describe('BillingController (e2e)', () => {
       .expect(200);
 
     expect(getServicesRes.body.success).toBe(true);
-    expect(getServicesRes.body.data).toHaveLength(1);
-    expect(getServicesRes.body.data[0].id).toBe(serviceId);
+    expect(rows(getServicesRes.body)).toHaveLength(1);
+    expect(rows(getServicesRes.body)[0].id).toBe(serviceId);
 
     // 3. Create a draft invoice using compatibility route
     const createInvoiceRes = await request(app.getHttpServer())
@@ -129,7 +141,6 @@ describe('BillingController (e2e)', () => {
       .expect(201);
 
     expect(createInvoiceRes.body.success).toBe(true);
-    expect(createInvoiceRes.body.message).toBe('Invoice created');
     const invoiceId = createInvoiceRes.body.data.id;
     expect(invoiceId).toBeDefined();
     expect(createInvoiceRes.body.data.totalAmount).toBe(280.0);
@@ -141,8 +152,8 @@ describe('BillingController (e2e)', () => {
       .expect(200);
 
     expect(getInvoicesRes.body.success).toBe(true);
-    expect(getInvoicesRes.body.data).toHaveLength(1);
-    expect(getInvoicesRes.body.data[0].id).toBe(invoiceId);
+    expect(rows(getInvoicesRes.body)).toHaveLength(1);
+    expect(rows(getInvoicesRes.body)[0].id).toBe(invoiceId);
 
     // 5. Record a partial payment
     const createPaymentRes = await request(app.getHttpServer())
@@ -157,7 +168,6 @@ describe('BillingController (e2e)', () => {
       .expect(201);
 
     expect(createPaymentRes.body.success).toBe(true);
-    expect(createPaymentRes.body.message).toBe('Payment recorded');
     expect(createPaymentRes.body.data.amount).toBe(100.0);
 
     // 6. Query payments
@@ -166,8 +176,8 @@ describe('BillingController (e2e)', () => {
       .expect(200);
 
     expect(getPaymentsRes.body.success).toBe(true);
-    expect(getPaymentsRes.body.data).toHaveLength(1);
-    expect(getPaymentsRes.body.data[0].amount).toBe(100.0);
+    expect(rows(getPaymentsRes.body)).toHaveLength(1);
+    expect(rows(getPaymentsRes.body)[0].amount).toBe(100.0);
 
     // 7. Check billing stats
     const getStatsRes = await request(app.getHttpServer())

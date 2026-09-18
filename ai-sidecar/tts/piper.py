@@ -30,6 +30,7 @@ import threading
 import time
 import wave
 from pathlib import Path
+from typing import Iterator
 
 from .base import TTSProvider, UnsupportedLanguage, log_synthesis, rss_mb
 from .language_config import normalise
@@ -41,6 +42,51 @@ logger = logging.getLogger(__name__)
 # asks for them. An instance-level cache would reload on every reconfiguration.
 _loaded: dict[str, object] = {}
 _lock = threading.Lock()
+
+# One synthesis at a time, process-wide, whatever the voice.
+#
+# ## The bug this exists for
+#
+# Piper phonemises through espeak-ng, a C library that keeps the *current voice*
+# in a process-wide global and switches it with `espeak_SetVoiceByName`. Two
+# synthesis calls in flight at once therefore share one voice setting, and the
+# loser gets its text phonemised by the other one's language. For Devanagari
+# handed to `en-us` that produces **no phonemes at all**, which produces no
+# audio, which surfaces two frames later and nowhere near the cause as
+#
+#     File "/app/tts/piper.py", line 160, in synthesize
+#       with wave.open(buffer, "wb") as wav:
+#     wave.Error: # channels not specified
+#
+# — the WAV complaining that nothing was ever written to it. The route turns
+# that into `503 This voice is unavailable.`, so from outside it looks exactly
+# like a missing voice file, and it comes and goes with the order requests
+# happen to arrive in. Measured against the live sidecar: `/tts` English
+# succeeded, the Hindi call immediately after it failed, and the identical call
+# in a fresh process — where only one voice is ever selected — succeeded every
+# time.
+#
+# ## Why it appeared now
+#
+# It did not appear, it became reachable. `/tts` used to be an `async def` doing
+# blocking work directly on the event loop, so synthesis was serialised by
+# accident: nothing else in the process could run during it. Moving it to
+# `run_in_threadpool` — so a decode could no longer stall a live call — removed
+# that accident and let two syntheses overlap for the first time.
+#
+# ## Why a lock rather than one voice per process
+#
+# A worker per language is the shape that actually scales, and this service is
+# one uvicorn holding one Whisper on a 16 GB box. Serialising costs a queue on
+# the rare overlap; the alternative costs a second copy of every model.
+#
+# ## Held per call into espeak, never across a yield
+#
+# `synthesize` takes it for the whole of `synthesize_wav`, which has no
+# consumer to wait on. `synthesize_stream` takes it around each `next()` and
+# releases it before handing the chunk over, because its consumer reads at
+# realtime playback speed — see the long note there.
+_espeak_lock = threading.Lock()
 
 
 class PiperTTS(TTSProvider):
@@ -156,7 +202,7 @@ class PiperTTS(TTSProvider):
         voice = self._voice(language)
         started = time.perf_counter()
         buffer = io.BytesIO()
-        with wave.open(buffer, "wb") as wav:
+        with _espeak_lock, wave.open(buffer, "wb") as wav:
             # `synthesize_wav`, not `synthesize`: the latter is a per-sentence
             # chunk generator and leaves the WAV header unwritten, which
             # surfaces later as `wave.Error: # channels not specified` rather
@@ -166,3 +212,98 @@ class PiperTTS(TTSProvider):
         audio = buffer.getvalue()
         log_synthesis(self.id, language, text, time.perf_counter() - started, audio)
         return audio
+
+    def sample_rate(self, language: str) -> int:
+        """The voice's own rate, off its config — 22050 Hz for the medium voices.
+
+        Read from the loaded voice rather than from a constant. The two files on
+        disk are both 22050 Hz and a third could be 16000 or 48000; a hardcoded
+        rate would play it back at the wrong speed rather than fail, which is
+        the failure mode `audio.py` spends a paragraph on at the other end.
+
+        This loads the voice if it is not loaded, which is the point at which
+        this differs from [supports]: the rate is a property of the weights.
+        Callers ask it once per utterance, immediately before streaming, so the
+        load it may trigger is one the next line was going to trigger anyway.
+        """
+        voice = self._voice(language)
+        rate = getattr(getattr(voice, "config", None), "sample_rate", None)
+        return int(rate) if rate else 22050
+
+    def synthesize_stream(self, text: str, language: str) -> Iterator[bytes]:
+        """Real streaming: `PiperVoice.synthesize` is a per-sentence generator.
+
+        The base class would have worked — split, synthesise each piece whole,
+        strip the header — and this is the same thing minus two round trips
+        through a WAV container per sentence, using the API [synthesize] avoids
+        precisely *because* it yields chunks instead of writing a header.
+
+        No `set_wav_format` and no `wave` module here: `AudioChunk` carries raw
+        int16 already, which is exactly what the caller wants and what the
+        `/tts/stream` body is. `sample_rate` is not read off the chunks because
+        the header has already been sent by then — it comes from [sample_rate]
+        above, and the two agree because both come off the same voice config.
+        """
+        voice = self._voice(language)
+        started = time.perf_counter()
+        first = True
+        total = 0
+        # The lock is taken around each `next()` and released before the yield.
+        #
+        # NOT held across the whole generator, and that distinction is the
+        # difference between a lock and an outage. The consumer here is the
+        # LiveKit worker, which pushes frames into a room that plays them at
+        # realtime and applies backpressure — so it reads this generator at
+        # **speaking speed**, not as fast as it can. A lock spanning the yields
+        # is therefore held for the entire spoken duration of the utterance, and
+        # every other synthesis in the process queues behind a patient
+        # listening to a sentence. Measured, with the lock held across the
+        # loop:
+        #
+        #     piper en first chunk in 78456 ms (74 chars)
+        #
+        # — 78 seconds to start a two-second question, and a `/tts` caller that
+        # timed out at 60 s waiting for it.
+        #
+        # Per-`next()` is the right granularity because it is espeak's:
+        # `PiperVoice.phonemize` sets the voice and phonemises inside one call,
+        # so one call is the unit that must not interleave. Two utterances
+        # alternating a sentence at a time is fine; two utterances inside one
+        # `phonemize_espeak` is the bug the lock exists for.
+        chunks = voice.synthesize(text)
+        while True:
+            with _espeak_lock:
+                try:
+                    chunk = next(chunks)
+                except StopIteration:
+                    break
+            pcm = chunk.audio_int16_bytes
+            if not pcm:
+                continue
+            if first:
+                logger.info(
+                    "piper %s first chunk in %.0f ms (%d chars)",
+                    normalise(language),
+                    (time.perf_counter() - started) * 1000.0,
+                    len(text),
+                )
+                first = False
+            total += len(pcm)
+            yield pcm
+        if total == 0:
+            # Nothing at all came back. The commonest cause is text in a script
+            # the selected voice cannot phonemise, and it is worth a line here
+            # because the alternative is a 200 with an empty body — which the
+            # worker reads as a question that was spoken and heard.
+            logger.error(
+                "piper %s produced no audio for %d characters; "
+                "is the text in this voice's script?",
+                normalise(language),
+                len(text),
+            )
+        logger.debug(
+            "piper %s streamed %d bytes in %.2fs",
+            normalise(language),
+            total,
+            time.perf_counter() - started,
+        )

@@ -100,9 +100,24 @@ async def run(args: argparse.Namespace) -> int:
     settings = Settings.load()
     sidecar = SidecarClient(settings.sidecar_url)
 
-    print(f"synthesising via {settings.sidecar_url}/tts ...")
-    wav, provider = await sidecar.speak(args.say, args.language)
-    print(f"  {len(wav)} bytes of WAV from provider={provider}")
+    if args.say_wav:
+        # A recording of a real person, instead of the sidecar reading a string.
+        #
+        # This exists for the languages the sidecar cannot speak. Tamil is the
+        # case: `/tts ta` is a 503 on any box without IndicF5 weights, so there
+        # is no way to synthesise a Tamil patient — and that is exactly the box
+        # on which somebody most needs to check that Tamil speech is *heard*
+        # correctly. `tts/voices/ta/reference.wav` is six seconds of real Tamil,
+        # already in the tree as IndicF5's reference pair, and it makes a
+        # perfectly good patient.
+        wav = Path(args.say_wav).read_bytes()
+        provider = f"file:{Path(args.say_wav).name}"
+        print(f"reading {args.say_wav}")
+        print(f"  {len(wav)} bytes of WAV")
+    else:
+        print(f"synthesising via {settings.sidecar_url}/tts ...")
+        wav, provider = await sidecar.speak(args.say, args.language)
+        print(f"  {len(wav)} bytes of WAV from provider={provider}")
 
     room = rtc.Room()
     received: list[rtc.AudioFrame] = []
@@ -156,7 +171,7 @@ async def run(args: argparse.Namespace) -> int:
     # nobody has subscribed yet, and the VAD never sees the onset.
     await asyncio.sleep(args.warmup)
 
-    print(f'speaking: "{args.say}"')
+    print(f'speaking: {provider if args.say_wav else chr(34) + args.say + chr(34)}')
     started = time.monotonic()
     seconds = await _publish_wav(source, wav)
     print(f"  published {seconds:.2f}s of audio in {time.monotonic() - started:.2f}s wall")
@@ -242,6 +257,12 @@ def main() -> None:
         type=float,
         default=6.0,
         help="seconds to wait before --then-say; aim for mid-question",
+    )
+    parser.add_argument(
+        "--say-wav",
+        default=None,
+        help="publish this WAV instead of synthesising --say; the only way to "
+        "play a language the sidecar has no voice for (e.g. Tamil)",
     )
     parser.add_argument("--record", default=None, help="write received audio to this WAV")
     args = parser.parse_args()

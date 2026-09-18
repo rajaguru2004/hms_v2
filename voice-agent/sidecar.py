@@ -41,7 +41,9 @@ there to be read.
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import AsyncIterator
 
 import httpx
 
@@ -225,6 +227,108 @@ class SidecarClient:
             )
             raise SidecarRefusal(503, "This voice is unavailable.")
         return response.content, provider
+
+    @asynccontextmanager
+    async def speak_stream(self, text: str, language: str):
+        """`/tts/stream` held open, as a [SpokenStream]. Raw PCM, not a WAV.
+
+        ## Why a context manager rather than a plain async generator
+
+        Because cancelling it has to close the socket, and that is what makes
+        barge-in work end to end. The worker's speaking task is cancelled the
+        moment the patient starts talking; the `async with` exits by way of the
+        `CancelledError`, `httpx` closes the response, the sidecar's
+        `StreamingResponse` sees a dead client, and the generator behind it is
+        garbage-collected before it synthesises the *next* sentence.
+
+        Without that last step the sidecar carries on producing audio nobody
+        will ever hear, on the same CPU the next transcription needs. That is
+        the shape of the bug the whole-WAV path had: a barge-in cut the playback
+        and the synthesis ran to completion regardless, so interrupting the
+        agent made the box slower rather than faster.
+
+        ## The refusals are the same three, checked before any audio is yielded
+
+        `response.aread()` is not called — `raise_for_status` is avoided too,
+        because reading the body of an error is what turns a streamed refusal
+        into a usable sentence, and that has to happen *inside* the stream
+        context. 503 and 400 come back as [SidecarRefusal] exactly as they do
+        from [speak], so a caller can treat the two paths identically.
+        """
+        payload = {"text": text, "language": language}
+        started = timing.mark("tts.stream_start", chars=len(text), language=language)
+        try:
+            async with self._client.stream(
+                "POST", f"{self._base}/tts/stream", json=payload, timeout=self._tts_timeout
+            ) as response:
+                if response.status_code >= 400:
+                    # The body has not been read yet on a streamed response, and
+                    # `_detail` needs it. `aread()` fills `response.content`.
+                    await response.aread()
+                    timing.span(
+                        "tts.stream_refused", started, status=response.status_code
+                    )
+                    if response.status_code == 503:
+                        raise SidecarRefusal(
+                            503, _detail(response, "This voice is unavailable.")
+                        )
+                    if response.status_code == 400:
+                        raise SidecarRefusal(
+                            400, _detail(response, "There was nothing to say.")
+                        )
+                    raise SidecarUnavailable(
+                        f"/tts/stream returned {response.status_code}"
+                    )
+
+                provider = response.headers.get("X-TTS-Provider", "unknown")
+                spoken = response.headers.get("X-TTS-Language", language)
+                if spoken and spoken != language:
+                    # Same check as `speak`, for the same incident. It is worth
+                    # more here: this body has no container and no metadata, so
+                    # the header is the only thing that says what was spoken.
+                    logger.error(
+                        "sidecar streamed %s in %s; refusing to play it", language, spoken
+                    )
+                    raise SidecarRefusal(503, "This voice is unavailable.")
+
+                try:
+                    rate = int(response.headers.get("X-TTS-Sample-Rate", "0"))
+                except ValueError:
+                    rate = 0
+                if rate <= 0:
+                    # Not guessed. A wrong rate does not fail, it plays the
+                    # question back at the wrong pitch and speed, which reaches
+                    # the patient as a voice they cannot follow.
+                    raise SidecarUnavailable(
+                        "/tts/stream did not report a sample rate"
+                    )
+
+                timing.span(
+                    "tts.stream_open",
+                    started,
+                    provider=provider,
+                    rate=rate,
+                    language=spoken,
+                )
+                yield SpokenStream(
+                    provider=provider,
+                    language=spoken,
+                    sample_rate=rate,
+                    chunks=response.aiter_bytes(),
+                )
+        except httpx.HTTPError as exc:
+            timing.span("tts.stream_error", started, error=str(exc)[:120])
+            raise SidecarUnavailable(f"/tts/stream unreachable: {exc}") from exc
+
+
+@dataclass
+class SpokenStream:
+    """An open `/tts/stream` response: what is speaking, at what rate, and the audio."""
+
+    provider: str
+    language: str
+    sample_rate: int
+    chunks: AsyncIterator[bytes]
 
 
 def _detail(response: httpx.Response, fallback: str) -> str:
