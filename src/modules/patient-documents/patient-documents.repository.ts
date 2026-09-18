@@ -9,6 +9,17 @@ import {
 } from './pipeline/duplicates';
 
 /**
+ * A document, plus the outcome of the copy it duplicates.
+ *
+ * Only the two columns the message needs. Pulling the whole original would put
+ * a second patient-identifiable row on every detail response to answer a
+ * question about one sentence.
+ */
+export type PatientDocumentWithOriginal = PatientDocument & {
+  duplicateOf?: { status: string; failureReason: string | null } | null;
+};
+
+/**
  * Every query this module makes, and the only file that talks to Prisma.
  *
  * `BaseRepository` supplies the CRUD and injects `isDeleted: false` on
@@ -39,9 +50,16 @@ export class PatientDocumentsRepository extends BaseRepository<
     id: string,
     organizationId: string,
     patientId: string,
-  ): Promise<PatientDocument | null> {
+  ): Promise<PatientDocumentWithOriginal | null> {
     return this.prisma.patientDocument.findFirst({
       where: { id, organizationId, patientId, isDeleted: false },
+      // The first copy's outcome, for the one case where this row has none of
+      // its own: a duplicate never runs the pipeline, so if the original was
+      // rejected there is no other way for the reason to reach the patient.
+      // Two columns, one hop — `duplicateOf` is never a chain.
+      include: {
+        duplicateOf: { select: { status: true, failureReason: true } },
+      },
     });
   }
 

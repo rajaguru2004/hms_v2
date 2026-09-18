@@ -12,6 +12,7 @@ import { AppException } from '../../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../../common/exceptions/error-codes';
 import { DocumentPipelineService } from './document-pipeline.service';
 import {
+  EXTRACTION_UNAVAILABLE,
   IMAGE_TOO_SMALL,
   NO_TEXT_FOUND,
   NOTHING_EXTRACTED,
@@ -163,6 +164,35 @@ describe('pipeline — the prescription path', () => {
     expect(outcome.extraction?.confidence.extraction).not.toBe(0.9859);
   });
 
+  it('says nothing about the document when the extractor never ran', async () => {
+    // The outage this test exists for: the local model server was up enough to
+    // list its models and could not run one, so every extraction threw. The
+    // pipeline caught it, substituted an empty extraction, and described that
+    // emptiness — a prescription listing three drugs came back to the patient
+    // as "This document does not mention medications".
+    const pipeline = new DocumentPipelineService(
+      ocrReturning(PRESCRIPTION_BLOCKS, 0.9859),
+      {
+        extractJson: jest
+          .fn()
+          .mockRejectedValue(new Error('model unreachable')),
+        transcribeImage: jest.fn().mockResolvedValue(''),
+      },
+    );
+
+    const outcome = await pipeline.run(INPUT);
+
+    // Kept, not failed: the original is evidence and the OCR text is searchable.
+    expect(outcome.status).toBe('needs_review');
+    expect(outcome.ocrText).toMatch(/METFORMIN/i);
+
+    // But not one sentence about what the document does or does not contain.
+    expect(outcome.extraction?.extractionFailed).toBe(true);
+    expect(outcome.extraction?.facts).toBeUndefined();
+    expect(outcome.message).toBe(EXTRACTION_UNAVAILABLE);
+    expect(outcome.message).not.toBe(NOTHING_EXTRACTED);
+  });
+
   it('leaves allergies not_assessed for a prescription that never mentions them', async () => {
     const pipeline = new DocumentPipelineService(
       ocrReturning(PRESCRIPTION_BLOCKS, 0.9859),
@@ -171,8 +201,8 @@ describe('pipeline — the prescription path', () => {
 
     const outcome = await pipeline.run(INPUT);
 
-    expect(outcome.extraction?.facts.allergies.presence).toBe('not_assessed');
-    expect(outcome.extraction?.facts.allergies.label).not.toMatch(/no known/i);
+    expect(outcome.extraction?.facts?.allergies.presence).toBe('not_assessed');
+    expect(outcome.extraction?.facts?.allergies.label).not.toMatch(/no known/i);
   });
 
   it('flags a diagnosis the record does not hold', async () => {
@@ -266,7 +296,13 @@ describe('pipeline — the answers that are not a document', () => {
     expect(outcome.status).toBe('needs_review');
     expect(outcome.ocrText).toContain('METFORMIN');
     expect(outcome.extraction?.medications).toEqual([]);
-    expect(outcome.message).toBe(NOTHING_EXTRACTED);
+
+    // NOT `NOTHING_EXTRACTED`, which this asserted until the outage that
+    // showed why: that sentence says we read the document and found nothing
+    // medical in it, which is a finding. When the extractor never ran there is
+    // no finding to report — only our own failure to look.
+    expect(outcome.message).toBe(EXTRACTION_UNAVAILABLE);
+    expect(outcome.extraction?.extractionFailed).toBe(true);
   });
 });
 

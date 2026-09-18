@@ -44,6 +44,13 @@ export const ErrorCodes = {
   DB_UNIQUE_CONSTRAINT: 'DB_UNIQUE_CONSTRAINT',
   DB_FOREIGN_KEY_CONSTRAINT: 'DB_FOREIGN_KEY_CONSTRAINT',
   DB_RECORD_NOT_FOUND: 'DB_RECORD_NOT_FOUND',
+  /**
+   * The database could not be reached or the connection died mid-request —
+   * nothing to do with what was asked. Separate from INTERNAL_SERVER_ERROR so
+   * a client can tell "try that again" from "that will never work", and so
+   * these stop hiding in the same bucket as genuine bugs.
+   */
+  DB_UNAVAILABLE: 'DB_UNAVAILABLE',
 
   // Rate limiting
   TOO_MANY_REQUESTS: 'TOO_MANY_REQUESTS',

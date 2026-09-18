@@ -38,6 +38,20 @@ export const NOTHING_EXTRACTED =
   'We read this document but could not find any medical information in it. ' +
   'You can still keep it with your records, and a clinician can review it.';
 
+/**
+ * Read fine, but the structuring step could not run at all.
+ *
+ * Deliberately a different sentence from [NOTHING_EXTRACTED], and the
+ * difference is the point. That one is a finding about the document — we
+ * looked and there was nothing medical in it. This one is a statement about
+ * us: nobody looked. Saying the first when the second is true tells a patient
+ * their prescription lists no medicines, which is the §19 failure ("never
+ * convert 'Not found' into 'No'") arriving a step earlier than §19 guards.
+ */
+export const EXTRACTION_UNAVAILABLE =
+  'We saved this document but could not read it into information just now. ' +
+  'It is kept with your records, and a clinician can review it.';
+
 /** The file was not a photograph or a PDF. §27. */
 export const UNSUPPORTED_FILE =
   'This kind of file cannot be read. Please upload a photo of the document, ' +
@@ -47,6 +61,22 @@ export const UNSUPPORTED_FILE =
 export const DUPLICATE_DOCUMENT =
   'You have already uploaded this document. We have kept it with the first ' +
   'copy rather than adding it twice.';
+
+/**
+ * The same document again — and the copy already held was never readable.
+ *
+ * Prefixed to the first copy's own `failureReason`, which is the only sentence
+ * on the screen the patient can act on.
+ *
+ * [DUPLICATE_DOCUMENT] alone is actively misleading here: it says the document
+ * is safely filed with the first copy, when the first copy was rejected and
+ * nothing has ever been read from either. Somebody re-sending the same photo
+ * gets "you already sent this" each time and is never told that the photo was
+ * too small — so they re-send it again. The dedupe check runs before the status
+ * check, so this was the one path where the reason could not reach them.
+ */
+export const DUPLICATE_OF_UNREADABLE =
+  'You have already sent this document, and we could not read that copy.';
 
 /** Everything worked. Said here because §2 forbids implying it is verified. */
 export const AWAITING_REVIEW =

@@ -83,6 +83,22 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       status = result.status;
       message = result.message;
       errorCode = result.errorCode;
+    } else if (
+      exception instanceof Prisma.PrismaClientInitializationError ||
+      exception instanceof Prisma.PrismaClientRustPanicError
+    ) {
+      // Not a `KnownRequestError`, so these used to fall through to the
+      // generic branch below and be reported as "Internal server error" with
+      // their message discarded — which is how a database that was simply
+      // unreachable looked exactly like a bug in the handler that touched it.
+      this.logger.error(
+        `Database unavailable: ${exception.message}`,
+        exception.stack,
+        { correlationId, path: request.url },
+      );
+      status = HttpStatus.SERVICE_UNAVAILABLE;
+      message = 'The database is not reachable right now. Please try again.';
+      errorCode = ErrorCodes.DB_UNAVAILABLE;
     } else if (exception instanceof Error) {
       // Unexpected errors — log full stack, return generic 500
       this.logger.error(
@@ -134,11 +150,37 @@ export class GlobalExceptionFilter implements ExceptionFilter {
           message: 'Related record not found',
           errorCode: ErrorCodes.DB_FOREIGN_KEY_CONSTRAINT,
         };
+      // Connection-class failures: the request never reached the database, or
+      // the socket died under it. P1017 is the one this codebase has actually
+      // seen — a pooled connection discarded by Docker Desktop's port proxy —
+      // and P2024 is its sibling, the pool handing out nothing in time.
+      //
+      // 503 rather than 500, because the distinction is the whole point: the
+      // request was fine and repeating it will probably work. As a 500 with a
+      // generic code these were indistinguishable from real bugs, which cost
+      // an afternoon of looking for a fault in an upload handler that did not
+      // have one.
+      case 'P1000':
+      case 'P1001':
+      case 'P1002':
+      case 'P1008':
+      case 'P1017':
+      case 'P2024':
+        this.logger.error(`Database unavailable: ${error.code}`, error);
+        return {
+          status: HttpStatus.SERVICE_UNAVAILABLE,
+          message: 'The database is not reachable right now. Please try again.',
+          errorCode: ErrorCodes.DB_UNAVAILABLE,
+        };
       default:
         this.logger.error(`Unhandled Prisma error: ${error.code}`, error);
         return {
           status: HttpStatus.INTERNAL_SERVER_ERROR,
-          message: 'Database error',
+          // The Prisma code, not a flattened constant. Without it the response
+          // said only "Database error" and the code was dropped on the floor,
+          // so the one fact that would have identified the failure never left
+          // the process.
+          message: `Database error (${error.code})`,
           errorCode: ErrorCodes.INTERNAL_SERVER_ERROR,
         };
     }

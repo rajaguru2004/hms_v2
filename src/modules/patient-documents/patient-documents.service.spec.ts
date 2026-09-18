@@ -896,6 +896,54 @@ describe('the sentence a row says', () => {
     ).toBe(DUPLICATE_DOCUMENT);
   });
 
+  it('gives a duplicate of a rejected copy the reason it was rejected', () => {
+    // The loop this closes: a photo is rejected as too small, the patient
+    // sends the same file again, dedupe catches it, and the screen says only
+    // "we have kept it with the first copy" — which sounds like success. They
+    // send it again. Nothing ever tells them to move the camera closer.
+    const tooSmall =
+      'This image is too small to read. Please take the photo again, ' +
+      'holding the camera closer so the page fills the frame.';
+
+    const message = messageFor({
+      ...base,
+      status: 'uploaded',
+      duplicateOfId: 'doc-1',
+      duplicateOf: { status: 'rejected_quality', failureReason: tooSmall },
+    });
+
+    expect(message).toContain(tooSmall);
+    expect(message).not.toBe(DUPLICATE_DOCUMENT);
+    // Still told it was a duplicate — §21 is "recorded and told", and the
+    // patient should not think this is a different document.
+    expect(message).toContain('already sent this document');
+  });
+
+  it('never claims a failed copy is safely filed, even with no reason stored', () => {
+    const message = messageFor({
+      ...base,
+      status: 'uploaded',
+      duplicateOfId: 'doc-1',
+      duplicateOf: { status: 'failed', failureReason: null },
+    });
+
+    expect(message).toContain(UNREADABLE_DOCUMENT);
+    expect(message).not.toMatch(/undefined|null/);
+  });
+
+  it('leaves an ordinary duplicate alone', () => {
+    // The original succeeded, so there is nothing to warn about and the plain
+    // sentence is the right one.
+    expect(
+      messageFor({
+        ...base,
+        status: 'uploaded',
+        duplicateOfId: 'doc-1',
+        duplicateOf: { status: 'verified', failureReason: null },
+      }),
+    ).toBe(DUPLICATE_DOCUMENT);
+  });
+
   it('distinguishes "we found something" from "we found nothing"', () => {
     expect(messageFor({ ...base, extraction: { medications: ['x'] } })).toBe(
       AWAITING_REVIEW,
