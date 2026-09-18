@@ -265,6 +265,43 @@ export function phrasingFor(field: FieldDefinition, language?: string): string {
 }
 
 /**
+ * The question with no answer hint — what a person would actually say.
+ *
+ * [phrasingFor] appends the shape of the expected answer: "You can answer yes
+ * or no.", "You can say: mild, moderate, severe." That hint earns its place on
+ * a screen with tiles under it, and it is the whole of §42's offline mode, but
+ * it is written for an eye that can see the options.
+ *
+ * Spoken aloud, sixty times, it is not a conversation. Every question arrives
+ * with the same clause welded to the end, and a patient who has just said "it
+ * comes and goes, mostly at night" is told they can answer yes or no. The hint
+ * is also the least necessary part of the spoken interview: the agent's Whisper
+ * hears a sentence and the engine's `derivePresence` reads it, so "not really,
+ * only when I climb stairs" is understood without anyone being coached into
+ * saying "no".
+ *
+ * So the voice path speaks this and the touch path keeps [phrasingFor]. Same
+ * registry, same translations, same question — one of them just stops telling
+ * the patient how to talk.
+ */
+export function spokenPhrasingFor(
+  field: FieldDefinition,
+  language?: string,
+): string {
+  const book = phrasebookFor(language);
+  const bare = (questionFor(book, field.key) ?? field.prompt).trim();
+  // Never empty, and `social.age_band` is why: it carries no prompt of its own
+  // because the interview never asks it — it is read off the patient record —
+  // so the bare question is the empty string and its written form is the hint
+  // alone, " You can say: infant, child, …". Returning that empty string would
+  // hand a speaking client silence where a question should be. Nothing asks
+  // this field today, which is exactly what makes it worth pinning: the rule is
+  // that a spoken question is a question, and a field that acquires a prompt
+  // later must not be the thing that discovers this.
+  return bare || composePhrasing(field, book).trim();
+}
+
+/**
  * The composition, separated from the lookup.
  *
  * Two different jobs: `phrasebookFor` decides *which* book applies — language
@@ -290,7 +327,15 @@ export function composePhrasing(
     ? substituteChoices(template, field, book)
     : template;
 
-  return hint === '' ? base : `${base} ${hint}`;
+  if (hint === '') return base;
+  // `base` is empty for a field that carries no prompt of its own — today only
+  // `social.age_band`, which the interview never asks because it is read off
+  // the patient record. Joining regardless produced a leading space: the
+  // rendered question was " You can say: infant, child, …", a sentence starting
+  // with a hole where the question should be. Never surfaced, because nothing
+  // asks that field; still wrong, and it is the kind of wrong that shows up on
+  // a projector the first time somebody gives the field a prompt.
+  return base === '' ? hint : `${base} ${hint}`;
 }
 
 const CHOICES_PLACEHOLDER = '{choices}';

@@ -85,6 +85,68 @@ services:
       timeout: 3s
       retries: 20
 
+  # The media server the live voice conversation runs over.
+  #
+  # Self-hosted rather than LiveKit Cloud, and the reason is the handset. The
+  # phone dials this URL *directly* — Nest mints a token and hands back the
+  # address, it does not proxy the media — so the address has to be one the
+  # phone can reach. On a developer's wifi that is the laptop's LAN address, and
+  # a cloud project would put a third party between two devices that are a metre
+  # apart. It also needs no account, which is what makes `npm run dev` enough.
+  #
+  # ── `--dev` and the credentials below
+  #
+  # `--dev` starts the server with the well-known development key/secret pair
+  # `devkey` / `secret`, no TLS and no admission control. Those three facts are
+  # the same fact: this is a development media server on a private network, and
+  # the credentials are published in LiveKit's own documentation. **Anything
+  # deployed must not use this file** — it is `docker-compose.local.yml`, it
+  # binds the LAN, and a real deployment needs a real key, TLS and a turn server.
+  #
+  # ── Why the ports look like that
+  #
+  # 7880 is the signalling websocket, which is the only one the app names. The
+  # other two carry the media, and they are the ones that decide whether a room
+  # that connects can actually be heard: WebRTC publishes them as ICE candidates
+  # and the audio goes over them directly, so a missing mapping is not a refused
+  # connection — it is a room that joins, shows a live microphone, and passes no
+  # sound in either direction.
+  #
+  # **7882/udp, not a range.** `--dev` puts the server in single-port UDP mode
+  # and its own startup log says so: `rtc.portUDP {"Start":7882,"End":0}`. A
+  # published 50000-50019 range was exactly wrong — twenty ports nothing listens
+  # on, and the one port that matters unmapped.
+  #
+  # `network_mode: host` would avoid naming any of them, and is deliberately not
+  # used: it would put the container on every interface of a machine that also
+  # runs two other stacks.
+  #
+  # ── `--node-ip`, and why it cannot be left out
+  #
+  # The address the server advertises in its ICE candidates. Left alone it
+  # advertises the container's own `172.x`, which is routable from this host and
+  # from nowhere else — so the phone connects the websocket, joins the room, and
+  # then waits for audio from an address on a docker bridge it has never heard
+  # of. It has to be the LAN address, which is a DHCP lease, which is why it is
+  # a variable and not a constant. `npm run dev` reads it from .env.local and
+  # exports it; a bare `docker compose up livekit` without it falls back to
+  # loopback and only works from this machine.
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: hms_v2_livekit_local
+    restart: unless-stopped
+    command: --dev --bind 0.0.0.0 --node-ip ${LIVEKIT_NODE_IP:-127.0.0.1}
+    ports:
+      - '7880:7880'
+      - '7881:7881'
+      - '7882:7882/udp'
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'wget -qO- http://localhost:7880/ >/dev/null || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   # The e2e database `.env.test` expects: port 5433, user hms_user, db
   # hms_v2_test. `tmpfs` rather than a volume because the suite truncates every
   # table on each run — there is nothing here worth keeping across a restart,

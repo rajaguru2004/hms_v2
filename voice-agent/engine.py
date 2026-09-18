@@ -61,6 +61,21 @@ class NextQuestion:
     prompt: str
     remaining: int
     choices: list[str] = field(default_factory=list)
+    #: The question with no answer hint, which is what gets spoken.
+    #:
+    #: `prompt` ends in the shape of the expected answer — "You can answer yes
+    #: or no." — written for a screen with tiles under it. Said aloud on every
+    #: one of sixty questions it is the clause that makes this a form being read
+    #: at somebody rather than a conversation.
+    #:
+    #: Defaults to empty rather than to `prompt`, so `spoken_text` can tell "the
+    #: server did not send one" from "the server sent one and it is short".
+    spoken_prompt: str = ""
+
+    @property
+    def spoken_text(self) -> str:
+        """What to say. Falls back to `prompt` against an older API."""
+        return (self.spoken_prompt or self.prompt).strip()
 
 
 @dataclass
@@ -141,6 +156,7 @@ class TurnResult:
                 label=str(q.get("label") or ""),
                 kind=str(q.get("kind") or ""),
                 prompt=str(q.get("prompt") or ""),
+                spoken_prompt=str(q.get("spokenPrompt") or ""),
                 remaining=int(q.get("remaining") or 0),
                 choices=[str(c) for c in (q.get("choices") or [])],
             )
@@ -174,8 +190,8 @@ def utterances(result: TurnResult) -> list[str]:
     out: list[str] = []
     if result.patient_message:
         out.append(result.patient_message)
-    if result.next_question and result.next_question.prompt.strip():
-        out.append(result.next_question.prompt.strip())
+    if result.next_question and result.next_question.spoken_text:
+        out.append(result.next_question.spoken_text)
     return out
 
 

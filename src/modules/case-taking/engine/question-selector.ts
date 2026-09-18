@@ -29,7 +29,7 @@ import {
   sectionRank,
 } from './clinical-state';
 import { FieldDefinition, applicableFields } from './field-registry';
-import { phrasingFor } from './phrasebook';
+import { phrasingFor, spokenPhrasingFor as spokenPhrasing } from './phrasebook';
 import { isAssessed } from './tri-state';
 
 export interface SelectedQuestion {
@@ -362,4 +362,18 @@ export function fallbackPhrasing(
   language?: string,
 ): string {
   return phrasingFor(field, language);
+}
+
+/**
+ * The same question with the answer hint left off, for anything that speaks it.
+ *
+ * Re-exported here beside [fallbackPhrasing] rather than imported from the
+ * phrasebook at each call site, so the two phrasings of one question are found
+ * together and a reader choosing between them sees both.
+ */
+export function spokenPhrasingFor(
+  field: FieldDefinition,
+  language?: string,
+): string {
+  return spokenPhrasing(field, language);
 }

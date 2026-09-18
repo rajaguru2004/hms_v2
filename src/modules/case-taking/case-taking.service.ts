@@ -38,6 +38,7 @@ import {
 import {
   compareFields,
   fallbackPhrasing,
+  spokenPhrasingFor,
   interviewProgress,
   interviewStatus,
   outstandingFields,
@@ -161,6 +162,19 @@ export interface NextQuestionView {
   kind: string;
   choices?: readonly string[];
   prompt: string;
+  /**
+   * The same question with no answer hint, for anything that says it out loud.
+   *
+   * `prompt` ends in the shape of the expected answer — "You can answer yes or
+   * no." — which belongs over a row of tiles and does not belong in a
+   * conversation. Spoken sixty times it is the clause that makes the interview
+   * sound like a form being read at somebody.
+   *
+   * Sent alongside rather than instead of: the touch UI still wants the hint,
+   * and a client written before this field existed still gets a complete
+   * question. See `spokenPhrasingFor`.
+   */
+  spokenPrompt: string;
   remaining: number;
 }
 
@@ -1047,6 +1061,24 @@ export class CaseTakingService {
       canPublishData: false,
       roomCreate: false,
       roomAdmin: false,
+      // The app sets `inputLanguage` and `outputLanguage` as participant
+      // attributes on join, so an agent reading them needs no round trip. That
+      // is a metadata write, LiveKit defaults the permission to false, and
+      // without it the join fails outright:
+      //
+      //     NOT_ALLOWED - does not have permission to update own metadata
+      //
+      // — after the media path is fully up, which made it look like a broken
+      // microphone rather than a missing claim on a token.
+      //
+      // Safe to grant, and narrowly so: it permits a participant to write its
+      // *own* attributes in its *own* room, and nothing downstream trusts them.
+      // The authority on what the patient speaks is the session row — that is
+      // why `languages` above is read off the session and not off `dto`, and
+      // why the same pair travels in this token's metadata and on the dispatch.
+      // These attributes are a convenience for the agent, not a second source
+      // of truth it could be talked into believing.
+      canUpdateOwnMetadata: true,
     });
 
     await this.dispatchVoiceAgent(
@@ -1904,6 +1936,7 @@ export class CaseTakingService {
         kind: selected.field.kind,
         choices: selected.field.choices,
         prompt,
+        spokenPrompt: spokenPhrasingFor(selected.field, state.language),
         remaining: selected.remaining,
       },
       // `markAsked` rather than the selector's combined call, because the turn
@@ -2217,6 +2250,10 @@ function currentQuestionFrom(
       kind: field.kind,
       choices: field.choices,
       prompt: turn.questionText ?? fallbackPhrasing(field, state.language),
+      // Off the registry, never off `turn.questionText`: the stored text is
+      // what was asked *with* its hint, and stripping a clause back off a
+      // sentence is guesswork the phrasebook can answer exactly.
+      spokenPrompt: spokenPhrasingFor(field, state.language),
       remaining: outstandingFields(state).length,
     };
   }
@@ -2230,6 +2267,7 @@ function currentQuestionFrom(
         kind: selected.field.kind,
         choices: selected.field.choices,
         prompt: selected.fallbackPrompt,
+        spokenPrompt: spokenPhrasingFor(selected.field, state.language),
         remaining: selected.remaining,
       }
     : null;

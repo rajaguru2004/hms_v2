@@ -20,11 +20,12 @@
  * Flags:
  *   --skip-ollama    do not start or check Ollama
  *   --skip-sidecar   do not start or check the AI sidecar (STT/TTS/OCR)
+ *   --skip-agent     do not start or check the live-conversation voice agent
  *   --no-api         bring the dependencies up and exit without running Nest
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, openSync, readFileSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -32,10 +33,12 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sidecarDir = path.join(root, 'ai-sidecar');
+const agentDir = path.join(root, 'voice-agent');
 const args = new Set(process.argv.slice(2));
 
 const SKIP_OLLAMA = args.has('--skip-ollama');
 const SKIP_SIDECAR = args.has('--skip-sidecar');
+const SKIP_AGENT = args.has('--skip-agent');
 const NO_API = args.has('--no-api');
 
 // The container the demo stack publishes on 3000. The source-run API cannot
@@ -124,6 +127,8 @@ function readEnvLocal() {
     ollamaUrl: 'http://127.0.0.1:11434',
     ollamaModel: 'gemma3:4b',
     sidecarUrl: 'http://127.0.0.1:8801',
+    livekitUrl: '',
+    livekitNodeIp: '',
   };
   if (!existsSync(file)) {
     warn('.env.local missing - falling back to defaults, which are probably wrong here');
@@ -139,10 +144,40 @@ function readEnvLocal() {
   cfg.ollamaUrl = pick(/^\s*OLLAMA_URL\s*=\s*"?([^"\r\n]+)/m) ?? cfg.ollamaUrl;
   cfg.ollamaModel = pick(/^\s*OLLAMA_MODEL\s*=\s*"?([^"\r\n]+)/m) ?? cfg.ollamaModel;
   cfg.sidecarUrl = pick(/^\s*AI_SIDECAR_URL\s*=\s*"?([^"\r\n]+)/m) ?? cfg.sidecarUrl;
+  // Empty is meaningful for both: it is how "this deployment has no media
+  // server" is said, and it is what makes the live-voice steps skippable rather
+  // than fatal. The API says the same thing to the handset — /voice/token
+  // refuses with a written sentence and the interview carries on by tap and
+  // keyboard, which is the posture the whole feature is built in.
+  cfg.livekitUrl = pick(/^\s*LIVEKIT_URL\s*=\s*"?([^"\r\n]+)/m) ?? cfg.livekitUrl;
+  cfg.livekitNodeIp = pick(/^\s*LIVEKIT_NODE_IP\s*=\s*"?([^"\r\n]+)/m) ?? cfg.livekitNodeIp;
   return cfg;
 }
 
 const portOf = (url, fallback) => Number(new URL(url).port || fallback);
+
+const hostOf = (url) => {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+};
+
+/**
+ * Whether `LIVEKIT_URL` points at a media server this script should start.
+ *
+ * Loopback and the machine's own LAN address both count — they are two ways of
+ * naming the same container, and which one is configured depends on whether a
+ * handset has to reach it. Anything else is somebody else's server: LiveKit
+ * Cloud, or a shared one on the network.
+ */
+function isLocalLivekit(url) {
+  if (!url) return false;
+  const host = hostOf(url);
+  if (!host) return false;
+  return host === 'localhost' || host === '127.0.0.1' || host === lanAddress();
+}
 
 /** First non-internal IPv4 address - what a phone on the same Wi-Fi dials. */
 function lanAddress() {
@@ -158,7 +193,7 @@ function lanAddress() {
 }
 
 async function ensureDocker() {
-  step('1/6', 'Docker');
+  step('1/7', 'Docker');
   // `docker version` rather than `docker info`: during Desktop's startup the
   // named pipe exists and answers 500, and `info` has been seen to exit 0 with
   // an empty version, which reads as "up" when it is not.
@@ -194,7 +229,7 @@ async function ensureDocker() {
 }
 
 async function ensureInfra(cfg) {
-  step('2/6', 'Postgres / Redis / MinIO');
+  step('2/7', 'Postgres / Redis / MinIO');
   const composeArgs = ['compose', '-f', 'docker-compose.local.yml'];
   // Both overrides are untracked, machine-local and optional.
   //   .ports.yml   remaps host-side ports away from the ones other projects'
@@ -211,10 +246,34 @@ async function ensureInfra(cfg) {
       log(`  using ${why}`);
     }
   }
-  const up = sh('docker', [...composeArgs, 'up', '-d', 'postgres', 'redis', 'minio']);
+  // The media server comes up only when `LIVEKIT_URL` names *this* machine.
+  //
+  // Pointed at LiveKit Cloud — which is what a real deployment does, and what
+  // .env.local says today — a local one would be a second media server nothing
+  // dials: a container holding memory on a box that has been OOM-killed before,
+  // and a name in `docker ps` that invites somebody debugging a silent room to
+  // read the logs of a server neither the phone nor the agent ever connected to.
+  const services = ['postgres', 'redis', 'minio'];
+  if (isLocalLivekit(cfg.livekitUrl)) services.push('livekit');
+
+  // `LIVEKIT_NODE_IP` is interpolated into the livekit service's command by
+  // Compose, and Compose reads it from *this* process's environment. It is the
+  // address the media server advertises in its ICE candidates, so getting it
+  // wrong is not a failure to start — it is a room that joins and then carries
+  // no audio. .env.local is the source; the LAN address is the fallback,
+  // because that is what it has to be for a handset to hear anything.
+  const composeEnv = {
+    LIVEKIT_NODE_IP: cfg.livekitNodeIp || lanAddress() || '127.0.0.1',
+  };
+  const up = sh('docker', [...composeArgs, 'up', '-d', ...services], {
+    env: composeEnv,
+  });
   if (up.status !== 0) {
     warn(`compose up failed:\n${up.stderr || up.stdout}`);
     return false;
+  }
+  if (!services.includes('livekit')) {
+    log(`  livekit: using ${hostOf(cfg.livekitUrl) || 'the configured server'}, not starting a local one`);
   }
   // On a single-drive MinIO a directory under /data *is* a bucket, so this is
   // exactly what `mc mb` would do - and it means the first upload cannot fail
@@ -229,7 +288,7 @@ async function ensureInfra(cfg) {
 }
 
 async function ensureOllama(cfg) {
-  step('3/6', 'Ollama');
+  step('3/7', 'Ollama');
   if (SKIP_OLLAMA) {
     log('  skipped');
     return true;
@@ -248,10 +307,25 @@ async function ensureOllama(cfg) {
       stdio: 'ignore',
       env: { ...process.env, OLLAMA_HOST: `0.0.0.0:${port}` },
     });
+    // A spawn that cannot find its binary reports asynchronously, as an 'error'
+    // event — and an unhandled one on a ChildProcess is a thrown exception that
+    // took the whole script down. It did: with `ollama` not on PATH, a dev run
+    // died here with a raw ENOENT stack, after Postgres and before the API,
+    // which reads as "the dev script is broken" rather than "install ollama".
+    //
+    // Ollama is an enhancement to the interview, not a precondition for it —
+    // the questions are chosen by a deterministic engine and nothing on the hot
+    // path waits on a model — so a missing one is a warning, exactly like a
+    // model that is present but never answers.
+    let spawnFailed = false;
+    child.on('error', (error) => {
+      spawnFailed = true;
+      warn(`could not start ollama: ${error.message}`);
+    });
     child.unref();
-    if (!(await waitPort(port, 'ollama', 60))) {
+    if (spawnFailed || !(await waitPort(port, 'ollama', 60))) {
       warn('ollama did not start - AI features will fail.');
-      warn('install:  winget install --id Ollama.Ollama -e');
+      warn('install: https://ollama.com/download  (or start it yourself and re-run)');
       return false;
     }
   }
@@ -276,7 +350,7 @@ async function ensureOllama(cfg) {
 }
 
 async function ensureSidecar(cfg) {
-  step('4/6', 'AI sidecar (STT / TTS / OCR)');
+  step('4/7', 'AI sidecar (STT / TTS / OCR)');
   if (SKIP_SIDECAR) {
     log('  skipped');
     return true;
@@ -356,8 +430,68 @@ async function ensureSidecar(cfg) {
  * it. That container is the only thing this will stop, and only when it is in
  * fact holding the port we need.
  */
+/**
+ * The worker that makes the microphone a conversation.
+ *
+ * It joins the patient's LiveKit room, runs Silero VAD to decide when a turn
+ * has ended, posts the transcript to `/turns` and speaks the next question
+ * back. Without it the room still connects and the app still shows a live
+ * microphone — and nothing ever answers, which is a worse failure than the
+ * feature being absent. So this starts it, and says plainly when it cannot.
+ *
+ * Skipped without a media server to join, because there is then no room to be
+ * dispatched to: `/voice/token` refuses, the app falls back to tap, keyboard and
+ * record-then-upload, and a worker polling an address that answers nothing is
+ * noise in the log of every dev run.
+ */
+async function ensureVoiceAgent(cfg) {
+  step('5/7', 'Voice agent (live conversation)');
+  if (SKIP_AGENT) {
+    log('  skipped');
+    return true;
+  }
+  if (!cfg.livekitUrl) {
+    log('  no LIVEKIT_URL in .env.local - live conversation is off, the interview still works by tap and keyboard');
+    return true;
+  }
+
+  const healthPort = Number(process.env.AGENT_HEALTH_PORT ?? 9090);
+  if (await tcpProbe(healthPort)) {
+    log(`  already running (health on :${healthPort})`);
+    return true;
+  }
+
+  const runner = path.join(agentDir, 'run.sh');
+  const venv = path.join(agentDir, '.venv', 'bin', 'python');
+  if (!existsSync(venv)) {
+    warn('voice-agent has no venv; live conversation will not start. Create it with:');
+    warn('  cd voice-agent && python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt');
+    return false;
+  }
+  if (process.platform === 'win32' || !existsSync(runner)) {
+    warn(`start it yourself: ${process.platform === 'win32' ? 'voice-agent\\run.ps1' : runner}`);
+    return false;
+  }
+
+  // Detached with its output to a file rather than inherited. The worker is
+  // chatty — VAD events, interim transcripts, every turn — and interleaving that
+  // with Nest's watch output makes both unreadable. `unref` so Ctrl-C on this
+  // script does not take the worker with it mid-sentence.
+  const out = openSync(path.join(agentDir, 'agent.log'), 'a');
+  const child = spawn('bash', [runner, 'dev'], {
+    cwd: agentDir,
+    detached: true,
+    stdio: ['ignore', out, out],
+  });
+  child.unref();
+
+  const up = await waitPort(healthPort, 'voice agent', 90);
+  if (up) log(`  logs: voice-agent/agent.log`);
+  return up;
+}
+
 async function freeApiPort(cfg) {
-  step('5/6', `Port ${cfg.apiPort}`);
+  step('6/7', `Port ${cfg.apiPort}`);
   if (!(await tcpProbe(cfg.apiPort))) {
     log(`  :${cfg.apiPort} is free`);
     return true;
@@ -458,8 +592,60 @@ function banner(cfg) {
   );
   if (lan) {
     console.log(`\n  a phone also needs inbound TCP ${cfg.apiPort} through the Windows firewall.`);
+    console.log(
+      `\n  a phone needs inbound TCP ${cfg.apiPort} reachable from the LAN ` +
+        '(Windows Defender, or firewalld on Linux).',
+    );
+
+    // Read back, not restated. This line used to name a hardcoded address, and
+    // a hardcoded address in a message about a DHCP lease is wrong the first
+    // time the laptop changes network — it then tells you to rebuild when you
+    // need not, or stays silent when you must. The app's own default is the
+    // only thing worth comparing against, so it is what gets read.
+    const compiled = compiledApiHost();
+    if (!compiled) {
+      console.log('  could not read the app\'s compiled default; check endpoints.dart by hand.');
+    } else if (compiled === lan) {
+      console.log(`  the app is already compiled against ${lan} - nothing to do.`);
+    } else {
+      console.log(
+        `  the app is compiled against ${compiled}, not ${lan}: rebuild with the ` +
+          '--dart-define above, or change the default in endpoints.dart.',
+      );
+    }
   }
   console.log('');
+}
+
+/**
+ * The host the Flutter app will dial with no `--dart-define`.
+ *
+ * Parsed out of the app's source rather than duplicated here, for the reason
+ * the top of this file gives about .env.local: a constant kept in two places is
+ * a constant that eventually disagrees with itself, and this one is a DHCP
+ * lease. Returns null rather than guessing if the file or the literal moves —
+ * a wrong answer here sends somebody rebuilding an app that was already right.
+ */
+function compiledApiHost() {
+  const endpoints = path.join(
+    root,
+    '..',
+    'medihive',
+    'lib',
+    'app',
+    'data',
+    'network',
+    'endpoints.dart',
+  );
+  if (!existsSync(endpoints)) return null;
+  try {
+    const src = readFileSync(endpoints, 'utf8');
+    // The `MEDIHIVE_API` fromEnvironment block, and its defaultValue.
+    const block = src.match(/'MEDIHIVE_API'[\s\S]{0,200}?defaultValue:\s*'([^']+)'/);
+    return block ? new URL(block[1]).hostname : null;
+  } catch {
+    return null;
+  }
 }
 
 async function main() {
@@ -473,6 +659,7 @@ async function main() {
   }
   await ensureOllama(cfg);
   await ensureSidecar(cfg);
+  await ensureVoiceAgent(cfg);
   await freeApiPort(cfg);
 
   banner(cfg);
@@ -482,7 +669,7 @@ async function main() {
     return;
   }
 
-  step('6/6', 'Nest API (watch mode)');
+  step('7/7', 'Nest API (watch mode)');
   // The CLI's entry script is run with this same node, rather than the `nest`
   // shim: the shim is a .cmd on Windows, which Node will only launch through a
   // shell, and a shell is what DEP0190 is about. It also means this works when

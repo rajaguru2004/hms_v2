@@ -8,6 +8,10 @@ build/
 
 # Environment files — NEVER commit real secrets
 
+.env.*.local
+.env.development
+.env.staging
+.env.production
 # .env.test is OK to commit (no real secrets)
 
 # Logs
