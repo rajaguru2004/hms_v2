@@ -55,6 +55,7 @@ import {
   groupTemplateKey,
 } from './field-registry';
 import { FieldKind } from './tri-state';
+import { AsideIntent } from './aside';
 import { normaliseLanguage } from '../../../common/constants/language.constants';
 
 /**
@@ -80,6 +81,68 @@ export const ENGLISH_ANSWER_HINTS: Readonly<Record<FieldKind, string>> = {
 };
 
 export const ENGLISH_LIST_CONJUNCTION = 'or';
+
+/**
+ * What the interview says back when the patient interrupts, in English.
+ *
+ * ── Why this is data and not a model
+ *
+ * A patient who interrupts an intake interview asks a small number of things,
+ * and two of them are questions this system must never answer: "is it
+ * serious?" and "what's wrong with me?". A language model asked to be
+ * conversational will answer them — helpfully, fluently, and with nobody in the
+ * room who is allowed to say it. So the replies live here, in the same file as
+ * the questions, under the same rule: written down, reviewable in a diff, and
+ * translated by the same route.
+ *
+ * Every line is followed by the question being asked again, which is why none
+ * of them ends by inviting a reply. They are an acknowledgement, not a turn.
+ *
+ * ── The register
+ *
+ * Same as the questions: plain, specific, about the patient. Two lines are
+ * load-bearing beyond their wording.
+ *
+ *   • `is_it_serious` must decline without dismissing. "I can't tell you that"
+ *     on its own leaves a frightened person with nothing, so it says who can,
+ *     and what to do if waiting stops being safe — which is the same routing
+ *     instruction the safety engine gives, in the same words.
+ *   • `want_human` must never read as a refusal. A patient asking for a person
+ *     gets told how to get one, and the interview offers to continue rather
+ *     than insisting on it.
+ */
+export const ENGLISH_ASIDE_REPLIES: Readonly<Record<AsideIntent, string>> =
+  Object.freeze({
+    repeat: 'Of course.',
+    // Not "let me put that another way": the question that follows is the same
+    // question, word for word, because re-wording a clinical question on the
+    // fly is the thing the note at the top of this file forbids. A line that
+    // promises a rephrasing and then repeats itself reads as a machine that is
+    // not listening, which is the impression this whole path exists to avoid.
+    not_understood: 'No problem. Let me ask it again.',
+    why_ask:
+      'It helps the doctor see the whole picture before they see you. You can ' +
+      'skip anything you would rather not answer.',
+    how_long:
+      'Not much longer. There are a few questions left, and you can stop at ' +
+      'any point.',
+    is_it_serious:
+      'I cannot tell you that. I am only writing down what you say, and the ' +
+      'doctor will go through it with you. If you feel worse while you are ' +
+      'waiting, tell the front desk straight away.',
+    want_human:
+      'Of course. Tell the front desk and someone will come to you. We can ' +
+      'carry on here in the meantime.',
+    who_are_you:
+      'I am not a person. I take down your answers so the doctor has them ' +
+      'before they see you.',
+    greeting: 'Hello.',
+    thanks: 'You are welcome.',
+    wait: 'Take your time.',
+    unrelated:
+      'I hear you. I can only take down your answers for the doctor, and the ' +
+      'front desk can help with anything else.',
+  });
 
 /**
  * Who wrote the words in a phrasebook — recorded separately from whether
@@ -200,6 +263,16 @@ export interface QuestionPhrasebook {
   readonly choiceLabels: Readonly<Record<string, string>>;
   /** What joins the last two items of a spoken choice list. */
   readonly listConjunction: string;
+  /**
+   * What the interview says back to an interruption, by intent. Partial;
+   * misses fall back to `ENGLISH_ASIDE_REPLIES`.
+   *
+   * A book may translate the questions and not these, and that is a legitimate
+   * intermediate state rather than a bug — a Hindi interview that answers "why
+   * do you ask?" in English is worse than one that answers it in Hindi and
+   * better than one that does not answer it at all.
+   */
+  readonly asides: Readonly<Partial<Record<AsideIntent, string>>>;
 }
 
 /**
@@ -262,6 +335,27 @@ export function phrasebookFor(
  */
 export function phrasingFor(field: FieldDefinition, language?: string): string {
   return composePhrasing(field, phrasebookFor(language));
+}
+
+/**
+ * What to say back to an interruption, in the interview's output language.
+ *
+ * Total: every intent has an English line, so this never returns an empty
+ * string and a caller never has to hold a fallback for it. That is deliberate
+ * and it is the same guarantee `fallbackPhrasing` gives — a patient who
+ * interrupts gets an answer on a box with no network, no model and no
+ * translation, because the only thing worse than a stilted acknowledgement is
+ * silence where one was expected.
+ *
+ * The language is the session's OUTPUT language, not the patient's input one.
+ * Same rule as the questions and for the same reason: what the patient *reads
+ * and hears* is one language, what they *speak* is another, and the two are
+ * routed separately in `loadState`.
+ */
+export function asideReplyFor(intent: AsideIntent, language?: string): string {
+  const book = phrasebookFor(language);
+  const translated = book?.asides[intent]?.trim();
+  return translated || ENGLISH_ASIDE_REPLIES[intent];
 }
 
 /**
@@ -520,6 +614,7 @@ function taPhrasebook(): QuestionPhrasebook {
       duration: 'உதாரணமாக: மூன்று நாட்கள், அல்லது இரண்டு வாரங்கள்.',
     }),
     choiceLabels: Object.freeze({}),
+    asides: Object.freeze({}),
     listConjunction: 'அல்லது',
   });
 }
@@ -945,6 +1040,11 @@ function hiPhrasebook(): QuestionPhrasebook {
          allergies[].type — all four mean the same thing here */
       other: 'कुछ और',
     }),
+    // Not drafted yet. Empty rather than machine-translated on the spot: an
+    // aside reply is the one place this interview speaks for itself, and
+    // `is_it_serious` in particular is a sentence a clinician must read before
+    // a patient hears it. English until then — see `asideReplyFor`.
+    asides: Object.freeze({}),
     listConjunction: 'या',
   });
 }

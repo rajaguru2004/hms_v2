@@ -97,6 +97,26 @@ class TurnResult:
     # substitution this whole system is built to refuse.
     input_language: str | None = None
     output_language: str | None = None
+    #: What the engine said back to an interruption, or None for a normal turn.
+    #:
+    #: `{"intent": ..., "reply": ...}`. The reply is phrasebook copy in the
+    #: session's output language — the same kind of text as the question's own
+    #: `spoken_prompt`, and speakable for the same reason: somebody wrote it
+    #: down and a clinician can read it in a diff. The intent is the closed-set
+    #: name it came from, published to the room so the app can draw its own
+    #: sentence rather than print this one.
+    #:
+    #: When this is set, `next_question` is the question that was already on
+    #: the table, asked again — see `answerAside` in case-taking.service.ts.
+    aside: dict[str, Any] | None = None
+
+    @property
+    def aside_reply(self) -> str | None:
+        """The sentence to say back, or None when the patient answered."""
+        if not isinstance(self.aside, dict):
+            return None
+        reply = self.aside.get("reply")
+        return reply.strip() if isinstance(reply, str) and reply.strip() else None
 
     @property
     def finished(self) -> bool:
@@ -164,6 +184,7 @@ class TurnResult:
             else None
         )
         message = payload.get("patientMessage")
+        aside = payload.get("aside")
         return TurnResult(
             turn_id=str(payload.get("turnId") or ""),
             session_id=str(payload.get("sessionId") or ""),
@@ -176,6 +197,7 @@ class TurnResult:
             raw=payload,
             input_language=_language(payload, "inputLanguage"),
             output_language=_language(payload, "outputLanguage"),
+            aside=aside if isinstance(aside, dict) else None,
         )
 
 
@@ -186,10 +208,22 @@ def utterances(result: TurnResult) -> list[str]:
     and is a routing instruction; the next question comes after it. If a patient
     stops listening after one sentence, that sentence should be the one that
     sends them to the front desk.
+
+    Then the answer to an interruption, if there was one, and then the question.
+    That order is the point of it: a patient who asked "why do you ask?" hears
+    the reason and then hears the question again, which is what a person would
+    do. Reversed, the interview would ask the question and then explain itself
+    to somebody already answering.
+
+    Nothing here is authored by this worker. Both strings are engine text —
+    `aside.reply` comes out of the same checked-in phrasebook the questions do.
     """
     out: list[str] = []
     if result.patient_message:
         out.append(result.patient_message)
+    reply = result.aside_reply
+    if reply:
+        out.append(reply)
     if result.next_question and result.next_question.spoken_text:
         out.append(result.next_question.spoken_text)
     return out

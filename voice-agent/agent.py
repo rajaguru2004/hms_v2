@@ -668,6 +668,12 @@ async def entrypoint(ctx: JobContext) -> None:
         should be four buttons on the screen as well as a sentence in the ear.
         Sent before the audio so the screen is already right when the question
         starts playing.
+
+        On an interruption `nextQuestion` is the question that was already on
+        the table, sent again with the same `fieldPath`. That repetition is the
+        message: a client that keys the pinned question on `fieldPath` redraws
+        the same card and nothing on screen jumps, while `aside` tells it what
+        just happened.
         """
         question = result.next_question
         await publish(
@@ -678,6 +684,13 @@ async def entrypoint(ctx: JobContext) -> None:
                 "patientMessage": result.patient_message,
                 "redFlags": result.red_flags,
                 "serverTimeMs": result.server_time_ms,
+                # Present only when the patient interrupted rather than
+                # answered. `intent` is the closed-set name — the app draws its
+                # own sentence from it rather than printing `reply`, which is
+                # the same rule that keeps every other piece of server text off
+                # that screen. `reply` travels anyway because this worker speaks
+                # it, and a client that can read both can check they agree.
+                "aside": result.aside,
                 "nextQuestion": (
                     {
                         "fieldPath": question.field_path,

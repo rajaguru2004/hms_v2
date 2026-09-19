@@ -46,8 +46,13 @@ red flags and escalation are the engine's, and the code is arranged so that
 staying out of it is the easy path:
 
 - `engine.utterances()` returns the sentences to speak in the engine's order —
-  `patientMessage` (the most severe triggered rule, a routing instruction) before
-  `nextQuestion.prompt`.
+  `patientMessage` (the most severe triggered rule, a routing instruction), then
+  `aside.reply` if the patient interrupted, then `nextQuestion.prompt`.
+- An **interruption** is the engine's call, not this worker's. A patient who says
+  "why do you ask?" instead of answering gets a turn back with `aside` set and
+  `nextQuestion` holding the question that was already on the table — the engine
+  answered them and re-asked. Nothing here classifies it, and `aside.reply` is
+  the engine's checked-in phrasebook copy, spoken like any other engine text.
 - There is no "that transcript looks empty, ask again" path. A poor transcript is
   posted with its real confidence and the engine decides.
 - A 4xx from `/turns` is final. It is never retried — that would write the same
@@ -237,15 +242,31 @@ LiveKit data topic `medihive.case-taking`:
 ```jsonc
 {"type": "turn",  "turnId": "…", "interviewStatus": "in_progress",
  "patientMessage": null, "redFlags": [], "serverTimeMs": 16.0,
+ "aside": null,
  "nextQuestion": {"fieldPath": "hpi.duration", "kind": "text",
                   "prompt": "How long have you had this for?",
                   "choices": [], "remaining": 2}}
+
+// The same turn when the patient interrupted. `nextQuestion` is the question
+// they interrupted, sent again with the same `fieldPath`, so a client that
+// keys the pinned card on it redraws the same card and nothing jumps.
+{"type": "turn",  "turnId": "…", "interviewStatus": "in_progress",
+ "aside": {"intent": "why_ask",
+           "reply": "It helps the doctor see the whole picture…"},
+ "nextQuestion": {"fieldPath": "hpi.duration", "…": "…"}}
 
 {"type": "speak", "text": "How long have you had this for?",
  "spoken": true, "provider": "piper", "sampleRate": 22050}
 ```
 
 `spoken: false` means TTS refused the language and the text must be displayed.
+
+`aside.intent` is a member of a closed set the engine holds — `repeat`,
+`not_understood`, `why_ask`, `how_long`, `is_it_serious`, `want_human`,
+`who_are_you`, `greeting`, `thanks`, `wait`, `unrelated`. The patient app draws
+its own sentence for the intent rather than printing `reply`, because that
+screen renders no server free text; `reply` travels for clients that have no
+copy of their own, and it is what this worker says out loud.
 
 ## Design notes
 

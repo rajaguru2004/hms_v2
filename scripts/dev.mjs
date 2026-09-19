@@ -94,13 +94,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * Wait for a port to accept a connection. Returns false on timeout rather than
  * throwing, so the caller decides whether a missing dependency is fatal.
  */
-async function waitPort(port, name, timeoutSec = 120) {
+async function waitPort(port, name, timeoutSec = 120, abort = null) {
   process.stdout.write(`  waiting for ${name} on :${port} `);
   const deadline = Date.now() + timeoutSec * 1000;
   while (Date.now() < deadline) {
     if (await tcpProbe(port)) {
       console.log(' up');
       return true;
+    }
+    // `abort` is how a caller says the thing it is waiting for can no longer
+    // arrive - a spawn that failed, say. A ChildProcess reports that
+    // asynchronously, so checking it once before the loop is checking it before
+    // it is knowable: the ENOENT lands a moment later and the wait runs its
+    // full minute printing dots for a process that was never started.
+    if (abort?.()) {
+      console.log(' aborted');
+      return false;
     }
     await sleep(1500);
     process.stdout.write('.');
@@ -135,7 +144,17 @@ function readEnvLocal() {
     return cfg;
   }
   const text = readFileSync(file, 'utf8');
-  const pick = (re) => text.match(re)?.[1];
+  // dotenv is last-wins: a key written twice in this file resolves, for the
+  // API, to the *last* occurrence. Reading the first is what let a stale
+  // duplicate DATABASE_URL send this script waiting two minutes on a port
+  // nothing published, while the API itself would have connected fine on the
+  // line below it. The whole point of reading .env.local rather than restating
+  // it is to agree with the API, so resolve a repeated key the way it does.
+  const pick = (re) => {
+    const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`;
+    const all = [...text.matchAll(new RegExp(re.source, flags))];
+    return all.length ? all[all.length - 1][1] : undefined;
+  };
 
   cfg.apiPort = Number(pick(/^\s*PORT\s*=\s*"?(\d+)/m) ?? cfg.apiPort);
   cfg.pgPort = Number(pick(/DATABASE_URL\s*=\s*"?[^"\r\n]*?@[^:/\r\n]+:(\d+)\//) ?? cfg.pgPort);
@@ -190,6 +209,60 @@ function lanAddress() {
     }
   }
   return null;
+}
+
+/** Look a command up on PATH by hand, the way a shell would. */
+function onPath(cmd) {
+  const name = exe(cmd);
+  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
+    if (dir && existsSync(path.join(dir, name))) return path.join(dir, name);
+  }
+  return null;
+}
+
+/**
+ * The ollama binary, wherever this machine put it.
+ *
+ * PATH alone is not enough, and the installer is the reason. Run without root,
+ * ollama's own install.sh unpacks the tarball under `~/.local/ollama/bin` and
+ * appends that directory to PATH from a shell rc file - which an `npm run dev`
+ * launched from an IDE terminal, a desktop launcher or any non-login shell
+ * never sources. The binary is sitting right there and `spawn('ollama')` still
+ * fails ENOENT, which reads as "ollama is not installed" and sends somebody off
+ * to reinstall the thing they already have. It did exactly that on this box.
+ *
+ * Returns null only when it genuinely is not installed - the one case that has
+ * earned the download link.
+ */
+function findOllama() {
+  const fromPath = onPath('ollama');
+  if (fromPath) return fromPath;
+
+  const home = os.homedir();
+  const candidates =
+    {
+      linux: [
+        // Where install.sh puts it for a non-root install, and the case above.
+        path.join(home, '.local', 'ollama', 'bin', 'ollama'),
+        path.join(home, '.ollama', 'bin', 'ollama'),
+        '/usr/local/bin/ollama',
+        '/usr/bin/ollama',
+        '/opt/ollama/bin/ollama',
+        '/var/lib/snapd/snap/bin/ollama',
+      ],
+      darwin: [
+        '/usr/local/bin/ollama',
+        '/opt/homebrew/bin/ollama',
+        // The desktop app carries its own copy of the CLI.
+        '/Applications/Ollama.app/Contents/Resources/ollama',
+      ],
+      win32: [
+        path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'Ollama', 'ollama.exe'),
+        path.join(process.env.ProgramFiles ?? '', 'Ollama', 'ollama.exe'),
+      ],
+    }[process.platform] ?? [];
+
+  return candidates.find((c) => c && existsSync(c)) ?? null;
 }
 
 async function ensureDocker() {
@@ -301,17 +374,26 @@ async function ensureOllama(cfg) {
     // OLLAMA_HOST is read by the server at startup, not per request, so it has
     // to be in the environment of the process we spawn. 0.0.0.0 rather than
     // loopback because a container (the sidecar) has to reach it too.
-    log(`  starting ollama on :${port}`);
-    const child = spawn(exe('ollama'), ['serve'], {
+    const bin = findOllama();
+    if (!bin) {
+      warn('ollama is not installed - AI features will fail.');
+      warn('install: https://ollama.com/download  (or start it yourself and re-run)');
+      return false;
+    }
+    log(`  starting ollama on :${port}  (${bin})`);
+    const child = spawn(bin, ['serve'], {
       detached: true,
       stdio: 'ignore',
       env: { ...process.env, OLLAMA_HOST: `0.0.0.0:${port}` },
     });
-    // A spawn that cannot find its binary reports asynchronously, as an 'error'
-    // event — and an unhandled one on a ChildProcess is a thrown exception that
-    // took the whole script down. It did: with `ollama` not on PATH, a dev run
-    // died here with a raw ENOENT stack, after Postgres and before the API,
-    // which reads as "the dev script is broken" rather than "install ollama".
+    // A failing spawn reports asynchronously, as an 'error' event — and an
+    // unhandled one on a ChildProcess is a thrown exception that took the whole
+    // script down. It did: with `ollama` not on PATH, a dev run died here with a
+    // raw ENOENT stack, after Postgres and before the API, which reads as "the
+    // dev script is broken" rather than "install ollama". `findOllama` above now
+    // answers the not-on-PATH case before the spawn; this stays for a binary
+    // that is found and still will not run, and it feeds `waitPort`'s abort so
+    // the failure is reported at once rather than after a minute of dots.
     //
     // Ollama is an enhancement to the interview, not a precondition for it —
     // the questions are chosen by a deterministic engine and nothing on the hot
@@ -323,9 +405,9 @@ async function ensureOllama(cfg) {
       warn(`could not start ollama: ${error.message}`);
     });
     child.unref();
-    if (spawnFailed || !(await waitPort(port, 'ollama', 60))) {
-      warn('ollama did not start - AI features will fail.');
-      warn('install: https://ollama.com/download  (or start it yourself and re-run)');
+    if (!(await waitPort(port, 'ollama', 60, () => spawnFailed))) {
+      warn(`ollama did not start - AI features will fail.`);
+      warn(`run it yourself and re-run:  OLLAMA_HOST=0.0.0.0:${port} ${bin} serve`);
       return false;
     }
   }

@@ -23,11 +23,13 @@ import { VoiceGrantDto, VoiceTokenDto } from './dto/voice-token.dto';
 import {
   ClinicalState,
   applyFact,
+  clearPending,
   expirePending,
   markAsked,
   readFactAt,
   sectionOf,
 } from './engine/clinical-state';
+import { AsideIntent, classifyAside, looksInterrogative } from './engine/aside';
 import {
   FieldDefinition,
   applicableFields,
@@ -47,6 +49,7 @@ import {
 import {
   PHRASEBOOKS,
   PhrasebookSource,
+  asideReplyFor,
   phrasebookFor,
 } from './engine/phrasebook';
 import { evaluate, SafetyAssessment } from './engine/safety-engine';
@@ -209,6 +212,20 @@ export interface TurnResult {
     factId: string | null;
   };
   extraction: { queued: boolean; reason: string };
+  /**
+   * Set when the patient interrupted rather than answered, and null otherwise.
+   *
+   * `reply` is checked-in phrasebook copy, in the session's output language —
+   * the same class of text as `nextQuestion.prompt`, and safe for a speaking
+   * client to say out loud for the same reason. `intent` is the closed-set
+   * member it came from, and it is there so that a client which refuses to
+   * render server text — which the patient app does, deliberately — can draw
+   * its own sentence for the intent instead.
+   *
+   * When this is set, `nextQuestion` is the question that was already on the
+   * table, asked again. See `submitTurn`.
+   */
+  aside: { intent: AsideIntent; reply: string } | null;
   nextQuestion: NextQuestionView | null;
   interviewStatus: string;
   progress: ReturnType<typeof interviewProgress>;
@@ -488,10 +505,29 @@ export class CaseTakingService {
     const modality = dto.modality as AnswerModality;
     const answerText = (dto.text ?? '').trim();
 
+    // ── Did they answer, or did they interrupt? ─────────────────────────────
+    //
+    // Asked first, before anything is filed, because an interruption filed as
+    // an answer is not recoverable from downstream: the field goes pending,
+    // `askableFields` skips it, and the question is never put again. The
+    // observed case was "Could he have been out?" against a fever question —
+    // the fever answer was lost, and the patient's own question was never
+    // acknowledged by anything.
+    //
+    // Only free speech and typing can be an aside. A tapped tile is a value the
+    // patient chose off the screen in front of them; reading one as chatter
+    // would be this system arguing with a button it drew itself.
+    const spoken = modality === 'voice' || modality === 'text';
+    const declaredAside = spoken ? classifyAside(answerText) : null;
+
     const patientTurn = await this.repository.appendTurn(session.id, {
       role: 'patient',
-      section: answeredPath ? sectionOf(answeredPath) : null,
-      fieldKey: answeredPath,
+      // An aside is filed against no field. It is a real thing the patient
+      // said and the transcript keeps it, but it is not evidence for the
+      // question that happened to be on the table, and labelling it as though
+      // it were is what a clinician reading the log back would be misled by.
+      section: !declaredAside && answeredPath ? sectionOf(answeredPath) : null,
+      fieldKey: declaredAside ? null : answeredPath,
       answerRaw: answerText || dto.value || null,
       answerModality: modality,
       transcriptConfidence: dto.transcriptConfidence ?? null,
@@ -512,7 +548,9 @@ export class CaseTakingService {
       );
     }
 
-    if (field) {
+    let aside: AsideIntent | null = declaredAside;
+
+    if (field && !aside) {
       const applied = await this.applyAnswer({
         session,
         patientId,
@@ -529,6 +567,42 @@ export class CaseTakingService {
       state = applied.state;
       derivation = applied.derivation;
       factId = applied.factId;
+
+      // ── The second stage, and the only one that may run after derivation ──
+      //
+      // `classifyAside` above is a closed list of phrasings and misses anything
+      // it was not written for. This catches the rest, and it is safe to be
+      // vague here precisely because of where it sits: the field's own phrase
+      // lists have already been handed the utterance and have declined to read
+      // it as an answer. Nothing is taken away from the patient by calling it
+      // an interruption at this point — `not_assessed` wrote no fact row, which
+      // is why `applyAnswer` can be allowed to run first at all.
+      //
+      // `text` fields are exempt, and that exemption is the interesting part.
+      // A free-text field stores whatever it is given, so derivation never
+      // fails, so this branch can never fire for one — which is correct rather
+      // than merely convenient: "why does my chest hurt?" is a chief complaint
+      // phrased as a question, and an interview that answered it with "I can
+      // only take down your answers" instead of writing it down would have
+      // thrown away the most important sentence in the session.
+      if (
+        derivation.presence === 'not_assessed' &&
+        field.kind !== 'text' &&
+        looksInterrogative(answerText)
+      ) {
+        aside = 'unrelated';
+      }
+    }
+
+    if (aside) {
+      return this.answerAside({
+        session,
+        state,
+        intent: aside,
+        askedFieldPath: answeredPath,
+        turnId: patientTurn.id,
+        startedAt,
+      });
     }
 
     // ── Decide whether the model has anything to add ────────────────────────
@@ -578,12 +652,126 @@ export class CaseTakingService {
         factId,
       },
       extraction,
+      aside: null,
       nextQuestion: next.question,
       interviewStatus: interviewStatus(next.state),
       progress: interviewProgress(next.state),
       redFlags: redFlags.map(toPatientRedFlag),
       patientMessage: safety.patientMessage,
       serverTimeMs: Date.now() - startedAt,
+    };
+  }
+
+  /**
+   * The patient interrupted. Answer them, then ask the same question again.
+   *
+   * ── Why this is a separate path and not a flag on the normal one
+   *
+   * Almost everything the answer path does is wrong for an interruption. No
+   * fact is derived, because nothing was asserted. No extraction is queued,
+   * because there is nothing in "how much longer is this?" for a model to bank
+   * — and queuing one would spend eight to twenty seconds of the box's only
+   * GPU slot on a question about the clock. No red flag can newly fire, because
+   * the clinical state is byte-identical to the one the last turn already
+   * evaluated. Reaching the same conclusion through the normal path would mean
+   * four guards in four places, each of which could be got wrong separately.
+   *
+   * ── The one line that actually fixes the reported bug
+   *
+   * `clearPending`. The question was marked pending the moment it was spoken —
+   * that is `askNext`'s job and it is correct — and `askableFields` filters
+   * pending fields out so that a question being extracted is not asked twice in
+   * a row. An interruption is the case where that filter is wrong: nothing is
+   * being extracted, nothing is coming back, and left pending the field ages
+   * out two questions later having never been answered. Releasing it puts the
+   * state back exactly as it stood before the question was put, so `selectNext`
+   * — a pure function of that state — chooses the same field again. The patient
+   * hears their answer, and then hears the question they were actually asked.
+   *
+   * ── What it does NOT do, and should not
+   *
+   * It does not count the interruption against the question budget, does not
+   * re-word the question (see `phrasebook.ts` on why a clinical question is
+   * never re-worded on the fly), and does not give up after N attempts. A
+   * patient who interrupts twice gets asked twice, the same as they would by a
+   * person. `expirePending` is still the backstop for a field nobody ever
+   * answers, and the question budget is still the ceiling on the interview's
+   * length.
+   */
+  private async answerAside(input: {
+    session: CaseSession;
+    state: ClinicalState;
+    intent: AsideIntent;
+    askedFieldPath: string | null;
+    turnId: string;
+    startedAt: number;
+  }): Promise<TurnResult> {
+    const { session, intent, askedFieldPath } = input;
+
+    // Back to the state as it stood before the question was put. When there was
+    // no question on the table — an aside as the first thing said in the room —
+    // this is a no-op and the selector simply opens the interview.
+    const released = askedFieldPath
+      ? clearPending(input.state, askedFieldPath)
+      : input.state;
+
+    const reply = asideReplyFor(intent, sessionOutputLanguage(session));
+
+    // The acknowledgement goes in the log as something the interview said,
+    // against no field. A clinician reading the transcript back sees the
+    // interruption and the reply in the place they happened, which is the only
+    // way the repeated question below makes sense to them.
+    await this.repository.appendTurn(session.id, {
+      role: 'assistant',
+      section: null,
+      fieldKey: null,
+      questionText: reply,
+    });
+
+    const next = await this.askNext(session, released);
+
+    // Pure, and over a state nothing has changed, so this can only return what
+    // the previous turn already returned. Read for the projection's
+    // `highestSeverity` and for nothing else — see the response below.
+    const safety = evaluate(next.state);
+    await this.saveProjection(session, next.state, safety);
+
+    this.logger.log(
+      `aside ${intent} on ${askedFieldPath ?? 'no field'}; re-asking ${
+        next.question?.fieldPath ?? 'nothing'
+      }`,
+    );
+
+    return {
+      turnId: input.turnId,
+      sessionId: session.id,
+      accepted: {
+        // Nothing was accepted. `fieldPath` is null rather than the question
+        // that was on the table, because a client reading this back must not
+        // mark that question as dealt with — it is about to be asked again.
+        fieldPath: null,
+        presence: null,
+        value: undefined,
+        reason: `aside:${intent}`,
+        needsPatientConfirmation: false,
+        factId: null,
+      },
+      extraction: {
+        queued: false,
+        reason: 'the patient asked something rather than answering',
+      },
+      aside: { intent, reply },
+      nextQuestion: next.question,
+      interviewStatus: interviewStatus(next.state),
+      progress: interviewProgress(next.state),
+      // Both empty on purpose. No fact changed, so no rule can newly fire, and
+      // repeating the standing routing instruction — "tell the front desk now"
+      // — after every "thank you" would train a patient to stop hearing it. The
+      // banner on the patient's screen is driven by the session, which still
+      // holds every flag that has fired.
+      redFlags: [],
+      patientMessage: null,
+      serverTimeMs: Date.now() - input.startedAt,
     };
   }
 

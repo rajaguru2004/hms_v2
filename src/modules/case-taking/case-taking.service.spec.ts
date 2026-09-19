@@ -13,6 +13,7 @@ import { SidecarClient } from '../ai/sidecar.client';
 import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
 import { AppException } from '../../common/exceptions/app.exception';
 import { FactRowData } from './case-state';
+import { ENGLISH_ASIDE_REPLIES } from './engine/phrasebook';
 
 /**
  * The interview, against an in-memory repository.
@@ -483,6 +484,135 @@ describe('CaseTakingService', () => {
       const second = await answer(h, 'sess-1', { text: 'three days' });
 
       expect(second.accepted.fieldPath).toBe(asked);
+    });
+
+    /**
+     * The bug this whole path was built for, end to end.
+     *
+     * Observed in a real session: the interview asked about fever, the patient
+     * said "Could he have been out?", and the interview moved on to the pain
+     * scale. The fever answer was never collected and never asked for again —
+     * `askNext` had marked the field pending, `askableFields` filters pending
+     * fields out, and nothing ever put it back.
+     */
+    it('re-asks the question the patient interrupted instead of losing it', async () => {
+      const h = harness();
+      h.repo.seedSession();
+
+      const opening = await answer(h, 'sess-1', {
+        fieldPath: 'chief_complaint.symptom',
+        text: 'chest pain',
+      });
+      const asked = opening.nextQuestion!.fieldPath;
+
+      const interrupted = await answer(h, 'sess-1', {
+        modality: 'voice',
+        fieldPath: asked,
+        text: 'why do you ask?',
+      });
+
+      expect(interrupted.aside?.intent).toBe('why_ask');
+      expect(interrupted.nextQuestion?.fieldPath).toBe(asked);
+      // Nothing was filed against the question, and nothing was sent to a model
+      // to be filed later.
+      expect(interrupted.accepted.fieldPath).toBeNull();
+      expect(interrupted.accepted.factId).toBeNull();
+      expect(interrupted.extraction.queued).toBe(false);
+
+      // And the question is still answerable afterwards, which is the half the
+      // old behaviour lost.
+      const answered = await answer(h, 'sess-1', {
+        fieldPath: asked,
+        text: 'no',
+      });
+      expect(answered.accepted.fieldPath).toBe(asked);
+      // `none` rather than `recorded`: the re-asked question was a yes/no one
+      // and the patient said no, which is an asserted negative. What matters
+      // here is that it is not `not_assessed` — the answer landed on the field
+      // the interruption had been about.
+      expect(answered.accepted.presence).toBe('none');
+      expect(answered.nextQuestion?.fieldPath).not.toBe(asked);
+    });
+
+    it('says something back, from the phrasebook rather than a model', async () => {
+      const h = harness();
+      h.repo.seedSession();
+
+      const interrupted = await answer(h, 'sess-1', {
+        modality: 'voice',
+        text: 'is it serious?',
+      });
+
+      expect(interrupted.aside?.intent).toBe('is_it_serious');
+      expect(interrupted.aside?.reply).toBe(
+        ENGLISH_ASIDE_REPLIES.is_it_serious,
+      );
+      expect(h.llm.extractFacts).not.toHaveBeenCalled();
+    });
+
+    it('reads an unrecognised question as an interruption once the field cannot', async () => {
+      const h = harness();
+      h.repo.seedSession();
+
+      const opening = await answer(h, 'sess-1', {
+        fieldPath: 'chief_complaint.symptom',
+        text: 'chest pain',
+      });
+
+      // No pattern covers this. It reaches the second stage only because the
+      // field's own phrase lists could not read it either.
+      const interrupted = await answer(h, 'sess-1', {
+        modality: 'voice',
+        fieldPath: opening.nextQuestion!.fieldPath,
+        text: 'could he have been out?',
+      });
+
+      expect(interrupted.aside?.intent).toBe('unrelated');
+      expect(interrupted.nextQuestion?.fieldPath).toBe(
+        opening.nextQuestion!.fieldPath,
+      );
+    });
+
+    /**
+     * The failure this must never produce, stated as a test rather than as a
+     * comment: an interruption is cheap to miss and expensive to invent.
+     */
+    it('never reads a tapped choice as an interruption', async () => {
+      const h = harness();
+      h.repo.seedSession();
+
+      const opening = await answer(h, 'sess-1', {
+        fieldPath: 'chief_complaint.symptom',
+        text: 'chest pain',
+      });
+
+      const tapped = await answer(h, 'sess-1', {
+        modality: 'choice',
+        fieldPath: opening.nextQuestion!.fieldPath,
+        // A choice token that means "I do not know" — a statement about the
+        // patient's knowledge, and an answer. Not a question.
+        value: 'not_sure',
+      });
+
+      expect(tapped.aside).toBeNull();
+      expect(tapped.accepted.fieldPath).toBe(opening.nextQuestion!.fieldPath);
+    });
+
+    it("keeps the complaint when it is a question about the patient's own body", async () => {
+      const h = harness();
+      h.repo.seedSession();
+
+      // A free-text field is exempt from the second stage precisely so this
+      // sentence is written down rather than answered with "I can only take
+      // down your answers".
+      const opening = await answer(h, 'sess-1', {
+        modality: 'voice',
+        fieldPath: 'chief_complaint.symptom',
+        text: 'why does my chest hurt so much',
+      });
+
+      expect(opening.aside).toBeNull();
+      expect(opening.accepted.fieldPath).toBe('chief_complaint.symptom');
     });
 
     it('refuses a field path the registry does not know', async () => {

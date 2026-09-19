@@ -120,8 +120,43 @@ def _question(index: int) -> dict | None:
     return q
 
 
+# The handful of interruptions this stub can imitate, keyed on what was typed
+# or said into it. Enough to exercise the worker's aside path — the reply order
+# in `engine.utterances`, the data message, the question being repeated — with
+# no Nest and no database anywhere.
+#
+# Deliberately a lookup and not a classifier. The real classification lives in
+# `case-taking/engine/aside.ts` and is tested there; a second implementation
+# here would drift and would be believed.
+FAKE_ASIDES = {
+    "why do you ask?": (
+        "why_ask",
+        "It helps the doctor see the whole picture before they see you.",
+    ),
+    "how much longer?": (
+        "how_long",
+        "Not much longer. There are a few questions left.",
+    ),
+    "is it serious?": (
+        "is_it_serious",
+        "I cannot tell you that. The doctor will go through it with you.",
+    ),
+    "what?": ("repeat", "Of course."),
+}
+
+
+def _aside(text: str) -> tuple[str, str] | None:
+    return FAKE_ASIDES.get(text.strip().lower())
+
+
 def _result(
-    session_id: str, index: int, *, turn_id: str, started: float, get: bool = False
+    session_id: str,
+    index: int,
+    *,
+    turn_id: str,
+    started: float,
+    get: bool = False,
+    aside: tuple[str, str] | None = None,
 ) -> dict:
     """The POST shape, or the GET shape, which differ in one crucial name.
 
@@ -158,6 +193,7 @@ def _result(
             "factId": str(uuid.uuid4()) if index > 0 else None,
         },
         "extraction": {"queued": False, "reason": "fake_engine"},
+        "aside": {"intent": aside[0], "reply": aside[1]} if aside else None,
         "nextQuestion": question,
         "interviewStatus": "in_progress" if question else "complete",
         "progress": {"answered": index, "total": len(QUESTIONS)},
@@ -230,9 +266,23 @@ class Handler(BaseHTTPRequestHandler):
         # until the process exits.
         print(f"  POST session {session_id} body={json.dumps(body)}", flush=True)
 
-        index = _state.get(session_id, 0) + 1
+        # An interruption does not advance the interview: the same question comes
+        # back, which is the property worth exercising here. The real engine
+        # gets this by releasing the field it had marked pending; this stub gets
+        # it by not incrementing.
+        aside = _aside(str(body.get("text") or ""))
+        index = _state.get(session_id, 0) if aside else _state.get(session_id, 0) + 1
         _state[session_id] = index
-        self._send(200, _result(session_id, index, turn_id=str(uuid.uuid4()), started=started))
+        self._send(
+            200,
+            _result(
+                session_id,
+                index,
+                turn_id=str(uuid.uuid4()),
+                started=started,
+                aside=aside,
+            ),
+        )
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: ANN002
         return
