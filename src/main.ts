@@ -42,10 +42,24 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
+  // `ngrok-skip-browser-warning` is on this list because the app sends it on
+  // every request (`dio_client.dart`), and a header the client sends but the
+  // preflight does not allow is refused by the browser before it is sent. On
+  // a handset that costs nothing - Dio is not a browser and does no preflight
+  // - so the mismatch stayed invisible until the app was opened in one, where
+  // every call failed as a bare network error with "Can't reach the server"
+  // on screen and a CORS line only in the browser console. Allowing it is
+  // safe: it is ngrok's own opt-out header, inert against every other server,
+  // and carries nothing.
   app.enableCors({
     origin: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-correlation-id'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'x-correlation-id',
+      'ngrok-skip-browser-warning',
+    ],
     credentials: true,
   });
 

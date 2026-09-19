@@ -38,6 +38,35 @@ async function parseEnvelope<T>(res: Response, label: string): Promise<T> {
   return json.data;
 }
 
+/**
+ * A list endpoint's rows.
+ *
+ * `GET /queue` answers with `PaginatedQueueResponseDto` - `data.data` for the
+ * rows and `data.meta` for the page - not with a bare array. Reading it as one
+ * failed as `list.some is not a function`, which names the symptom and not the
+ * contract, so the unwrapping lives here once.
+ *
+ * The page size is deliberate. The board is ordered by acuity and this file
+ * adds one row to a seeded hospital, so a default page can legitimately not
+ * contain it; asking for one page big enough to hold the whole board keeps
+ * "the row is in the list" a statement about the list rather than about where
+ * the row sorted.
+ */
+interface Paged<T> {
+  data: T[];
+  meta?: Record<string, unknown>;
+}
+
+const PAGE = 'limit=200';
+
+async function parseList<T>(res: Response, label: string): Promise<T[]> {
+  const page = await parseEnvelope<Paged<T>>(res, label);
+  if (!Array.isArray(page?.data)) {
+    throw new Error(`${label} did not answer with a paginated list`);
+  }
+  return page.data;
+}
+
 async function main(): Promise<void> {
   console.log('Starting Queue Module Verification...');
 
@@ -92,19 +121,16 @@ async function main(): Promise<void> {
   }
   console.log(`Queue created: ${created.id} ${created.queueNumber}`);
 
-  const listRes = await fetch(`${BASE_URL}/queue`, { headers });
-  const list = await parseEnvelope<QueueItem[]>(listRes, 'List queue');
+  const listRes = await fetch(`${BASE_URL}/queue?${PAGE}`, { headers });
+  const list = await parseList<QueueItem>(listRes, 'List queue');
   if (!list.some((item) => item.id === created.id)) {
     throw new Error('Created queue item missing from list');
   }
 
-  const filteredRes = await fetch(`${BASE_URL}/queue?serviceArea=opd`, {
+  const filteredRes = await fetch(`${BASE_URL}/queue?serviceArea=opd&${PAGE}`, {
     headers,
   });
-  const filtered = await parseEnvelope<QueueItem[]>(
-    filteredRes,
-    'Filter queue',
-  );
+  const filtered = await parseList<QueueItem>(filteredRes, 'Filter queue');
   if (!filtered.some((item) => item.id === created.id)) {
     throw new Error('Created queue item missing from serviceArea filter');
   }
@@ -132,8 +158,8 @@ async function main(): Promise<void> {
     throw new Error(`Delete queue failed: ${deleteRes.status}`);
   }
 
-  const afterDeleteRes = await fetch(`${BASE_URL}/queue`, { headers });
-  const afterDelete = await parseEnvelope<QueueItem[]>(
+  const afterDeleteRes = await fetch(`${BASE_URL}/queue?${PAGE}`, { headers });
+  const afterDelete = await parseList<QueueItem>(
     afterDeleteRes,
     'List after delete',
   );

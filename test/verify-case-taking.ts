@@ -623,9 +623,14 @@ async function main(): Promise<void> {
     `worst ${worstServer}ms`,
   );
 
-  // The turn that does queue a model call has to be just as fast, because
-  // nothing in the response waits for it. This is the check that would catch
-  // somebody awaiting the extraction.
+  // A narrative answer carries more than the question asked for, and the
+  // engine reads all of it before the response is built — `harvest` is regex
+  // over one sentence, not a model call. `queued` is therefore always false
+  // now; it used to mean "a model will write facts into this session later",
+  // and this check asserted it was true. The model left that path, so the
+  // property worth holding is the one below: the extra fields are read, and
+  // the turn is no slower for it. That is still what catches somebody putting
+  // an `await` on an extraction.
   const narrative = await answer(alpha.token, sessionId, {
     modality: 'text',
     text:
@@ -634,8 +639,17 @@ async function main(): Promise<void> {
       'I also feel more tired than usual in the evenings.',
   });
   check(
-    'a long narrative queues the model rather than waiting for it',
-    narrative.body.data?.extraction.queued === true,
+    'a long narrative is read in full by the engine, with no model in the path',
+    narrative.body.data?.extraction.queued === false,
+    `queued ${String(narrative.body.data?.extraction.queued)} — ${String(
+      narrative.body.data?.extraction.reason,
+    )}`,
+  );
+  check(
+    'and the answer yields more than the one field that was asked for',
+    /read [1-9]\d* more field/.test(
+      narrative.body.data?.extraction.reason ?? '',
+    ),
     String(narrative.body.data?.extraction.reason),
   );
   check(
@@ -968,6 +982,97 @@ async function main(): Promise<void> {
       twiceSubmitted.body.errorCode === 'CASE_SESSION_ALREADY_SUBMITTED',
     `${twiceSubmitted.status} ${String(twiceSubmitted.body.errorCode)}`,
   );
+
+  // The next visit.
+  //
+  // One interview per patient is enforced against the *open* ones -
+  // `findInProgressForPatient` looks for `in_progress` or `review` - so a
+  // submitted interview has to leave the way clear for the next one. This is
+  // the property a returning patient depends on and the one that fails
+  // silently: if a submitted session still counted as open, `POST /sessions`
+  // would hand back the closed interview, the patient would be shown a case
+  // they already sent, and the only symptom would be a second visit that
+  // cannot be started.
+  //
+  // The other half is that starting again must not inherit the last visit's
+  // answers. A new session carrying October's chest pain into January is worse
+  // than no history at all, because it reads as something the patient just
+  // said.
+  section('a submitted interview gives way to the next one');
+
+  const afterSubmit = await call<SessionView>(
+    'GET',
+    '/case-taking/sessions/current',
+    { token: alpha.token },
+  );
+  // A 200 carrying nothing, or an explicit 404 - and nothing else. `!data`
+  // alone passed on any error at all: a 500, an expired token's 401, a 403.
+  // All of them have no `data`, so the check would have reported "no live
+  // interview" for a server that had simply fallen over.
+  check(
+    'once submitted, there is no live interview to resume',
+    afterSubmit.status === 404 ||
+      (afterSubmit.status === 200 && !afterSubmit.body.data),
+    `${afterSubmit.status} ${String(afterSubmit.body.data?.id)}`,
+  );
+
+  const nextVisit = await call<SessionView>('POST', '/case-taking/sessions', {
+    token: alpha.token,
+    body: {},
+  });
+  const nextId = nextVisit.body.data?.id;
+  check(
+    'starting again opens an interview rather than refusing',
+    nextVisit.status === 200 || nextVisit.status === 201,
+    `${nextVisit.status} ${String(nextVisit.body.message)}`,
+  );
+  check(
+    'and it is a new one, not the case that was already sent',
+    Boolean(nextId) && nextId !== sessionId,
+    `${String(nextId)} vs submitted ${sessionId}`,
+  );
+
+  // "Empty" here means empty of *answers*, not empty of rows.
+  //
+  // Every session opens with what the patient record already knows seeded as
+  // `existing_record` facts - `social.age_band` on this account - so counting
+  // rows and expecting zero fails on a session that is behaving perfectly.
+  // What must not appear is anything the patient said: a `patient_text`,
+  // `patient_choice` or `patient_voice` fact in a brand-new interview is last
+  // visit's illness presented as this visit's answer.
+  const spokenSources = ['patient_text', 'patient_choice', 'patient_voice'];
+  const carriedOver = nextId
+    ? await prisma.caseFact.count({
+        where: { sessionId: nextId, sourceType: { in: spokenSources } },
+      })
+    : -1;
+  check(
+    'the new interview carries over nothing the patient said last time',
+    carriedOver === 0,
+    `${carriedOver} answered fact(s) already present`,
+  );
+
+  const submissionsNow = await prisma.caseSubmission.count({
+    where: { patientId: alpha.patientId },
+  });
+  check(
+    'and the case already sent is still on the record',
+    submissionsNow === 1,
+    `${submissionsNow} submission(s) for this patient`,
+  );
+
+  if (nextId) {
+    const resumeNext = await call<SessionView>(
+      'POST',
+      '/case-taking/sessions',
+      { token: alpha.token, body: {} },
+    );
+    check(
+      'and that new interview is itself resumed, not forked',
+      resumeNext.body.data?.id === nextId,
+      `${String(resumeNext.body.data?.id)} vs ${nextId}`,
+    );
+  }
 
   // ── 8. One patient, one interview ─────────────────────────────────────────
   //

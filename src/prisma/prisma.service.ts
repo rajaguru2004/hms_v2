@@ -34,6 +34,23 @@ export class PrismaService
 {
   private readonly logger = new Logger(PrismaService.name);
 
+  /**
+   * Kept, because `$disconnect()` cannot close it.
+   *
+   * With a driver adapter the pool belongs to us, not to Prisma: `PrismaPg`
+   * is handed a `pg.Pool` and borrows connections from it. `$disconnect()`
+   * therefore releases Prisma's side and leaves every socket in the pool
+   * open, and `keepAlive` above means they are actively probed rather than
+   * idling out. Shutdown looked clean and held its database connections
+   * anyway - visible on a rolling restart as connections that outlive the
+   * process that opened them, and in the e2e suite as a Jest run that passed
+   * and then never exited.
+   */
+  private readonly pool: Pool;
+
+  /** Whether [pool] has already been ended; see [onModuleDestroy]. */
+  private poolEnded = false;
+
   constructor() {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) {
@@ -90,11 +107,14 @@ export class PrismaService
       ],
     });
 
+    // Both after super(), because that is where `this` starts existing in a
+    // derived constructor.
+    this.pool = pool;
+
     // A pooled connection can fail while it is idle - nobody is awaiting it, so
     // without a listener node-postgres raises an unhandled 'error' event and
     // takes the process down. Logging it lets the pool discard that connection
-    // and carry on. Attached after super() because this is where `this` starts
-    // existing in a derived constructor.
+    // and carry on.
     pool.on('error', (err: Error) => {
       this.logger.warn(`Idle database connection failed: ${err.message}`);
     });
@@ -159,11 +179,38 @@ export class PrismaService
     }
   }
 
+  /**
+   * Ends the pool even when Prisma's own disconnect fails.
+   *
+   * `$disconnect()` in front, because ending the pool underneath a live client
+   * would tear down a connection mid-query - but in a `try`, because a
+   * rejection there is exactly when the pool most needs closing: the engine is
+   * already in trouble and skipping `pool.end()` reproduces the leak this
+   * method exists to prevent, sockets and all.
+   *
+   * `ended` guards the second call. `pg` rejects a repeat `end()` with "Called
+   * end on pool more than once", and Nest's `close()` has no re-entrancy guard
+   * of its own, so a second shutdown would fail on a pool that is already
+   * shut - turning a tidy exit into an error.
+   */
   async onModuleDestroy(): Promise<void> {
     const dbInfo = this.getDbConnectionInfo();
     this.logger.log(`Disconnecting from PostgreSQL database (${dbInfo})...`);
-    await this.$disconnect();
-    this.logger.log(`Prisma disconnected from database (${dbInfo})`);
+    try {
+      await this.$disconnect();
+    } finally {
+      if (!this.poolEnded) {
+        this.poolEnded = true;
+        await this.pool.end().catch((err: unknown) => {
+          this.logger.warn(
+            `Database pool did not close cleanly: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+      }
+      this.logger.log(`Prisma disconnected from database (${dbInfo})`);
+    }
   }
 
   /**

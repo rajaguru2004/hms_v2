@@ -157,7 +157,9 @@ async function runVerification() {
     }
 
     const getOrdersData = await getOrdersRes.json();
-    const foundOrder = getOrdersData.data.find((o: any) => o.id === orderId);
+    const foundOrder = orderList(getOrdersData).find(
+      (o: any) => o.id === orderId,
+    );
     if (!foundOrder) {
       throw new Error('Created lab order was not found in the list');
     }
@@ -284,7 +286,7 @@ async function runVerification() {
       },
     );
     const orderCheckData = await orderCheckRes.json();
-    const completedOrder = orderCheckData.data.find(
+    const completedOrder = orderList(orderCheckData).find(
       (o: any) => o.id === orderId,
     );
     if (!completedOrder) {
@@ -460,6 +462,26 @@ async function runVerification() {
     console.error('\n❌ VERIFICATION TEST FAILED:', error.message || error);
     process.exit(1);
   }
+}
+
+// Order listings come back paginated, so their rows sit under `data.data`
+// next to a `meta` page descriptor, while the test and result listings are
+// still flat arrays.
+//
+// Deliberately strict about which of those it will accept. Tolerating a bare
+// array here as well would mean a regression from paginated back to flat -
+// the exact shape change that broke this file - sails through, and the
+// sibling helper in verify-queue.ts would be the only thing left to catch it.
+// One of the two had to be the one that fails, and a listing that stops
+// paginating is worth being told about.
+function orderList(body: any): any[] {
+  const payload = body?.data;
+  if (!Array.isArray(payload?.data)) {
+    throw new Error(
+      'Lab order listing is not paginated: expected rows under data.data',
+    );
+  }
+  return payload.data;
 }
 
 function expectNotEmpty(arr: any[], message: string) {

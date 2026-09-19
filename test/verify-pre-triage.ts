@@ -121,10 +121,93 @@ async function runVerification() {
       `✅ Update successful. New Chief Complaint: ${updateData.data.chiefComplaint}, Temperature: ${updateData.data.temperature}`,
     );
 
-    // 6. Convert to Patient
-    console.log('\n👤 Converting pre-triage screening to Patient record...');
-    const convertRes = await fetch(
+    // 6. A routed screening has already been registered and queued
+    //
+    // `create` auto-registers the patient and puts them on the board whenever
+    // `routedTo` is set, which is what routing a walk-in means: the clerk who
+    // routes them is not then expected to press "register" as a second step.
+    // This section used to call `/convert` here and expect 200; that stopped
+    // being the contract when routing grew the auto-registration, and the
+    // check failed as PRE_TRIAGE_ALREADY_CONVERTED — the server disagreeing
+    // with the test, correctly. What is worth asserting is the handover
+    // itself: a patient record exists, the screening points at it, and the
+    // patient is on the queue for the area they were routed to.
+    console.log(
+      '\n👤 Verifying the routed screening auto-registered a patient...',
+    );
+    const routedRes = await fetch(`${BASE_URL}/pre-triage/${screeningId}`, {
+      headers,
+    });
+    const routedData = await routedRes.json();
+    const patientId = routedData.data.patientId;
+    if (!patientId) {
+      throw new Error(
+        'A screening routed to adult_triage did not auto-register a patient',
+      );
+    }
+    console.log(`✅ Auto-registered patient ID: ${patientId}`);
+
+    console.log('\n🔍 Verifying the patient is on the queue...');
+    // The board has no patientId filter - `QueueQueryDto` takes serviceArea,
+    // status, page, limit and ordering, and nothing else - so the row is found
+    // by reading one large page and looking. `limit` is capped at 200 by the
+    // DTO, which is also what is asked for here.
+    const queueRes = await fetch(`${BASE_URL}/queue?limit=200`, { headers });
+    if (!queueRes.ok) {
+      throw new Error(`Failed to read the queue: ${queueRes.status}`);
+    }
+    const queueData = await queueRes.json();
+    const entry = (queueData.data?.data ?? []).find(
+      (q: any) => q.patientId === patientId,
+    );
+    if (!entry) {
+      throw new Error('Routed patient never reached the queue');
+    }
+    console.log(
+      `✅ On the queue as ${entry.queueNumber} in ${entry.serviceArea}`,
+    );
+
+    console.log('\n🚫 Verifying a second conversion is refused...');
+    const reconvertRes = await fetch(
       `${BASE_URL}/pre-triage/${screeningId}/convert`,
+      { method: 'POST', headers },
+    );
+    if (reconvertRes.status !== 409) {
+      throw new Error(
+        `Expected 409 for an already-registered screening, got ${reconvertRes.status}`,
+      );
+    }
+    console.log('✅ Refused with 409, as it should be.');
+
+    // 6b. An unrouted screening still converts by hand
+    //
+    // The manual door is the one a screening that was never routed goes
+    // through, and it is the path that sets `registered_as_patient`. Routing
+    // leaves the status at `routed` because the screening is still a screening
+    // — the difference is worth holding onto, so both are covered.
+    console.log('\n🏥 Creating an unrouted screening to convert by hand...');
+    const manualCreateRes = await fetch(`${BASE_URL}/pre-triage`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        firstName: 'John',
+        lastName: 'Unrouted',
+        age: 41,
+        gender: 'male',
+        phone: '+251922334466',
+        chiefComplaint: 'Ankle pain after a fall',
+        briefHistory: 'Tripped on a kerb this morning.',
+      }),
+    });
+    if (!manualCreateRes.ok) {
+      throw new Error(
+        `Unrouted screening creation failed: ${manualCreateRes.status} ${await manualCreateRes.text()}`,
+      );
+    }
+    const manualId = (await manualCreateRes.json()).data.id;
+
+    const convertRes = await fetch(
+      `${BASE_URL}/pre-triage/${manualId}/convert`,
       {
         method: 'POST',
         headers,
@@ -137,24 +220,21 @@ async function runVerification() {
       );
     }
     const convertData = await convertRes.json();
-    const patientId = convertData.data.patientId;
+    const manualPatientId = convertData.data.patientId;
     const mrn = convertData.data.mrn;
     console.log(
-      `✅ Conversion successful. Registered Patient ID: ${patientId}, MRN: ${mrn}`,
+      `✅ Conversion successful. Registered Patient ID: ${manualPatientId}, MRN: ${mrn}`,
     );
 
     // Verify screening status update
     console.log('\n🔍 Verifying screening status updated after conversion...');
-    const verifyStatusRes = await fetch(
-      `${BASE_URL}/pre-triage/${screeningId}`,
-      {
-        headers,
-      },
-    );
+    const verifyStatusRes = await fetch(`${BASE_URL}/pre-triage/${manualId}`, {
+      headers,
+    });
     const verifyStatusData = await verifyStatusRes.json();
     if (
       verifyStatusData.data.status !== 'registered_as_patient' ||
-      verifyStatusData.data.patientId !== patientId
+      verifyStatusData.data.patientId !== manualPatientId
     ) {
       throw new Error(
         `Pre-triage status or patient association incorrect. Status: ${verifyStatusData.data.status}`,
@@ -166,7 +246,7 @@ async function runVerification() {
 
     // Verify patient actually exists in the patient module
     console.log('\n🔍 Verifying patient record in patient module...');
-    const patientRes = await fetch(`${BASE_URL}/patients/${patientId}`, {
+    const patientRes = await fetch(`${BASE_URL}/patients/${manualPatientId}`, {
       headers,
     });
     if (!patientRes.ok) {

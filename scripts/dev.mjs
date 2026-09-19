@@ -544,10 +544,21 @@ async function ensureVoiceAgent(cfg) {
   }
 
   const runner = path.join(agentDir, 'run.sh');
-  const venv = path.join(agentDir, '.venv', 'bin', 'python');
+  // A venv puts its interpreter in `Scripts` on Windows and `bin` everywhere
+  // else, so looking only for `bin/python` reports "no venv" on Windows for a
+  // venv that is there and complete - and then names a creation command that
+  // cannot run either. The sidecar check above already knew this.
+  const venv =
+    process.platform === 'win32'
+      ? path.join(agentDir, '.venv', 'Scripts', 'python.exe')
+      : path.join(agentDir, '.venv', 'bin', 'python');
   if (!existsSync(venv)) {
     warn('voice-agent has no venv; live conversation will not start. Create it with:');
-    warn('  cd voice-agent && python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt');
+    warn(
+      process.platform === 'win32'
+        ? '  cd voice-agent && py -3.12 -m venv .venv && .venv/Scripts/pip install -r requirements.txt'
+        : '  cd voice-agent && python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt',
+    );
     return false;
   }
   if (process.platform === 'win32' || !existsSync(runner)) {
@@ -605,11 +616,101 @@ async function freeApiPort(cfg) {
     return false;
   }
 
+  // A previous source run of *this* project, still holding the port.
+  //
+  // This is the failure that wastes an afternoon, because nothing about it
+  // looks like a failure. Nest compiles, the watch prints no error anyone
+  // reads, its child cannot bind, and the old process keeps answering - so
+  // `/api/health` is 200, the app works, and every request is served by the
+  // binary and the environment of whenever that process started. A change to
+  // .env.local appears to be ignored. A fix appears not to work. A test suite
+  // reports failures against code that is no longer on disk.
+  //
+  // Stopping it is safe in a way that stopping a stranger's process is not:
+  // the command line has to name this project's own `dist/src/main`, which
+  // nothing but a previous `npm run dev` from this checkout produces.
+  const stale = apiProcessOnPort(cfg.apiPort);
+  if (stale) {
+    log(`  a previous source API (pid ${stale.pid}) holds :${cfg.apiPort} - stopping it`);
+    // `/T` takes the tree, and the tree is the point.
+    //
+    // The listener is the leaf - `node dist/src/main` - and its parent is the
+    // `nest start --watch` that spawned it. Killing only the leaf leaves that
+    // watcher alive and childless, supervising nothing; the next file save
+    // rebuilds and respawns it, and the new process is a second competitor
+    // for this port. That is the same "something else is already listening"
+    // afternoon this whole branch exists to end, arriving a few minutes later
+    // by a different route.
+    const killed = sh(
+      process.platform === 'win32' ? 'taskkill' : 'kill',
+      process.platform === 'win32'
+        ? ['/PID', String(stale.pid), '/T', '/F']
+        : ['-9', String(stale.pid)],
+    );
+    // Said out loud rather than swallowed: a refusal here (another user's
+    // process, a missing privilege) otherwise reads as ten seconds of waiting
+    // followed by "still busy", which describes the symptom and hides the
+    // cause.
+    if (killed.status !== 0) {
+      warn(
+        `could not stop pid ${stale.pid}: ${killed.stderr || killed.stdout || `exit ${killed.status}`}`,
+      );
+    }
+    for (let i = 0; i < 20; i++) {
+      if (!(await tcpProbe(cfg.apiPort))) {
+        log(`  :${cfg.apiPort} released`);
+        return true;
+      }
+      await sleep(500);
+    }
+    warn(`:${cfg.apiPort} still busy after stopping pid ${stale.pid}`);
+    return false;
+  }
+
   warn(`something else is listening on :${cfg.apiPort} and it is not ${DEMO_API_CONTAINER}.`);
   warn(
     `find it:  Get-Process -Id (Get-NetTCPConnection -LocalPort ${cfg.apiPort} -State Listen).OwningProcess`,
   );
   return false;
+}
+
+/**
+ * The pid listening on `port`, but only when it is this checkout's own API.
+ *
+ * Returns null for anything else - another project's server, a proxy, a
+ * container - because the caller kills what this returns, and "a node process"
+ * is not identification enough to kill something on.
+ */
+function apiProcessOnPort(port) {
+  const ownMain = path.join(root, 'dist', 'src', 'main');
+  if (process.platform === 'win32') {
+    // One PowerShell call rather than netstat plus a second lookup: the
+    // command line is the whole point, and netstat does not carry it.
+    const ps = sh('powershell', [
+      '-NoProfile',
+      '-Command',
+      `$ErrorActionPreference='SilentlyContinue';` +
+        `Get-NetTCPConnection -LocalPort ${port} -State Listen | ` +
+        `Select-Object -Expand OwningProcess -Unique | ForEach-Object { ` +
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId=$_"; ` +
+        `"$($p.ProcessId)|$($p.CommandLine)" }`,
+    ]);
+    for (const line of ps.stdout.split(/\r?\n/)) {
+      const [pid, ...rest] = line.split('|');
+      const cmd = rest.join('|');
+      if (cmd && cmd.includes(ownMain) && /\bnode(\.exe)?\b/i.test(cmd)) {
+        return { pid: Number(pid) };
+      }
+    }
+    return null;
+  }
+
+  const lsof = sh('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t']);
+  for (const pid of lsof.stdout.split(/\s+/).filter(Boolean)) {
+    const cmd = sh('ps', ['-o', 'args=', '-p', pid]).stdout;
+    if (cmd.includes(ownMain)) return { pid: Number(pid) };
+  }
+  return null;
 }
 
 /**
@@ -764,6 +865,28 @@ async function main() {
   const nest = spawn(process.execPath, [nestBin, 'start', '--watch'], {
     cwd: root,
     stdio: 'inherit',
+    // Rate limits raised for `test/verify-*.ts`, and raised HERE rather than
+    // in a .env file on purpose.
+    //
+    // Those scripts sign in as a dozen roles in a row and claim several
+    // patients in a row, which trips the shipped defaults (10 logins and 5
+    // claims a minute) and reports as "HTTP 429" failures that read like auth
+    // bugs. The decorators already read these names for exactly this reason.
+    //
+    // `.env.local` looks like the obvious home and is the wrong one: despite
+    // the name it is *tracked* - .gitignore covers `.env.*.local`, not
+    // `.env.local` - so putting them there commits a twentyfold weakening of
+    // the brute-force guard in front of bcrypt, and every deployment carrying
+    // the repo file inherits it silently, because `load-env.ts` reads
+    // `.env.local` first. Set on the dev child process, they cannot leave this
+    // machine, and a production boot is unaffected because it never runs this
+    // script.
+    env: {
+      ...process.env,
+      THROTTLE_LOGIN_LIMIT: process.env.THROTTLE_LOGIN_LIMIT ?? '200',
+      THROTTLE_PATIENT_CLAIM_LIMIT:
+        process.env.THROTTLE_PATIENT_CLAIM_LIMIT ?? '100',
+    },
   });
   nest.on('exit', (code) => process.exit(code ?? 0));
 }

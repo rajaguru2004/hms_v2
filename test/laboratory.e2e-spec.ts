@@ -94,7 +94,10 @@ describe('LaboratoryController (e2e)', () => {
       .expect(201);
 
     expect(createTestRes.body.success).toBe(true);
-    expect(createTestRes.body.message).toBe('Test added successfully');
+    // ResponseInterceptor emits one standard envelope message for every
+    // non-enveloped payload; the old per-endpoint strings no longer exist
+    // anywhere in src/.
+    expect(createTestRes.body.message).toBe('Operation completed successfully');
     const testId = createTestRes.body.data.id;
     expect(testId).toBeDefined();
 
@@ -126,7 +129,9 @@ describe('LaboratoryController (e2e)', () => {
       .expect(201);
 
     expect(createOrderRes.body.success).toBe(true);
-    expect(createOrderRes.body.message).toBe('Lab order created');
+    expect(createOrderRes.body.message).toBe(
+      'Operation completed successfully',
+    );
     const orderId = createOrderRes.body.data.id;
     expect(orderId).toBeDefined();
     expect(createOrderRes.body.data.status).toBe('pending');
@@ -137,8 +142,8 @@ describe('LaboratoryController (e2e)', () => {
       .expect(200);
 
     expect(getOrdersRes.body.success).toBe(true);
-    expect(getOrdersRes.body.data).toHaveLength(1);
-    expect(getOrdersRes.body.data[0].id).toBe(orderId);
+    expect(getOrdersRes.body.data.data).toHaveLength(1);
+    expect(getOrdersRes.body.data.data[0].id).toBe(orderId);
 
     // 5. Create a result for the order
     const createResultRes = await request(app.getHttpServer())
@@ -157,7 +162,9 @@ describe('LaboratoryController (e2e)', () => {
       .expect(201);
 
     expect(createResultRes.body.success).toBe(true);
-    expect(createResultRes.body.message).toBe('Result saved');
+    expect(createResultRes.body.message).toBe(
+      'Operation completed successfully',
+    );
     const resultId = createResultRes.body.data.id;
     expect(resultId).toBeDefined();
 
@@ -167,8 +174,8 @@ describe('LaboratoryController (e2e)', () => {
       .expect(200);
 
     expect(getOrdersInProgressRes.body.success).toBe(true);
-    expect(getOrdersInProgressRes.body.data).toHaveLength(1);
-    expect(getOrdersInProgressRes.body.data[0].id).toBe(orderId);
+    expect(getOrdersInProgressRes.body.data.data).toHaveLength(1);
+    expect(getOrdersInProgressRes.body.data.data[0].id).toBe(orderId);
 
     // 7. Query results
     const getResultsRes = await request(app.getHttpServer())
@@ -236,8 +243,8 @@ describe('LaboratoryController (e2e)', () => {
       .expect(200);
 
     expect(getCompletedOrdersRes.body.success).toBe(true);
-    expect(getCompletedOrdersRes.body.data).toHaveLength(1);
-    expect(getCompletedOrdersRes.body.data[0].id).toBe(orderId);
+    expect(getCompletedOrdersRes.body.data.data).toHaveLength(1);
+    expect(getCompletedOrdersRes.body.data.data[0].id).toBe(orderId);
   });
 
   it('should run clean RESTful routes workflow', async () => {
@@ -290,7 +297,7 @@ describe('LaboratoryController (e2e)', () => {
       .get('/laboratory/orders?status=pending')
       .expect(200);
 
-    expect(getOrdersRes.body.data).toHaveLength(1);
+    expect(getOrdersRes.body.data.data).toHaveLength(1);
 
     // 6. Update order status
     const updateOrderRes = await request(app.getHttpServer())
@@ -302,7 +309,13 @@ describe('LaboratoryController (e2e)', () => {
       .expect(200);
 
     expect(updateOrderRes.body.data.status).toBe('sample_collected');
-    expect(updateOrderRes.body.data.accessionNumber).toBe('BARCODE-999');
+    // Accession numbers are system-generated on sample collection and the
+    // client-supplied value is deliberately discarded to prevent duplicates
+    // (laboratory.service.ts updateOrder; asserted in laboratory.service.spec.ts).
+    expect(updateOrderRes.body.data.accessionNumber).not.toBe('BARCODE-999');
+    expect(updateOrderRes.body.data.accessionNumber).toMatch(
+      /^ACC-[0-9A-Z]{8}$/,
+    );
 
     // 7. Add result
     const createResultRes = await request(app.getHttpServer())

@@ -94,7 +94,12 @@ describe('BillingController (e2e)', () => {
       .expect(201);
 
     expect(createServiceRes.body.success).toBe(true);
-    expect(createServiceRes.body.message).toBe('Service created successfully');
+    // ResponseInterceptor emits one standard envelope message for every
+    // non-enveloped payload; the old per-endpoint strings no longer exist
+    // anywhere in src/.
+    expect(createServiceRes.body.message).toBe(
+      'Operation completed successfully',
+    );
     const serviceId = createServiceRes.body.data.id;
     expect(serviceId).toBeDefined();
 
@@ -129,7 +134,9 @@ describe('BillingController (e2e)', () => {
       .expect(201);
 
     expect(createInvoiceRes.body.success).toBe(true);
-    expect(createInvoiceRes.body.message).toBe('Invoice created');
+    expect(createInvoiceRes.body.message).toBe(
+      'Operation completed successfully',
+    );
     const invoiceId = createInvoiceRes.body.data.id;
     expect(invoiceId).toBeDefined();
     expect(createInvoiceRes.body.data.totalAmount).toBe(280.0);
@@ -157,7 +164,9 @@ describe('BillingController (e2e)', () => {
       .expect(201);
 
     expect(createPaymentRes.body.success).toBe(true);
-    expect(createPaymentRes.body.message).toBe('Payment recorded');
+    expect(createPaymentRes.body.message).toBe(
+      'Operation completed successfully',
+    );
     expect(createPaymentRes.body.data.amount).toBe(100.0);
 
     // 6. Query payments

@@ -237,10 +237,12 @@ export class CaseTakingController {
    *
    * Answers from the engine alone — presence derivation, safety rules and
    * question selection are all pure and synchronous — so the next question is
-   * in the response rather than eight to twenty seconds behind it. Any model
-   * work this turn triggers runs after the response has gone out and lands as
-   * new facts later; `extraction.queued` in the body says whether that
-   * happened, and `serverTimeMs` reports what the handler actually cost.
+   * in the response rather than eight to twenty seconds behind it. Anything
+   * the answer volunteered beyond the question asked is read by `harvest`
+   * before the response is built, so no facts land afterwards and
+   * `extraction.queued` is always false; its `reason` says how many extra
+   * fields the answer gave up, and `serverTimeMs` reports what the handler
+   * actually cost.
    */
   @Post('sessions/:sessionId/turns')
   @Permissions(Permission.CASE_TAKING_UPDATE)
