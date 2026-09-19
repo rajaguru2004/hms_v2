@@ -449,15 +449,33 @@ describe('derivePresence for tapped answers', () => {
 });
 
 describe('derivePresence language coverage', () => {
-  it('does not pretend to understand Tamil yet', () => {
-    // The phrase lists are English only. "theriyala" is "I don't know", and we
-    // cannot currently tell it from an answer.
+  it('reads Tamil for itself, with no model anywhere in the path', () => {
+    // This test used to assert the opposite — "does not pretend to understand
+    // Tamil yet" — and it was right to. The phrase lists were English only, so
+    // "theriyala" was an unmatched answer that had to be flagged, and the gap
+    // was covered by sending the utterance to gemma3:4b. The lists now exist;
+    // see `answer-phrases.ts` on why a dictionary lookup never needed a model.
     const derived = derivePresence(
       answer({
         field: TEXT_FIELD,
         language: 'ta',
         evidenceSpan: 'theriyala',
         extractedValue: 'theriyala',
+      }),
+    );
+    expect(derived.languageCovered).toBe(true);
+    expect(derived.presence).toBe('unknown');
+  });
+
+  it('still flags a language nobody has written lists for', () => {
+    // Bengali has a voice and a recogniser and no phrase list, which is the
+    // state Tamil and Hindi were in. The flag is what keeps that honest: the
+    // value is recorded and the UI is told to read it back.
+    const derived = derivePresence(
+      answer({
+        field: TEXT_FIELD,
+        language: 'bn',
+        extractedValue: 'jalapoda',
       }),
     );
     expect(derived.languageCovered).toBe(false);
@@ -555,7 +573,10 @@ describe('factFromAnswer', () => {
     // An unmatched language cannot yield a patient-confirmed fact just because
     // the caller said so.
     const { fact } = factFromAnswer(
-      answer({ field: TEXT_FIELD, language: 'hi', extractedValue: 'jalan' }),
+      // Bengali, not Hindi: Hindi has phrase lists now, so it is a covered
+      // language and produces a certain derivation. The property under test is
+      // about an UNcovered one, and it needs a language that really is.
+      answer({ field: TEXT_FIELD, language: 'bn', extractedValue: 'jala' }),
       provenance,
     );
     expect(fact.presence).toBe('recorded');

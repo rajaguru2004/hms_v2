@@ -34,6 +34,8 @@
  * because extractors will produce it, but it is not the form this engine emits.
  */
 
+import { ANSWER_LANGUAGES, AnswerPhrases, phrasesFor } from './answer-phrases';
+
 /** The six presences. Order here is arbitrary; nothing may depend on it. */
 export const FACT_PRESENCES = [
   'recorded',
@@ -518,7 +520,19 @@ export type FieldKind =
   | 'scale';
 
 /** Languages whose phrase lists exist. Everything else is flagged for confirmation. */
-export const PHRASE_MATCHED_LANGUAGES: readonly string[] = ['en'];
+/**
+ * Languages whose answers the phrase lists can read.
+ *
+ * Read off `answer-phrases.ts` rather than written here: the list and the lists
+ * are the same fact, and a language added there with no entry here would have
+ * its phrases silently skipped by `derivePresence`'s language gate.
+ *
+ * It was `['en']` for as long as a language model stood behind the gap — a
+ * Tamil "இல்லை" matched nothing, and the interview paid gemma3:4b eight to
+ * twenty seconds to look up a word. It does not any more; see the note at the
+ * top of `answer-phrases.ts`.
+ */
+export const PHRASE_MATCHED_LANGUAGES: readonly string[] = ANSWER_LANGUAGES;
 
 /** Severity answers that are not a 0-10 number but are still a real answer. */
 export const SCALE_BANDS: readonly string[] = ['mild', 'moderate', 'severe'];
@@ -593,72 +607,13 @@ const UNCERTAINTY_VALUE_TOKENS = [
 ];
 
 /**
- * An explicit refusal. Checked first, because a refusal that is read as an
- * uncertainty gets re-asked, and re-asking a patient who has just said they
- * would rather not answer is its own kind of harm.
+ * The English phrase lists used to live here, four flat arrays of regexes.
+ *
+ * They are in `answer-phrases.ts` now, beside the Tamil and Hindi ones, because
+ * they are the same kind of knowledge and keeping English in a different file
+ * from the others is how the others end up with fewer rules than English has.
+ * `derivePresence` reads all of them through `phrasesFor`.
  */
-const DECLINED_PHRASES: readonly RegExp[] = [
-  /\b(i('| a)?m )?(would |'?d )?(rather|prefer) not\b/i,
-  /\bdo ?n'?t want to (say|answer|talk|discuss)\b/i,
-  /\bskip (this|that|it|the question)\b/i,
-  /\bnext question\b/i,
-  /\bnot answering\b/i,
-  /\bno comment\b/i,
-  /\bi'?ll pass\b/i,
-  /^\s*pass\s*[.!]?\s*$/i,
-  /\bprivate\b.*\bnot\b|\bthat'?s private\b/i,
-];
-
-/**
- * "I do not know". Checked BEFORE negation, because almost every way of saying
- * it in English contains a negation ("don't", "can't", "no idea") and a
- * negation-first order would turn every uncertainty into an asserted no — the
- * exact collapse this file exists to prevent.
- */
-const UNCERTAINTY_PHRASES: readonly RegExp[] = [
-  /\bi (do not|don'?t|dont) know\b/i,
-  /\b(do not|don'?t|dont) know\b/i,
-  /\bnot sure\b/i,
-  /\bunsure\b/i,
-  /\bno idea\b/i,
-  /\b(can'?t|cannot|could ?n'?t) remember\b/i,
-  /\b(do not|don'?t|dont) remember\b/i,
-  /\b(can'?t|cannot) say\b/i,
-  /\bnot certain\b/i,
-  /\bhard to say\b/i,
-  /\bwho knows\b/i,
-  /\bmay ?be\b/i,
-  /\bpossibly\b/i,
-  /\bi think so\b/i,
-  /\bi guess\b/i,
-  /\bnever (been )?(checked|tested|told)\b/i,
-  /\bthe doctor (would|will|might) know\b/i,
-];
-
-/** An asserted negative. Only reached once refusal and uncertainty are ruled out. */
-const NEGATION_PHRASES: readonly RegExp[] = [
-  /^\s*(no|nope|nah|negative)\b/i,
-  /\bno,?\s/i,
-  /\bnever\b/i,
-  /\bnothing\b/i,
-  /\bnone\b/i,
-  /\bnot at all\b/i,
-  /\bno known\b/i,
-  /\bi (do not|don'?t|dont) have\b/i,
-  /\bi (have|had) (not|n'?t|never)\b/i,
-  /\bhaven'?t (had|got)\b/i,
-  /\bthere (is|are|was|were) (no|none)\b/i,
-];
-
-const AFFIRMATION_PHRASES: readonly RegExp[] = [
-  /^\s*(yes|yeah|yep|yup|aye|correct|right|true)\b/i,
-  /\byes,?\s/i,
-  /\bi do\b/i,
-  /\bi have\b/i,
-  /\bi did\b/i,
-  /\bthat'?s right\b/i,
-  /\bof course\b/i,
-];
 
 const NUMBER_WORDS: Readonly<Record<string, number>> = {
   a: 1,
@@ -691,6 +646,137 @@ const RELATIVE_DURATION_PATTERN =
 
 function matchesAny(text: string, patterns: readonly RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
+}
+
+/**
+ * The same test, across every language's list for one patient.
+ *
+ * The lists are tried in `phrasesFor`'s order — the patient's own language
+ * first, English last — and the first hit wins. Only the *fact* of a match
+ * matters to every caller here: which language spotted it changes nothing
+ * about the presence that results.
+ */
+function matchesAnyIn(
+  text: string,
+  phrases: readonly AnswerPhrases[],
+  list: 'declined' | 'uncertainty' | 'negation' | 'affirmation',
+): boolean {
+  return phrases.some((entry) => matchesAny(text, entry[list]));
+}
+
+/**
+ * A value read out of the patient's own words, for a field that wants one.
+ *
+ * ── What this is
+ *
+ * The replacement for the one thing the language model genuinely did on this
+ * path: turn "ரொம்ப வலிக்குது" into `severe` and "तीन दिन से" into a duration.
+ * It is a lookup, because that is all it ever was — a fixed vocabulary of ways
+ * to say the same small number of things, which is exactly the kind of
+ * knowledge that belongs in a table a Tamil speaker can correct in a diff.
+ *
+ * ── What it deliberately is not
+ *
+ * It never returns a presence and it never stores anything. It returns a
+ * *candidate value*, which `validateFieldValue` then accepts or rejects against
+ * the field's own shape — the same gate the extractor's output went through,
+ * for the same reason. A severity word that is not one of the three bands, or a
+ * number outside 0-10, is refused here exactly as it was before.
+ *
+ * `undefined` means "nothing readable", which leaves the field `not_assessed`
+ * and the question askable. That is the honest outcome and it is cheap: the
+ * interview asks again.
+ */
+function readValueFromWords(
+  spec: FieldValueSpec,
+  text: string,
+  phrases: readonly AnswerPhrases[],
+): string | number | undefined {
+  switch (spec.kind) {
+    case 'scale': {
+      // A bare number first: "7" and "எட்டு" are both a rating, and a digit
+      // beats a band word when the patient gave one.
+      const digits = /(?<!\d)(\d{1,2})(?!\d)/.exec(text);
+      if (digits) return Number(digits[1]);
+      for (const entry of phrases) {
+        const counted = countingWord(text, entry.numberWords);
+        if (counted !== undefined) return counted;
+        const band = entry.scaleBands.find((b) => b.pattern.test(text));
+        if (band) return band.band;
+      }
+      return undefined;
+    }
+
+    case 'number': {
+      const digits = /(?<!\d)(\d+(?:\.\d+)?)/.exec(text);
+      if (digits) return Number(digits[1]);
+      for (const entry of phrases) {
+        const counted = countingWord(text, entry.numberWords);
+        if (counted !== undefined) return counted;
+      }
+      return undefined;
+    }
+
+    case 'duration': {
+      // The text itself is the value for a duration field — the chart records
+      // "three days", not 3 — so this only has to decide whether it *is* one.
+      // `validateFieldValue` asks the same question again; asking it here too
+      // keeps this function's contract ("a value or nothing") honest.
+      return looksLikeDuration(text, phrases) ? text : undefined;
+    }
+
+    case 'choice': {
+      // Only the tokens THIS field offers are considered, in the order the
+      // registry declares them. A word list for a token the field does not
+      // offer is not a candidate for it — "burning" is a `hpi.character`, and
+      // a patient saying it while being asked about onset has not answered.
+      for (const entry of phrases) {
+        for (const choice of spec.choices ?? []) {
+          const words = entry.choiceWords[normaliseToken(choice)];
+          if (words && matchesAny(text, words)) return choice;
+        }
+      }
+      return undefined;
+    }
+
+    default:
+      return undefined;
+  }
+}
+
+/** The number a counting word names, if the text contains one. */
+function countingWord(
+  text: string,
+  words: Readonly<Record<string, number>>,
+): number | undefined {
+  for (const [word, value] of Object.entries(words)) {
+    // Latin words need a case-insensitive ASCII boundary; native-script words
+    // need a Unicode-aware one, because `\b` does not see Tamil or Devanagari
+    // as word characters at all. One pattern covers both.
+    const pattern = new RegExp(
+      `(?<!\\p{L})${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\p{L})`,
+      'iu',
+    );
+    if (pattern.test(text)) return value;
+  }
+  return undefined;
+}
+
+/** Whether the text names a length of time in any of these languages. */
+function looksLikeDuration(
+  text: string,
+  phrases: readonly AnswerPhrases[],
+): boolean {
+  for (const entry of phrases) {
+    if (matchesAny(text, entry.relativeDuration)) return true;
+    if (entry.durationUnits.some((unit) => unit.pattern.test(text))) {
+      // A unit on its own is not a duration — "day" is a word, "three days" is
+      // an answer. Either a digit or a counting word has to be there too.
+      if (/\d/.test(text)) return true;
+      if (countingWord(text, entry.numberWords) !== undefined) return true;
+    }
+  }
+  return false;
 }
 
 function normaliseToken(value: string): string {
@@ -736,6 +822,16 @@ function isUncertaintyValueToken(value: unknown): boolean {
 export function validateFieldValue(
   spec: FieldValueSpec,
   raw: unknown,
+  /**
+   * The language the value's words are in, when they are words.
+   *
+   * Optional, and English when omitted — which is every caller that passes a
+   * value already reduced to a number or a token. It matters for exactly two
+   * kinds: a `scale` answered "ரொம்ப" rather than 8, and a `duration` answered
+   * "तीन दिन" rather than "three days". Both used to reach here as English,
+   * because a language model had translated them first.
+   */
+  language?: string,
 ): ValueValidation {
   if (raw === undefined || raw === null) {
     return { ok: false, reason: 'no value' };
@@ -793,6 +889,15 @@ export function validateFieldValue(
       }
       const band = normaliseToken(text);
       if (SCALE_BANDS.includes(band)) return { ok: true, value: band };
+      // "ரொம்ப" and "बहुत तेज़" are the same measurement as "severe", and the
+      // chart stores the English token either way — a band is a canonical
+      // value, not the patient's words. Their words stay in `CaseTurn.answerRaw`.
+      for (const phrases of phrasesFor(language)) {
+        const named = phrases.scaleBands.find((entry) =>
+          entry.pattern.test(text),
+        );
+        if (named) return { ok: true, value: named.band };
+      }
       return {
         ok: false,
         reason: `not a ${constraints?.min ?? 0}-${constraints?.max ?? 10} rating or one of ${SCALE_BANDS.join(', ')}`,
@@ -813,8 +918,13 @@ export function validateFieldValue(
       if (
         DURATION_PATTERN.test(text) ||
         SINCE_PATTERN.test(text) ||
-        RELATIVE_DURATION_PATTERN.test(text)
+        RELATIVE_DURATION_PATTERN.test(text) ||
+        looksLikeDuration(text, phrasesFor(language))
       ) {
+        // The patient's own words are the value. A duration is stored as text
+        // on purpose — "மூணு நாளா" is what they said and what a clinician
+        // should read — and `durationInDays` is what anything needing a number
+        // asks, separately.
         return { ok: true, value: text };
       }
       return { ok: false, reason: 'not recognisable as a length of time' };
@@ -842,9 +952,9 @@ export function validateFieldValue(
 }
 
 /** Parse a duration into days where possible. Used for display and ordering only. */
-export function durationInDays(text: string): number | null {
+export function durationInDays(text: string, language?: string): number | null {
   const match = DURATION_PATTERN.exec(text);
-  if (!match) return null;
+  if (!match) return durationInDaysFromPhrases(text, phrasesFor(language));
   const quantity = Number.isFinite(Number(match[1]))
     ? Number(match[1])
     : (NUMBER_WORDS[match[1].toLowerCase()] ?? Number.NaN);
@@ -868,6 +978,38 @@ export function durationInDays(text: string): number | null {
   };
   const factor = perDay[unit];
   return factor === undefined ? null : quantity * factor;
+}
+
+/**
+ * The same arithmetic over the patient's own language.
+ *
+ * Reached only when the English pattern found nothing, so an answer that was
+ * already readable is never re-read by a looser matcher. The quantity may come
+ * from a digit — "3 நாள்" is as common as "மூணு நாள்" — or from a counting
+ * word; the unit comes from the language's own list.
+ *
+ * Used for display and ordering only, exactly as the English path is. Nothing
+ * clinical branches on it: `hpi.duration` stores what the patient said.
+ */
+function durationInDaysFromPhrases(
+  text: string,
+  phrases: readonly AnswerPhrases[],
+): number | null {
+  for (const entry of phrases) {
+    const unit = entry.durationUnits.find((candidate) =>
+      candidate.pattern.test(text),
+    );
+    if (!unit) continue;
+
+    const digits = /(?<!\d)(\d+(?:\.\d+)?)/.exec(text);
+    const quantity = digits
+      ? Number(digits[1])
+      : countingWord(text, entry.numberWords);
+    if (quantity === undefined || !Number.isFinite(quantity)) continue;
+
+    return quantity * unit.days;
+  }
+  return null;
 }
 
 export type PresenceReason =
@@ -947,6 +1089,11 @@ export function derivePresence(input: AnswerInput): PresenceDerivation {
       input.language!.toLowerCase().startsWith(code),
     );
 
+  // The patient's own lists, then English. Both, always — see `phrasesFor` on
+  // why code-switching makes running only one of them the wrong answer for
+  // this product.
+  const phrases = phrasesFor(input.language);
+
   const settle = (
     presence: FactPresence,
     reason: PresenceReason,
@@ -990,15 +1137,35 @@ export function derivePresence(input: AnswerInput): PresenceDerivation {
   const text = span.length > 0 ? span : whole;
   const spanWasSupplied = span.length > 0;
 
+  // ── Doubt stated about a different clause of the same breath ─────────────
+  //
+  // "It started about three days ago, I think on the Tuesday, but honestly I do
+  // not know if that is right." The span is "It started about three days ago"
+  // and reads as a clean duration; the doubt is in a clause the span does not
+  // cover, and it is doubt about *this very answer*.
+  //
+  // Before spans were picked out of a long turn, the whole utterance was the
+  // text and the uncertainty phrase simply won — the field came back `unknown`.
+  // Reading a clause made the engine more confident than the patient, which is
+  // the wrong direction for this system to be wrong in. So the value now
+  // stands, and it is flagged: the UI reads it back before it is treated as
+  // settled, which costs a tap instead of a fabricated certainty.
+  const doubtElsewhere =
+    languageCovered &&
+    spanWasSupplied &&
+    whole.length > span.length &&
+    matchesAnyIn(whole, phrases, 'uncertainty') &&
+    !matchesAnyIn(span, phrases, 'uncertainty');
+
   if (text.length === 0 && input.extractedValue === undefined) {
     return settle('not_assessed', 'no_answer');
   }
 
   if (languageCovered && text.length > 0) {
-    if (matchesAny(text, DECLINED_PHRASES)) {
+    if (matchesAnyIn(text, phrases, 'declined')) {
       return settle('declined', 'declined_phrase');
     }
-    if (matchesAny(text, UNCERTAINTY_PHRASES)) {
+    if (matchesAnyIn(text, phrases, 'uncertainty')) {
       return settle(
         'unknown',
         spanWasSupplied
@@ -1017,31 +1184,63 @@ export function derivePresence(input: AnswerInput): PresenceDerivation {
   }
 
   if (languageCovered && text.length > 0) {
-    if (matchesAny(text, NEGATION_PHRASES)) {
+    if (matchesAnyIn(text, phrases, 'negation')) {
       return settle('none', 'negation_phrase');
     }
     if (
       input.field.kind === 'boolean' &&
-      matchesAny(text, AFFIRMATION_PHRASES)
+      matchesAnyIn(text, phrases, 'affirmation')
     ) {
       return settle('recorded', 'affirmation_phrase', { value: true });
+    }
+  }
+
+  // ── A value the caller already reduced to a token or a number ───────────
+  //
+  // A tapped tile, a correction, a `value` the client sent. Tried first because
+  // it is the most direct statement of what the patient meant.
+  const supplied =
+    input.extractedValue === undefined
+      ? null
+      : validateFieldValue(input.field, input.extractedValue, input.language);
+
+  if (supplied?.ok) {
+    return settle('recorded', 'extracted_value', {
+      value: supplied.value,
+      needsPatientConfirmation: !languageCovered || doubtElsewhere,
+    });
+  }
+
+  // ── The patient answered in words rather than in a value ────────────────
+  //
+  // Which is the ordinary case for speech, and the one the language model used
+  // to be for. "ரொம்ப வலிக்குது" is a severity, "it comes and goes" is a
+  // timing, "तीन दिन से" is a duration — and every one of them arrives here as
+  // raw text that failed the field's shape, because the field wants `severe`,
+  // `comes_and_goes` and a recognisable length of time.
+  //
+  // This runs *after* the supplied value and only when that failed, so an
+  // answer the client had already reduced is never second-guessed by a looser
+  // reading of the same words.
+  if (languageCovered && text.length > 0) {
+    const read = readValueFromWords(input.field, text, phrases);
+    if (read !== undefined) {
+      const validated = validateFieldValue(input.field, read, input.language);
+      if (validated.ok) {
+        return settle('recorded', 'extracted_value', {
+          value: validated.value,
+          needsPatientConfirmation: doubtElsewhere,
+        });
+      }
     }
   }
 
   if (input.extractedValue === undefined) {
     return settle('not_assessed', 'no_value_extracted');
   }
-
-  const validated = validateFieldValue(input.field, input.extractedValue);
-  if (!validated.ok) {
-    // Rejected, not stored. The field stays `not_assessed`, so the interview
-    // asks again rather than carrying a slot-filled guess into the chart.
-    return settle('not_assessed', 'value_failed_field_shape');
-  }
-  return settle('recorded', 'extracted_value', {
-    value: validated.value,
-    needsPatientConfirmation: !languageCovered,
-  });
+  // Rejected, not stored. The field stays `not_assessed`, so the interview asks
+  // again rather than carrying a slot-filled guess into the chart.
+  return settle('not_assessed', 'value_failed_field_shape');
 }
 
 /**

@@ -56,6 +56,7 @@ import {
 } from './field-registry';
 import { FieldKind } from './tri-state';
 import { AsideIntent } from './aside';
+import { ConversationPhrases } from './conversation';
 import { normaliseLanguage } from '../../../common/constants/language.constants';
 
 /**
@@ -273,6 +274,105 @@ export interface QuestionPhrasebook {
    * better than one that does not answer it at all.
    */
   readonly asides: Readonly<Partial<Record<AsideIntent, string>>>;
+  /**
+   * The words between the questions — what makes this a conversation rather
+   * than a form. See `conversation.ts`.
+   *
+   * Optional, and a language without it simply asks its questions bare, which
+   * is what every language did before this existed.
+   */
+  readonly conversation?: ConversationPhrases;
+}
+
+const ENGLISH_CONVERSATION: ConversationPhrases = Object.freeze({
+  acknowledgements: Object.freeze({
+    // Three of each, rotated by turn index. Two would alternate visibly; four
+    // is more wording than anybody has to review for no more variety.
+    recorded: Object.freeze(['Alright.', 'Thank you.', 'I have that.']),
+    // Never "Good." A "no" to "are you taking any medicines" is not good news
+    // and not bad news, and the interview has no business grading it.
+    none: Object.freeze(['Alright.', 'Noted.', 'Thank you.']),
+    unknown: Object.freeze(["That's alright.", 'No problem.', 'That is fine.']),
+    declined: Object.freeze(['Of course.', 'That is fine.', 'Understood.']),
+  }),
+  sections: Object.freeze({
+    hpi: 'Now a little more detail.',
+    ros: 'Now a few quick questions about the rest of your body.',
+    past_medical: 'Now about your health in the past.',
+    surgical: 'Next, about any operations you have had.',
+    medications: 'Now about any medicines you take.',
+    allergies: 'Next, about allergies.',
+    family: 'Now about your family.',
+    social: 'A few questions about your daily life.',
+    ayush: 'Now a few questions in the Ayurvedic tradition.',
+    investigations: 'Lastly, about any tests you have had.',
+  }),
+});
+
+const TAMIL_CONVERSATION: ConversationPhrases = Object.freeze({
+  acknowledgements: Object.freeze({
+    recorded: Object.freeze(['சரி.', 'நன்றி.', 'குறித்துக் கொண்டேன்.']),
+    none: Object.freeze(['சரி.', 'குறித்துக் கொண்டேன்.', 'நன்றி.']),
+    unknown: Object.freeze([
+      'பரவாயில்லை.',
+      'சரி, பரவாயில்லை.',
+      'கவலை வேண்டாம்.',
+    ]),
+    declined: Object.freeze(['சரி.', 'பரவாயில்லை.', 'புரிகிறது.']),
+  }),
+  sections: Object.freeze({
+    hpi: 'அதைப் பற்றி இன்னும் கொஞ்சம் கேட்கிறேன்.',
+    ros: 'இப்போது உடலின் மற்ற பகுதிகளைப் பற்றி சில கேள்விகள்.',
+    past_medical: 'இப்போது உங்கள் கடந்தகால உடல்நிலை பற்றி.',
+    surgical: 'அடுத்து, நீங்கள் செய்த அறுவை சிகிச்சைகள் பற்றி.',
+    medications: 'இப்போது நீங்கள் எடுக்கும் மருந்துகள் பற்றி.',
+    allergies: 'அடுத்து, ஒவ்வாமை பற்றி.',
+    family: 'இப்போது உங்கள் குடும்பம் பற்றி.',
+    social: 'உங்கள் அன்றாட வாழ்க்கை பற்றி சில கேள்விகள்.',
+    ayush: 'இப்போது ஆயுர்வேத முறையில் சில கேள்விகள்.',
+    investigations: 'கடைசியாக, நீங்கள் செய்த பரிசோதனைகள் பற்றி.',
+  }),
+});
+
+const HINDI_CONVERSATION: ConversationPhrases = Object.freeze({
+  acknowledgements: Object.freeze({
+    recorded: Object.freeze(['ठीक है।', 'धन्यवाद।', 'मैंने लिख लिया।']),
+    none: Object.freeze(['ठीक है।', 'नोट कर लिया।', 'धन्यवाद।']),
+    unknown: Object.freeze([
+      'कोई बात नहीं।',
+      'ठीक है, कोई बात नहीं।',
+      'चिंता मत कीजिए।',
+    ]),
+    declined: Object.freeze(['ज़रूर।', 'कोई बात नहीं।', 'समझ गया।']),
+  }),
+  sections: Object.freeze({
+    hpi: 'इसके बारे में थोड़ा और पूछता हूँ।',
+    ros: 'अब शरीर के बाक़ी हिस्सों के बारे में कुछ छोटे सवाल।',
+    past_medical: 'अब आपकी पुरानी सेहत के बारे में।',
+    surgical: 'आगे, आपके किसी ऑपरेशन के बारे में।',
+    medications: 'अब आपकी दवाइयों के बारे में।',
+    allergies: 'आगे, एलर्जी के बारे में।',
+    family: 'अब आपके परिवार के बारे में।',
+    social: 'आपकी रोज़मर्रा की ज़िंदगी के बारे में कुछ सवाल।',
+    ayush: 'अब आयुर्वेद की दृष्टि से कुछ सवाल।',
+    investigations: 'आख़िर में, आपकी जाँचों के बारे में।',
+  }),
+});
+
+/**
+ * The conversational wording for a language, or undefined for one with none.
+ *
+ * English is answered directly rather than through `phrasebookFor`, because
+ * English is not a translation — it is the source, and `phrasebookFor` returns
+ * undefined for it by design. Every other language goes through the gate, so an
+ * unreviewed book's acknowledgements are as unspoken as its questions.
+ */
+export function conversationFor(
+  language?: string,
+): ConversationPhrases | undefined {
+  const code = normaliseLanguage(language);
+  if (code === '' || code === 'en') return ENGLISH_CONVERSATION;
+  return phrasebookFor(code)?.conversation;
 }
 
 /**
@@ -352,6 +452,38 @@ export function phrasingFor(field: FieldDefinition, language?: string): string {
  * and hears* is one language, what they *speak* is another, and the two are
  * routed separately in `loadState`.
  */
+/**
+ * The language this interview will actually be conducted in.
+ *
+ * ── The decision this encodes
+ *
+ * A patient picks the language they speak. What they *read and hear* used to be
+ * English on every session without exception — `DEFAULT_OUTPUT_LANGUAGE` — and
+ * the reason was written down beside that constant and was a good one: ten of
+ * the eleven Indian languages had no phrasebook, and answering in a language
+ * whose questions nobody had written would have meant answering in English
+ * anyway, or worse, in a live machine translation.
+ *
+ * That is no longer true of every language. Where a usable phrasebook exists,
+ * the interview is conducted in the patient's own language — questions, spoken
+ * prompts, aside replies, all of it — and where one does not, it is conducted
+ * in English exactly as before.
+ *
+ * ── Why `phrasebookFor` is the authority
+ *
+ * Because it is the function that actually renders the questions, and it
+ * applies the review gate: an unreviewed book is invisible to it unless the
+ * deployment has set `MEDIHIVE_ALLOW_UNREVIEWED_PHRASEBOOKS`. Deciding the
+ * output language from `PHRASEBOOKS` directly would set a session to Tamil and
+ * then render it in English, and the session row would be the half of that pair
+ * that lied. Here the two cannot disagree: if the book will not be spoken, the
+ * session is not put into it.
+ */
+export function interviewLanguageFor(inputLanguage?: string): string {
+  const code = normaliseLanguage(inputLanguage);
+  return phrasebookFor(code) ? code : 'en';
+}
+
 export function asideReplyFor(intent: AsideIntent, language?: string): string {
   const book = phrasebookFor(language);
   const translated = book?.asides[intent]?.trim();
@@ -603,18 +735,326 @@ function taPhrasebook(): QuestionPhrasebook {
     source: 'human_draft' as const,
     reviewedAt: null,
     questions: Object.freeze({
+      'chief_complaint.symptom': 'இன்று உங்களை மிகவும் சிரமப்படுத்துவது என்ன?',
       'hpi.duration': 'இந்தப் பிரச்சினை உங்களுக்கு எவ்வளவு காலமாக இருக்கிறது?',
-      'hpi.severity': 'வலி எவ்வளவு கடுமையாக இருக்கிறது?',
-      'chief_complaint.symptom': 'உங்களுக்கு என்ன பிரச்சினை என்று சொல்லுங்கள்.',
-      'allergies.reported': 'உங்களுக்கு ஏதேனும் மருந்து ஒவ்வாமை உள்ளதா?',
+      'hpi.onset':
+        'இது திடீரென ஒரே நேரத்தில் ஆரம்பித்ததா, அல்லது கொஞ்சம் கொஞ்சமாக அதிகரித்ததா?',
+      'hpi.location':
+        'இது சரியாக எங்கே இருக்கிறது? கையால் காட்டலாம், அல்லது சொல்லலாம்.',
+      'hpi.character':
+        'இந்த உணர்வு எப்படி இருக்கிறது — எரிச்சலா, அழுத்தமா, கூர்மையா, மந்தமா, பிடிப்பா, அல்லது துடிப்பா?',
+      'hpi.severity':
+        'ஒன்றுமே இல்லை என்பதில் இருந்து நீங்கள் நினைக்கக்கூடிய மிக மோசமான நிலை வரை, இப்போது இது எந்த அளவில் இருக்கிறது? பூஜ்ஜியம் முதல் பத்து வரை.',
+      'hpi.timing':
+        'இது எப்போதும் இருக்கிறதா, அல்லது வந்து போகிறதா? நாளின் ஏதேனும் ஒரு நேரத்தில் அதிகமாக இருக்கிறதா?',
+      'hpi.frequency':
+        'இது எத்தனை முறை வருகிறது — ஒரு நாளைக்கு அல்லது ஒரு வாரத்திற்கு எத்தனை முறை?',
+      'hpi.progression':
+        'ஆரம்பித்ததில் இருந்து இது அதிகமாகிறதா, குறைகிறதா, அல்லது அப்படியே இருக்கிறதா?',
+      'hpi.radiation':
+        'இந்த உணர்வு ஒரே இடத்தில் இருக்கிறதா, அல்லது எங்காவது பரவுகிறதா — கை, தாடை, முதுகு அல்லது தோள்பட்டைக்கு?',
+      'hpi.aggravating_factors': 'இதை அதிகமாக்கும் ஏதாவது இருக்கிறதா?',
+      'hpi.relieving_factors':
+        'இதைக் குறைக்கும் ஏதாவது இருக்கிறதா — ஓய்வு, மாத்திரை, அல்லது ஒரு நிலை?',
+      'hpi.previous_episodes':
+        'இதே பிரச்சினை உங்களுக்கு முன்பு வந்திருக்கிறதா?',
+      'hpi.associated.breathlessness':
+        'இதனுடன் சேர்ந்து மூச்சு விட சிரமமாக இருக்கிறதா?',
+      'hpi.associated.sweating':
+        'உழைப்பு இல்லாமலேயே இதனுடன் அதிகமாக வியர்க்கிறதா?',
+      'hpi.associated.nausea': 'இதனுடன் சேர்ந்து குமட்டல் இருக்கிறதா?',
+      'hpi.associated.palpitations':
+        'இதனுடன் உங்கள் இதயம் வேகமாக அடிப்பது போல் தோன்றுகிறதா?',
+      'hpi.associated.fainting':
+        'நீங்கள் மயங்கி விழுந்தீர்களா, அல்லது விழுவது போல் உணர்ந்தீர்களா?',
+      'hpi.associated.fever': 'இதனுடன் சேர்ந்து காய்ச்சல் இருந்ததா?',
+      'ros.constitutional.fever': 'சமீபத்தில் உங்களுக்கு காய்ச்சல் இருந்ததா?',
+      'ros.constitutional.rigors':
+        'நிறுத்த முடியாத அளவுக்கு நடுக்கத்துடன் கூடிய குளிர் இருந்ததா?',
+      'ros.constitutional.weight_loss':
+        'முயற்சி எதுவும் இல்லாமல் உங்கள் எடை குறைந்திருக்கிறதா?',
+      'ros.constitutional.appetite_loss': 'உங்கள் பசி குறைந்திருக்கிறதா?',
+      'ros.constitutional.fatigue':
+        'வழக்கத்திற்கு மாறாக சோர்வாக இருக்கிறீர்களா?',
+      'ros.cardiovascular.chest_pain':
+        'உங்கள் நெஞ்சில் வலி அல்லது இறுக்கம் இருக்கிறதா?',
+      'ros.cardiovascular.breathlessness_on_exertion':
+        'முன்பு எளிதாகச் செய்த வேலைகளைச் செய்யும்போது இப்போது மூச்சு வாங்குகிறதா?',
+      'ros.cardiovascular.breathless_lying_flat':
+        'நேராகப் படுக்கும்போது மூச்சு வாங்குகிறதா, அல்லது தூங்க கூடுதல் தலையணை தேவைப்படுகிறதா?',
+      'ros.cardiovascular.ankle_swelling':
+        'உங்கள் கால்கள் அல்லது கணுக்கால்கள் வீங்கியிருக்கிறதா?',
+      'ros.respiratory.breathless_at_rest':
+        'சும்மா உட்கார்ந்திருக்கும்போதே மூச்சு வாங்குகிறதா?',
+      'ros.respiratory.cannot_complete_sentences':
+        'ஒரு வாக்கியத்தை முடிக்கும் முன்பே மூச்சுக்காக நிற்க வேண்டியிருக்கிறதா?',
+      'ros.respiratory.fast_breathing':
+        'உங்கள் மூச்சு வழக்கத்தை விட வேகமாக இருக்கிறதா?',
+      'ros.respiratory.cough': 'உங்களுக்கு இருமல் இருக்கிறதா?',
+      'ros.respiratory.blood_in_sputum': 'இருமும்போது ரத்தம் ஏதேனும் வந்ததா?',
+      'ros.respiratory.wheeze':
+        'மூச்சு விடும்போது நெஞ்சில் விசில் போன்ற சத்தம் வருகிறதா?',
+      'ros.gastrointestinal.abdominal_pain':
+        'உங்கள் வயிற்றில் ஏதேனும் வலி இருக்கிறதா?',
+      'ros.gastrointestinal.vomiting_blood':
+        'வாந்தியில் ரத்தம் வந்ததா, அல்லது காபித் தூள் போன்ற ஏதாவது வந்ததா?',
+      'ros.gastrointestinal.black_stools':
+        'உங்கள் மலம் தார் போல கருப்பாகவும் ஒட்டும் தன்மையுடனும் இருந்ததா?',
+      'ros.gastrointestinal.blood_in_stool':
+        'மலம் கழிக்கும்போது புதிய ரத்தம் தெரிந்ததா?',
+      'ros.gastrointestinal.vomiting': 'உங்களுக்கு வாந்தி இருக்கிறதா?',
+      'ros.gastrointestinal.diarrhoea': 'உங்களுக்கு பேதி இருக்கிறதா?',
+      'ros.gastrointestinal.constipation': 'உங்களுக்கு மலச்சிக்கல் இருக்கிறதா?',
+      'ros.gastrointestinal.jaundice':
+        'உங்கள் கண்கள் அல்லது தோல் மஞ்சளாகத் தெரிந்ததா?',
+      'ros.gastrointestinal.difficulty_swallowing':
+        'உணவு அல்லது தண்ணீர் விழுங்குவது கடினமாக இருக்கிறதா?',
+      'ros.neurological.sudden_worst_headache':
+        'திடீரென ஆரம்பித்து, இதுவரை இல்லாத அளவுக்கு மோசமான தலைவலி வந்ததா?',
+      'ros.neurological.face_droop':
+        'உங்கள் முகத்தின் ஒரு பக்கம் தொங்கியதா, அல்லது சிரிப்பு சமமாக இல்லாமல் இருக்கிறதா?',
+      'ros.neurological.arm_weakness':
+        'ஒரு கை அல்லது ஒரு கால் திடீரென பலவீனமாகவோ கனமாகவோ ஆனதா?',
+      'ros.neurological.speech_difficulty':
+        'உங்கள் பேச்சு குழறுகிறதா, அல்லது வார்த்தைகள் வர சிரமமாக இருக்கிறதா?',
+      'ros.neurological.sudden_vision_loss':
+        'திடீரென பார்வை போனதா, அல்லது இரட்டையாகத் தெரிந்ததா?',
+      'ros.neurological.seizure': 'உங்களுக்கு வலிப்பு ஏதேனும் வந்ததா?',
+      'ros.neurological.confusion':
+        'நீங்கள் குழப்பமாகவோ வழக்கத்திற்கு மாறாக தூக்கமாகவோ இருந்தீர்களா, அல்லது மற்றவர்கள் அப்படிச் சொன்னார்களா?',
+      'ros.neurological.headache': 'உங்களுக்கு தலைவலி வருகிறதா?',
+      'ros.neurological.numbness':
+        'உங்களுக்கு எங்காவது மரத்துப்போதல் அல்லது ஊசி குத்துவது போன்ற உணர்வு வருகிறதா?',
+      'ros.genitourinary.burning_urination':
+        'சிறுநீர் கழிக்கும்போது எரிச்சல் இருக்கிறதா?',
+      'ros.genitourinary.blood_in_urine': 'சிறுநீரில் ரத்தம் தெரிந்ததா?',
+      'ros.genitourinary.reduced_urine_output':
+        'வழக்கத்தை விட மிகக் குறைவாக சிறுநீர் கழிக்கிறீர்களா?',
+      'ros.genitourinary.pregnancy_possible':
+        'நீங்கள் கர்ப்பமாக இருக்க ஏதேனும் வாய்ப்பு உள்ளதா?',
+      'ros.genitourinary.vaginal_bleeding':
+        'பெண் உறுப்பில் இருந்து ரத்தப்போக்கு ஏதேனும் இருந்ததா?',
+      'ros.musculoskeletal.joint_pain':
+        'உங்கள் மூட்டுகளில் ஏதேனும் வலி இருக்கிறதா?',
+      'ros.musculoskeletal.joint_swelling':
+        'ஏதேனும் மூட்டு வீங்கியோ சூடாகவோ இருக்கிறதா?',
+      'ros.musculoskeletal.back_pain': 'உங்களுக்கு முதுகு வலி இருக்கிறதா?',
+      'ros.musculoskeletal.recent_injury':
+        'சமீபத்தில் நீங்கள் விழுந்தீர்களா, அல்லது ஏதேனும் காயம் ஏற்பட்டதா?',
+      'ros.dermatological.rash': 'உங்கள் தோலில் ஏதேனும் தடிப்பு இருக்கிறதா?',
+      'ros.dermatological.sudden_widespread_rash':
+        'உடலின் பெரும் பகுதியில் திடீரென தடிப்பு வந்ததா?',
+      'ros.dermatological.itching': 'உங்கள் தோலில் அரிப்பு இருக்கிறதா?',
+      'ros.psychiatric.low_mood':
+        'சமீபத்தில் மனச்சோர்வாகவோ நம்பிக்கை இழந்தவராகவோ உணர்கிறீர்களா?',
+      'ros.psychiatric.self_harm_thoughts':
+        'உங்களை நீங்களே காயப்படுத்திக் கொள்ளவோ, உயிரை மாய்த்துக் கொள்ளவோ ஏதேனும் எண்ணம் வந்ததா?',
+      'ros.allergic.reaction_happening_now':
+        'இப்போது ஒவ்வாமை எதிர்வினை நடந்து கொண்டிருக்கிறதா?',
+      'ros.allergic.throat_or_lip_swelling':
+        'உங்கள் உதடு, நாக்கு அல்லது தொண்டை வீங்குகிறதா, அல்லது தொண்டை இறுகுவது போல் இருக்கிறதா?',
+      'ros.paediatric.not_feeding':
+        'குழந்தை பால் குடிக்கவோ சாப்பிடவோ மறுக்கிறதா?',
+      'ros.paediatric.unrousable':
+        'குழந்தை வழக்கத்திற்கு மாறாக தூங்குகிறதா, அல்லது எழுப்ப கடினமாக இருக்கிறதா?',
+      'ros.paediatric.convulsions': 'குழந்தைக்கு வலிப்பு ஏதேனும் வந்ததா?',
+      'ros.paediatric.fast_breathing':
+        'குழந்தை வழக்கத்தை விட வேகமாக மூச்சு விடுகிறதா, அல்லது விலா எலும்புகள் உள்ளே இழுக்கின்றனவா?',
+      'ros.paediatric.sunken_eyes':
+        'குழந்தையின் கண்கள் உள்வாங்கியிருக்கின்றனவா, அல்லது பல மணி நேரமாக சிறுநீர் கழிக்கவில்லையா?',
+      'past_medical.diabetes':
+        'உங்களுக்கு சர்க்கரை நோய் இருப்பதாக எப்போதாவது சொல்லப்பட்டதா?',
+      'past_medical.hypertension':
+        'உங்களுக்கு ரத்த அழுத்தம் இருப்பதாக எப்போதாவது சொல்லப்பட்டதா?',
+      'past_medical.heart_disease':
+        'இதயப் பிரச்சினைக்கு எப்போதாவது சிகிச்சை எடுத்திருக்கிறீர்களா?',
+      'past_medical.asthma':
+        'உங்களுக்கு ஆஸ்துமா அல்லது நீண்டகால சுவாசப் பிரச்சினை இருக்கிறதா?',
+      'past_medical.kidney_disease':
+        'உங்களுக்கு சிறுநீரகப் பிரச்சினை இருப்பதாகச் சொல்லப்பட்டதா?',
+      'past_medical.liver_disease':
+        'உங்களுக்கு கல்லீரல் பிரச்சினை இருப்பதாகச் சொல்லப்பட்டதா?',
+      'past_medical.stroke_or_tia':
+        'உங்களுக்கு எப்போதாவது பக்கவாதம் அல்லது சிறு பக்கவாதம் ஏற்பட்டதா?',
+      'past_medical.cancer':
+        'புற்றுநோய்க்கு எப்போதாவது சிகிச்சை எடுத்திருக்கிறீர்களா?',
+      'past_medical.tuberculosis':
+        'காசநோய்க்கு எப்போதாவது சிகிச்சை எடுத்திருக்கிறீர்களா?',
+      'past_medical.thyroid_disorder':
+        'உங்களுக்கு தைராய்டு பிரச்சினை இருப்பதாகச் சொல்லப்பட்டதா?',
+      'past_medical.epilepsy':
+        'வலிப்பு நோய்க்கு எப்போதாவது சிகிச்சை எடுத்திருக்கிறீர்களா?',
+      'past_medical.bleeding_disorder':
+        'மற்றவர்களை விட உங்களுக்கு எளிதாக ரத்தம் வருகிறதா, அல்லது தழும்பு ஏற்படுகிறதா?',
+      'past_medical.previous_hospitalisation':
+        'முன்பு எப்போதாவது மருத்துவமனையில் அனுமதிக்கப்பட்டிருக்கிறீர்களா?',
+      'past_medical.other_conditions':
+        'நாங்கள் கேட்காத வேறு ஏதேனும் நீண்டகால நோய் இருக்கிறதா?',
+      'surgical.any_previous':
+        'முன்பு எப்போதாவது அறுவை சிகிச்சை ஏதேனும் செய்யப்பட்டிருக்கிறதா?',
+      'medications.any_current':
+        'நீங்கள் இப்போது ஏதேனும் மருந்து எடுத்துக் கொள்கிறீர்களா — நீங்களே கடையில் வாங்கிக் கொள்பவை உட்பட?',
+      'allergies.reported':
+        'உங்களுக்கு ஏதேனும் ஒவ்வாமை உள்ளதா — மருந்து, உணவு, அல்லது வேறு எதுவும்?',
+      'family.any_relevant':
+        'உங்கள் நெருங்கிய குடும்பத்தில் யாருக்காவது நீண்டகால நோய் இருக்கிறதா — சர்க்கரை, ரத்த அழுத்தம், இதயப் பிரச்சினை அல்லது புற்றுநோய் போன்றவை?',
+      'social.smoking':
+        'நீங்கள் புகைபிடிக்கிறீர்களா, அல்லது முன்பு புகைபிடித்திருக்கிறீர்களா?',
+      'social.tobacco_chewing':
+        'நீங்கள் புகையிலை, வெற்றிலை பாக்கு அல்லது குட்கா மெல்கிறீர்களா?',
+      'social.alcohol':
+        'நீங்கள் மது அருந்துகிறீர்களா? அப்படியானால், சுமாராக எவ்வளவு அடிக்கடி?',
+      'social.occupation': 'நீங்கள் என்ன வேலை செய்கிறீர்கள்?',
+      'social.diet':
+        'உங்கள் வழக்கமான உணவு என்ன — சைவமா, அசைவம் கலந்ததா, அல்லது வேறு ஏதாவதா?',
+      'social.exercise':
+        'ஒரு சாதாரண வாரத்தில் எவ்வளவு உடற்பயிற்சி செய்கிறீர்கள்?',
+      'social.sleep': 'உங்கள் தூக்கம் எப்படி இருக்கிறது?',
+      'social.exposure':
+        'வேலையிலோ வீட்டிலோ நீங்கள் வழக்கமாக எதிர்கொள்ளும் ஏதாவது இருக்கிறதா — தூசி, ரசாயனங்கள், புகை, விலங்குகள்?',
+      'ayush.prakriti_build':
+        'உங்கள் வழக்கமான உடல் அமைப்பை எப்படிச் சொல்வீர்கள் — மெலிந்ததா, நடுத்தரமா, அல்லது கனமானதா?',
+      'ayush.prakriti_climate_preference':
+        'குளிரான காலநிலையா அல்லது வெப்பமான காலநிலையா — எதில் உங்களுக்கு வசதியாக இருக்கும்?',
+      'ayush.agni_appetite':
+        'உங்கள் பசி வழக்கமாக எப்படி இருக்கும் — நல்லதா, சாதாரணமா, நாளுக்கு நாள் மாறுமா, அல்லது குறைவாகவா?',
+      'ayush.agni_digestion':
+        'சாப்பிட்ட பிறகு வழக்கமாக வசதியாக இருக்கிறதா, கனமாக இருக்கிறதா, அல்லது எரிச்சலாக இருக்கிறதா?',
+      'ayush.koshtha_bowel':
+        'உங்கள் மலம் கழித்தல் வழக்கமாக எப்படி இருக்கும் — தினமும் சீராகவா, கெட்டியாகவா, அல்லது தளர்வாகவா?',
+      'ayush.nidana_triggers':
+        'இந்தப் பிரச்சினையை வழக்கமாக வரவழைக்கும் ஏதாவது கவனித்திருக்கிறீர்களா — ஒரு குறிப்பிட்ட உணவு, வேலை, பருவம், அல்லது நேரம்?',
+      'ayush.ahara_vihara_routine':
+        'உங்கள் ஒரு சாதாரண நாளைப் பற்றிச் சொல்லுங்கள் — எப்போது சாப்பிடுவீர்கள், எப்போது வேலை செய்வீர்கள், எப்போது தூங்குவீர்கள்.',
+      'investigations.any_previous':
+        'இதற்காக ஏதேனும் பரிசோதனை அல்லது ஸ்கேன் செய்திருக்கிறீர்களா, அல்லது உங்களிடம் அறிக்கைகள் இருக்கிறதா?',
+      'medications[].name': 'அது எந்த மருந்து?',
+      'medications[].strength': 'அதன் அளவு எவ்வளவு — உதாரணமாக 500 மி.கி?',
+      'medications[].dose': 'ஒவ்வொரு முறையும் எத்தனை எடுத்துக் கொள்கிறீர்கள்?',
+      'medications[].frequency':
+        'ஒரு நாளைக்கு எத்தனை முறை எடுத்துக் கொள்கிறீர்கள்?',
+      'medications[].route':
+        'இதை எப்படி எடுத்துக் கொள்கிறீர்கள் — வாய்வழியாகவா, தடவுவதற்கா, உள்ளிழுப்பதற்கா, அல்லது ஊசியாகவா?',
+      'medications[].timing': 'நாளின் எந்த நேரத்தில் எடுத்துக் கொள்கிறீர்கள்?',
+      'medications[].duration': 'எவ்வளவு காலமாக இதை எடுத்துக் கொள்கிறீர்கள்?',
+      'medications[].status':
+        'இதை இப்போதும் எடுத்துக் கொள்கிறீர்களா, அல்லது நிறுத்திவிட்டீர்களா?',
+      'allergies[].substance': 'எதனால் உங்களுக்கு ஒவ்வாமை?',
+      'allergies[].type':
+        'இது எந்த வகை — மருந்தா, உணவா, அல்லது சுற்றுச்சூழல் சார்ந்ததா?',
+      'allergies[].reaction': 'அப்போது உங்களுக்கு என்ன ஆனது?',
+      'allergies[].severity': 'அந்த எதிர்வினை எவ்வளவு கடுமையாக இருந்தது?',
+      'surgical[].procedure': 'என்ன அறுவை சிகிச்சை செய்யப்பட்டது?',
+      'surgical[].reason': 'அது எதற்காகச் செய்யப்பட்டது?',
+      'surgical[].approximate_date': 'அது சுமாராக எப்போது நடந்தது?',
+      'surgical[].hospital': 'எந்த மருத்துவமனையில் செய்யப்பட்டது?',
+      'surgical[].complications': 'அதற்குப் பிறகு ஏதேனும் பிரச்சினை ஏற்பட்டதா?',
+      'family[].condition': 'அவர்களுக்கு என்ன நோய்?',
+      'family[].relation': 'அவர் உங்களுக்கு என்ன உறவு?',
+      'investigations[].name': 'என்ன பரிசோதனை செய்யப்பட்டது?',
+      'investigations[].value': 'அதன் முடிவு என்ன?',
+      'investigations[].date': 'அந்தப் பரிசோதனை சுமாராக எப்போது செய்யப்பட்டது?',
     }),
     answerHints: Object.freeze({
       boolean: 'ஆம் அல்லது இல்லை என்று பதிலளிக்கலாம்.',
+      choice: 'நீங்கள் சொல்லலாம்: {choices}.',
       scale: '0 முதல் 10 வரை ஒரு எண்ணைச் சொல்லுங்கள்.',
+      number: 'ஒரு எண்ணைச் சொல்லுங்கள்.',
       duration: 'உதாரணமாக: மூன்று நாட்கள், அல்லது இரண்டு வாரங்கள்.',
+      text: '',
     }),
-    choiceLabels: Object.freeze({}),
-    asides: Object.freeze({}),
+    choiceLabels: Object.freeze({
+      sudden: 'திடீரென',
+      gradual: 'கொஞ்சம் கொஞ்சமாக',
+      woke_up_with_it: 'தூங்கி எழுந்தபோது இருந்தது',
+      burning: 'எரிச்சல்',
+      pressing: 'அழுத்தம்',
+      sharp: 'கூர்மையான',
+      dull: 'மந்தமான',
+      cramping: 'பிடிப்பு',
+      throbbing: 'துடிப்பு',
+      constant: 'எப்போதும்',
+      comes_and_goes: 'வந்து போகிறது',
+      worse_at_night: 'இரவில் அதிகம்',
+      worse_in_morning: 'காலையில் அதிகம்',
+      worse_after_food: 'சாப்பிட்ட பிறகு அதிகம்',
+      getting_worse: 'அதிகமாகிறது',
+      getting_better: 'குறைகிறது',
+      staying_same: 'அப்படியே இருக்கிறது',
+      infant: 'கைக்குழந்தை',
+      child: 'சிறுவர்',
+      adolescent: 'பதின்ம வயது',
+      adult: 'பெரியவர்',
+      older_adult: 'முதியவர்',
+      never: 'ஒருபோதும் இல்லை',
+      former: 'முன்பு',
+      current: 'இப்போது',
+      occasional: 'எப்போதாவது',
+      weekly: 'வாரம் ஒருமுறை',
+      daily: 'தினமும்',
+      vegetarian: 'சைவம்',
+      mixed: 'கலப்பு',
+      vegan: 'முழு சைவம்',
+      none: 'எதுவும் இல்லை',
+      light: 'குறைவு',
+      moderate: 'மிதமான',
+      heavy: 'அதிகம்',
+      well: 'நன்றாக',
+      disturbed: 'இடையூறாக',
+      poor: 'சரியில்லை',
+      thin: 'மெலிந்த',
+      medium: 'நடுத்தரம்',
+      prefers_cool: 'குளிர்ச்சி',
+      prefers_warm: 'வெப்பம்',
+      no_preference: 'வித்தியாசம் இல்லை',
+      strong: 'நல்ல',
+      normal: 'சாதாரணம்',
+      variable: 'மாறுபடும்',
+      comfortable: 'வசதியாக',
+      heaviness: 'கனமாக',
+      bloating: 'வாயு',
+      regular: 'சீராக',
+      tends_hard: 'கெட்டியாக',
+      tends_loose: 'தளர்வாக',
+      oral: 'வாய்வழி',
+      topical: 'தடவுவது',
+      inhaled: 'உள்ளிழுப்பது',
+      injection: 'ஊசி',
+      stopped: 'நிறுத்திவிட்டேன்',
+      drug: 'மருந்து',
+      food: 'உணவு',
+      environmental: 'சுற்றுச்சூழல்',
+      mild: 'லேசான',
+      severe: 'கடுமையான',
+      other: 'வேறு',
+    }),
+    asides: Object.freeze({
+      repeat: 'கண்டிப்பாக.',
+      not_understood: 'பரவாயில்லை. மீண்டும் ஒருமுறை கேட்கிறேன்.',
+      why_ask:
+        'உங்களைப் பார்ப்பதற்கு முன் மருத்துவருக்கு முழுமையான படம் கிடைக்க ' +
+        'இது உதவும். சொல்ல விரும்பாத எதையும் விட்டுவிடலாம்.',
+      how_long:
+        'இன்னும் சில கேள்விகள் மட்டுமே. நீங்கள் எப்போது வேண்டுமானாலும் ' +
+        'நிறுத்தலாம்.',
+      is_it_serious:
+        'அதை என்னால் சொல்ல முடியாது. நீங்கள் சொல்வதை நான் எழுதி வைக்கிறேன், ' +
+        'மருத்துவர் உங்களுடன் பேசுவார். காத்திருக்கும்போது இன்னும் மோசமாக ' +
+        'உணர்ந்தால், உடனே வரவேற்பு மேசையில் சொல்லுங்கள்.',
+      want_human:
+        'கண்டிப்பாக. வரவேற்பு மேசையில் சொன்னால் ஒருவர் உங்களிடம் வருவார். ' +
+        'அதுவரை நாம் இங்கே தொடரலாம்.',
+      who_are_you:
+        'நான் ஒரு நபர் அல்ல. மருத்துவர் உங்களைப் பார்ப்பதற்கு முன் உங்கள் ' +
+        'பதில்களை எழுதி வைக்கிறேன்.',
+      greeting: 'வணக்கம்.',
+      thanks: 'பரவாயில்லை.',
+      wait: 'நிதானமாகச் சொல்லுங்கள்.',
+      unrelated:
+        'புரிகிறது. மருத்துவருக்காக உங்கள் பதில்களை எழுதுவது மட்டுமே என் ' +
+        'வேலை. மற்ற எதற்கும் வரவேற்பு மேசை உதவும்.',
+    }),
+    conversation: TAMIL_CONVERSATION,
     listConjunction: 'அல்லது',
   });
 }
@@ -693,7 +1133,7 @@ function hiPhrasebook(): QuestionPhrasebook {
       'hpi.character':
         'यह एहसास कैसा है — जलन, दबाव, तेज़ चुभन, हल्का-सा दर्द, मरोड़ या टीस?',
       'hpi.severity':
-        'बिल्कुल कुछ नहीं से लेकर सबसे बुरे दर्द तक जो आप सोच सकते हैं, अभी आप इसे कहाँ रखेंगे? शून्य से दस तक।',
+        'बिल्कुल कुछ नहीं से लेकर सबसे बुरी हालत तक जो आप सोच सकते हैं, अभी आप इसे कहाँ रखेंगे? शून्य से दस तक।',
       'hpi.timing':
         'क्या यह हर समय रहता है, या आता-जाता रहता है? क्या दिन के किसी समय यह ज़्यादा बढ़ जाता है?',
       'hpi.frequency':
@@ -1040,11 +1480,31 @@ function hiPhrasebook(): QuestionPhrasebook {
          allergies[].type — all four mean the same thing here */
       other: 'कुछ और',
     }),
-    // Not drafted yet. Empty rather than machine-translated on the spot: an
-    // aside reply is the one place this interview speaks for itself, and
-    // `is_it_serious` in particular is a sentence a clinician must read before
-    // a patient hears it. English until then — see `asideReplyFor`.
-    asides: Object.freeze({}),
+    asides: Object.freeze({
+      repeat: 'ज़रूर।',
+      not_understood: 'कोई बात नहीं। मैं फिर से पूछता हूँ।',
+      why_ask:
+        'इससे डॉक्टर को आपको देखने से पहले पूरी तस्वीर मिल जाती है। जो आप ' +
+        'नहीं बताना चाहते, उसे छोड़ सकते हैं।',
+      how_long: 'बस कुछ ही सवाल बाक़ी हैं। आप जब चाहें रोक सकते हैं।',
+      is_it_serious:
+        'यह मैं आपको नहीं बता सकता। मैं सिर्फ़ आपकी बात लिख रहा हूँ, और ' +
+        'डॉक्टर आपके साथ इस पर बात करेंगे। इंतज़ार के दौरान अगर आपको और ' +
+        'ख़राब लगे, तो तुरंत रिसेप्शन पर बताइए।',
+      want_human:
+        'ज़रूर। रिसेप्शन पर बता दीजिए, कोई आपके पास आ जाएगा। तब तक हम यहाँ ' +
+        'जारी रख सकते हैं।',
+      who_are_you:
+        'मैं कोई व्यक्ति नहीं हूँ। मैं आपके जवाब लिखता हूँ ताकि डॉक्टर के ' +
+        'पास वे पहले से हों।',
+      greeting: 'नमस्ते।',
+      thanks: 'कोई बात नहीं।',
+      wait: 'आराम से बताइए।',
+      unrelated:
+        'मैं समझ रहा हूँ। मैं सिर्फ़ डॉक्टर के लिए आपके जवाब लिख सकता हूँ — ' +
+        'बाक़ी किसी भी चीज़ में रिसेप्शन मदद करेगा।',
+    }),
+    conversation: HINDI_CONVERSATION,
     listConjunction: 'या',
   });
 }

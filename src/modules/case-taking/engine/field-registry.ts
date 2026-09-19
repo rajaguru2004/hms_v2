@@ -142,6 +142,43 @@ export type ComplaintCategory = (typeof COMPLAINT_CATEGORIES)[number];
  * layer. They cost nothing and they fail safe: an extra category asks a few
  * extra questions.
  */
+/**
+ * A complaint word in a script `\b` cannot see.
+ *
+ * Tamil and Devanagari are not word characters as far as JavaScript's `\b` is
+ * concerned — it is defined against `[A-Za-z0-9_]` — so `/\bகாய்ச்சல்\b/`
+ * never matches anything. The failure is silent and it is the expensive kind:
+ * the pattern compiles, a test written with a bare string passes, and a real
+ * complaint with a space in front of it classifies as `unclassified`. Which,
+ * measured, cut the applicable field set from 64 to 44 and left ACS_TRIAD
+ * silent for a patient describing cardiac chest pain.
+ *
+ * `(?<!\p{L})…(?!\p{L})` is the same intent without the ASCII assumption.
+ * Every non-Latin pattern below goes through here.
+ */
+function native(source: string): RegExp {
+  return new RegExp(`(?<!\\p{L})(?:${source})(?!\\p{L})`, 'u');
+}
+
+/**
+ * The same, for Tamil, where a closing boundary is the wrong rule.
+ *
+ * Tamil is agglutinative: case, tense and clitics attach directly to the stem
+ * with no space. "சுளுக்கு" (a sprain) is said as "சுளுக்கிக் கொண்டது", and
+ * "காய்ச்சல்" takes "காய்ச்சலா" and "காய்ச்சலோட". A pattern closed with
+ * `(?!\p{L})` matches the dictionary form and misses every sentence a patient
+ * actually says — which is the same silent `unclassified` as the `\b` bug
+ * above, arrived at by a different route.
+ *
+ * So the stem is anchored at its start only, and the suffix is allowed to be
+ * whatever Tamil put there. The risk this trades for is a stem that is a prefix
+ * of an unrelated word; it is managed by keeping every stem below specific —
+ * "நெஞ்சு வலி", not "வலி", which is itself a prefix of "வலிமை" (strength).
+ */
+function stem(source: string): RegExp {
+  return new RegExp(`(?<!\\p{L})(?:${source})`, 'u');
+}
+
 const CATEGORY_PATTERNS: ReadonlyArray<{
   readonly category: ComplaintCategory;
   readonly patterns: readonly RegExp[];
@@ -155,6 +192,14 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bangina\b/i,
       /\bnenju\s*vali/i,
       /\bnenju\s*valikuthu/i,
+      stem('நெஞ்சு\\s*(வலி|வலிக்குது|எரிச்சல்|அடைப்பு|பாரம்|இறுக்கம்)'),
+      stem('மார்(பு|பக)\\s*வலி'),
+      stem('படபடப்பு'),
+      stem('இதய(ம்|த்தில்)'),
+      native('सीने\\s*में\\s*(दर्द|जलन|भारीपन|जकड़न|दबाव)'),
+      native('छाती\\s*में\\s*दर्द'),
+      native('दिल\\s*(की\\s*धड़कन|में\\s*दर्द)'),
+      native('धड़कन\\s*तेज़?'),
     ],
   },
   {
@@ -169,6 +214,15 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bchest\s+(pain|tightness|congestion)/i,
       /\bmoochu/i,
       /\basthma/i,
+      stem('மூச்சு\\s*(விட|வாங்க|திணற|முட்ட)'),
+      stem('மூச்சு\\s*(திணறல்|வாங்குது|முட்டுது|விட\\s*முடியல(ை)?)'),
+      stem('இருமல்'),
+      stem('ஆஸ்துமா|ஆஸ்த்துமா'),
+      native(
+        '(साँस|सांस)\\s*(लेने\\s*में\\s*(तकलीफ़|तकलीफ|दिक्कत)|फूलना|फूल\\s*रही)',
+      ),
+      native('खांसी|खाँसी'),
+      native('दमा'),
     ],
   },
   {
@@ -187,6 +241,20 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bblood\s+in\s+(stool|motion)/i,
       /\bblack\s+stool/i,
       /\bvayiru\s*vali/i,
+      stem('வயி(று|த்து|ற்று)\\s*வலி'),
+      stem('வாந்தி'),
+      stem('குமட்டல்'),
+      stem('பேதி|வயிற்றுப்போக்கு'),
+      stem('மலச்சிக்கல்'),
+      stem('நெஞ்செரிச்சல்|அஜீரண(ம்)?'),
+      stem('மஞ்சள்\\s*காமாலை'),
+      native('पेट\\s*(में\\s*)?(दर्द|मरोड़|जलन)'),
+      native('उल्टी|उलटी'),
+      native('जी\\s*मिचला'),
+      native('दस्त|पतले\\s*दस्त'),
+      native('कब्ज़?'),
+      native('एसिडिटी|अम्लता'),
+      native('पीलिया'),
     ],
   },
   {
@@ -206,6 +274,20 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bslurred\s+speech/i,
       /\bunconscious/i,
       /\bthalai\s*vali/i,
+      stem('தலை\\s*வலி|தலைவலி'),
+      stem('மயக்கம்'),
+      stem('தலை\\s*சுற்ற(ல்|ுது)'),
+      stem('வலிப்பு|கை\\s*கால்\\s*வலிப்பு'),
+      stem('மரத்து\\s*(போ|விட்ட)'),
+      stem('பக்கவாத(ம்)?'),
+      stem('நினைவு\\s*இழ(ந்|ப்)'),
+      native('सिर\\s*(में\\s*)?दर्द|सिरदर्द'),
+      native('चक्कर'),
+      native('बेहोश(ी)?'),
+      native('दौरा|मिर्गी'),
+      native('लकवा|पक्षाघात'),
+      native('सुन्न'),
+      native('बोलने\\s*में\\s*(दिक्कत|तकलीफ़)'),
     ],
   },
   {
@@ -216,6 +298,12 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bkidney\b/i,
       /\bpassing\s+(blood|stone)/i,
       /\bgroin\b/i,
+      stem('சிறுநீர்'),
+      stem('சிறுநீரக(ம்)?'),
+      stem('பெண்குறி|ஆண்குறி'),
+      native('पेशाब'),
+      native('मूत्र'),
+      native('गुर्द(ा|े)|किडनी'),
     ],
   },
   {
@@ -227,6 +315,14 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\blabou?r\s+pain/i,
       /\bperiods?\s+(are\s+)?(missed|late|stopped)/i,
       /\bmissed\s+period/i,
+      stem('கர்ப்ப(ம்|மா|மாக)'),
+      stem('கருச்சிதைவு'),
+      stem('மாதவிடாய்'),
+      stem('பிரசவ\\s*வலி'),
+      native('गर्भवती|गर्भ\\s*से|प्रेग्नेंट'),
+      native('गर्भपात'),
+      native('माहवारी|पीरियड|मासिक'),
+      native('प्रसव\\s*(पीड़ा|दर्द)'),
     ],
   },
   {
@@ -236,6 +332,16 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bsprain/i,
       /\bfracture/i,
       /\bbody\s+pain/i,
+      stem(
+        '(மூட்டு|முதுகு|கழுத்து|முழங்கால்|தோள்|இடுப்பு|கணுக்கால்|மணிக்கட்டு)\\s*வலி',
+      ),
+      stem('உடல்\\s*வலி|உடம்பு\\s*வலி'),
+      stem('சுளுக்க(ு|ி)'),
+      stem('எலும்பு\\s*முறிவு'),
+      native('(जोड़ों|कमर|पीठ|गर्दन|घुटने|कंधे|कूल्हे|टखने)\\s*(में\\s*)?दर्द'),
+      native('बदन\\s*दर्द|शरीर\\s*में\\s*दर्द'),
+      native('मोच'),
+      native('हड्डी\\s*(टूट|में\\s*दरार)|फ्रैक्चर'),
     ],
   },
   {
@@ -247,6 +353,14 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bboil\b/i,
       /\bhives\b/i,
       /\bulcer\s+on\b/i,
+      stem('தடிப்பு|சொறி'),
+      stem('அரிப்பு'),
+      stem('தோல்\\s*(நோய்|பிரச்சினை)'),
+      stem('கொப்பள(ம்)?'),
+      native('दाने|चकत्ते'),
+      native('खुजली'),
+      native('त्वचा'),
+      native('फोड़ा|फुंसी'),
     ],
   },
   {
@@ -260,6 +374,16 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bcan(no|')?t\s+sleep/i,
       /\binsomnia\b/i,
       /\bstress(ed)?\b/i,
+      stem('மன\\s*அழுத்த(ம்)?'),
+      stem('பதட்ட(ம்)?|கவலை'),
+      stem('தூக்க(ம்)?\\s*வர(ல|லை)'),
+      stem('தற்கொலை'),
+      stem('தன்னை\\s*காயப்படுத்த'),
+      native('तनाव|डिप्रेशन|अवसाद'),
+      native('चिंता|घबराहट|बेचैनी'),
+      native('नींद\\s*नहीं\\s*आ'),
+      native('आत्महत्या'),
+      native('खुद\\s*को\\s*नुकसान'),
     ],
   },
   {
@@ -273,6 +397,16 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bloss\s+of\s+appetite/i,
       /\bnight\s+sweat/i,
       /\bkaa?y?ch?al\b/i,
+      stem('காய்ச்சல்|ஜுர(ம்)?'),
+      stem('சோர்வு|களைப்பு'),
+      stem('பசி\\s*இல்ல(ை)?|பசியின்மை'),
+      stem('எடை\\s*(குறை|இழ)'),
+      stem('இரவு\\s*வியர்வை'),
+      native('बुखार|ज्वर|बुख़ार'),
+      native('थकान|कमज़ोरी|कमजोरी'),
+      native('भूख\\s*नहीं'),
+      native('वज़न\\s*कम|वजन\\s*कम'),
+      native('रात\\s*को\\s*पसीना'),
     ],
   },
   {
@@ -285,6 +419,15 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bhearing\s+loss/i,
       /\btonsil/i,
       /\bsinus/i,
+      stem('காது\\s*(வலி|கேட்கல(ை)?|சீழ்)'),
+      stem('தொண்டை\\s*வலி'),
+      stem('மூக்கு\\s*(ஒழுகு|அடைப்பு|அடைச்ச)'),
+      stem('டான்சில்'),
+      native('कान\\s*(में\\s*)?(दर्द|बहना)'),
+      native('गले\\s*में\\s*(दर्द|खराश)|गला\\s*(ख़राब|खराब)'),
+      native('नाक\\s*(बहना|बह\\s*रही|बंद)'),
+      native('सुनाई\\s*नहीं'),
+      native('टॉन्सिल'),
     ],
   },
   {
@@ -294,6 +437,12 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bred\s+eye/i,
       /\b(blurred|double|loss\s+of)\s+vision/i,
       /\bcan(no|')?t\s+see/i,
+      stem('கண்\\s*(வலி|சிவப்பு|எரிச்சல்)'),
+      stem('பார்வை\\s*(மங்க|குறை|இழ)'),
+      stem('கண்\\s*தெரிய(ல|லை)'),
+      native('आँख\\s*(में\\s*)?(दर्द|लाल|जलन)|आंख\\s*में\\s*दर्द'),
+      native('धुंधला\\s*(दिख|नज़र)'),
+      native('दिखाई\\s*नहीं'),
     ],
   },
   {
@@ -303,6 +452,12 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\breaction\s+(to|after)\b/i,
       /\bhives\b/i,
       /\bswelling\s+of\s+(the\s+)?(lips?|tongue|throat|face|eyes?)/i,
+      stem('ஒவ்வாமை'),
+      stem('அலர்ஜி'),
+      stem('உதடு\\s*வீக்க(ம்)?|முகம்\\s*வீங்க'),
+      native('एलर्जी|एलर्जि'),
+      native('प्रतिक्रिया'),
+      native('(होंठ|जीभ|गला|चेहरा|चेहरे)\\s*(में\\s*)?(सूजन|सूज)'),
     ],
   },
   {
@@ -314,6 +469,18 @@ const CATEGORY_PATTERNS: ReadonlyArray<{
       /\bburn(t|ed)?\b/i,
       /\bdog\s+bite|\bsnake\s+bite|\bbite\b/i,
       /\bcut\s+(my|his|her|the)\b/i,
+      stem('விழுந்து|விழுந்த'),
+      stem('காய(ம்|ங்கள்)'),
+      stem('விபத்து'),
+      stem('தீக்காய(ம்)?|சுட்டு\\s*கொண்ட'),
+      stem('(நாய்|பாம்பு)\\s*கடி'),
+      stem('கடி(த்த|ச்ச)'),
+      native('गिर\\s*(गया|गई|गयी|पड़ा)'),
+      native('चोट'),
+      native('दुर्घटना|एक्सीडेंट'),
+      native('जल\\s*(गया|गयी)|जलन\\s*से'),
+      native('(कुत्ते|साँप|सांप)\\s*ने\\s*काटा'),
+      native('काट\\s*लिया'),
     ],
   },
 ];

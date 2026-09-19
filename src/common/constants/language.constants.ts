@@ -161,42 +161,78 @@ export type LanguageCode = (typeof SUPPORTED_LANGUAGES)[number]['code'];
 export const DEFAULT_LANGUAGE = 'en';
 
 /**
- * The language every patient READS AND HEARS, whatever they speak.
+ * The language a patient reads and hears when their own is not one this
+ * interview can be conducted in.
  *
- * This is a product decision, not a default that nobody got round to changing,
- * and not an accident of the table above starting with `en`. It was made
- * deliberately: a patient picks one of the eleven, everything they say is
- * transcribed in that language, and everything put back in front of them — the
- * questions on screen, the sentence the speaker reads out — is English.
+ * ── What this used to mean, and why it changed
  *
- * ── Why
+ * It used to mean English on **every** session without exception, and the
+ * reasoning was written here at length: the questions are clinical, a
+ * phrasebook nobody who reads the language has signed off asks something subtly
+ * different from the English it was drafted from, and ten of the eleven Indian
+ * languages had no phrasebook at all. Answering in English was the honest
+ * version of what the system could promise.
  *
- * The questions are clinical. A phrasebook nobody who reads the language has
- * signed off is a question that is fluent, plausible, and asking something
- * subtly different from the English it was drafted from — "does it spread to
- * your arm?" becoming "does it hurt in your arm?" is invisible to everyone
- * except a clinician who reads that language, and it changes what the chart
- * says. Ten of the eleven are in exactly that state. Answering in English is
- * the honest version of what this system can currently promise: we understand
- * what you say, and we tell you what we understood in words a clinician here
- * has actually checked.
+ * Three of the twelve are no longer in that state. English, Tamil and Hindi
+ * have complete phrasebooks, answer phrase lists that read a patient's own
+ * words with no model in the path, and a voice on disk — see
+ * `INTERVIEW_LANGUAGE_CODES`. For those, the interview is conducted in the
+ * patient's own language, and `interviewLanguageFor` in `engine/phrasebook.ts`
+ * is the one function that decides it.
  *
- * ── What this is NOT
+ * ── What is unchanged, and is the point
  *
- * It is not a statement that the patient's language does not matter — their
- * choice still governs the recogniser, which is the half of the interview where
- * getting the language wrong puts a wrong clinical fact on a chart. And it is
- * not permanent: the phrasebooks, the review gate
- * (`MEDIHIVE_ALLOW_UNREVIEWED_PHRASEBOOKS`) and the IndicF5 voices all stay
- * wired up behind this constant. Answering in the patient's language again is
- * changing what the session stores in `outputLanguage` — a config decision —
- * rather than rebuilding the path that would serve it.
+ * The review gate. `interviewLanguageFor` asks `phrasebookFor`, which refuses
+ * an unreviewed book unless `MEDIHIVE_ALLOW_UNREVIEWED_PHRASEBOOKS` is set — so
+ * a language whose translation no clinician has signed off still answers in
+ * English on a default deployment, and the session row says so rather than
+ * claiming a language it is not really speaking.
+ *
+ * So this constant is now the *fallback* rather than the rule: what a Bengali
+ * or Telugu session reads and hears, and what any session gets when the gate is
+ * shut.
  */
 export const DEFAULT_OUTPUT_LANGUAGE = 'en';
 
 /** Every code, for `@IsIn` and for anything that needs the whole set. */
 export const SUPPORTED_LANGUAGE_CODES: readonly string[] =
   SUPPORTED_LANGUAGES.map((language) => language.code);
+
+/**
+ * The languages a patient is actually **offered** for an interview.
+ *
+ * ── Why this is narrower than the table above
+ *
+ * The table is the catalogue: what the model families support, what the sidecar
+ * can hear and speak. This is a product decision on top of it — which of those
+ * a patient sees in the picker — and the two are different questions with
+ * different answers.
+ *
+ * A language belongs here when the whole interview exists in it: the questions
+ * translated, the answers readable by `answer-phrases.ts` without a model, and
+ * a voice on disk to read them aloud. Bengali has a recogniser and a voice and
+ * neither of the other two. Offering it would give a patient Bengali speech
+ * recognition and an English interview, which is a worse experience than not
+ * offering it — and it was the state Tamil and Hindi were in until the
+ * phrasebooks and the phrase lists were written.
+ *
+ * ── What this is not
+ *
+ * It is not a narrowing of what the system accepts. `SUPPORTED_LANGUAGE_CODES`
+ * still validates every DTO, `/stt` and `/tts` still answer for all twelve, and
+ * a session already recorded in Telugu still reads back as Telugu. This governs
+ * one thing: the rows `GET /case-taking/languages` returns.
+ *
+ * Adding a language back is adding its code here, once the three things above
+ * are true of it.
+ */
+export const INTERVIEW_LANGUAGE_CODES: readonly string[] = ['en', 'ta', 'hi'];
+
+/** The rows the picker renders, in the table's own display order. */
+export const INTERVIEW_LANGUAGES: readonly LanguageDefinition[] =
+  SUPPORTED_LANGUAGES.filter((language) =>
+    INTERVIEW_LANGUAGE_CODES.includes(language.code),
+  );
 
 /** The codes speech can be transcribed in. Excludes `or`; see the row above. */
 export const STT_LANGUAGE_CODES: readonly string[] = SUPPORTED_LANGUAGES.filter(

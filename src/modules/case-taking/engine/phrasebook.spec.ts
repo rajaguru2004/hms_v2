@@ -94,11 +94,17 @@ describe('the spoken question drops the answer hint', () => {
   it('follows the same phrasebook as the written question', () => {
     // It must not quietly fall back to English while `fallbackPhrasing`
     // translates — one question, two renderings, never two languages.
-    const field = byKey('past_medical.diabetes');
-    const book = reviewedTamil();
-    const written = composePhrasing(field, book);
-    const spoken = spokenPhrasingFor(field, 'ta');
-    expect(written.startsWith(spoken)).toBe(true);
+    //
+    // The gate is opened for the comparison because `composePhrasing` is handed
+    // the book directly while `spokenPhrasingFor` resolves it through
+    // `phrasebookFor`. Without it the two disagree for a reason that is not the
+    // one under test: one read Tamil, the other read the review gate.
+    withOverride(true, () => {
+      const field = byKey('past_medical.diabetes');
+      const written = composePhrasing(field, reviewedTamil());
+      const spoken = spokenPhrasingFor(field, 'ta');
+      expect(written.startsWith(spoken)).toBe(true);
+    });
   });
 });
 
@@ -169,11 +175,23 @@ describe('a reviewed translation', () => {
    * neither half can be empty or in a language nobody asked for.
    */
   it('falls back to the English question where it has none, never to nothing', () => {
-    const untranslated = byKey('hpi.previous_episodes');
-    const asked = composePhrasing(untranslated, reviewedTamil());
+    // Tamil is complete now, so the fallback needs a book with a hole in it
+    // rather than a field nobody translated — and a hole is the ordinary state
+    // of a translation in progress, which is what makes this worth pinning.
+    const field = byKey('past_medical.diabetes');
+    const holed = reviewedTamil({
+      questions: Object.fromEntries(
+        Object.entries(PHRASEBOOKS.ta.questions).filter(
+          ([key]) => key !== 'past_medical.diabetes',
+        ),
+      ),
+    });
 
-    expect(asked.startsWith(untranslated.prompt.trim())).toBe(true);
+    const asked = composePhrasing(field, holed);
+
+    expect(asked.startsWith(field.prompt.trim())).toBe(true);
     expect(asked.trim().length).toBeGreaterThan(0);
+    // The hint is still Tamil: the two halves fall back apart, on purpose.
     expect(asked).toContain('ஆம் அல்லது இல்லை');
   });
 
@@ -583,25 +601,24 @@ describe('Hindi', () => {
 
 describe('Tamil, with the gate open', () => {
   /**
-   * The worked example is four questions deep, and the first question the
-   * selector asks happens to be one of them — which is why a Tamil demo looks
-   * complete and then reverts to English a few questions in. That is the
-   * fallback working, and it is worth seeing in a test rather than in a demo.
+   * This test used to be called "asks its four translated questions in Tamil
+   * and the rest in English", and it described a real problem: a Tamil demo
+   * looked complete for one question and reverted to English a few in. The book
+   * is complete now — every field the interview can ask, and every repeated-group
+   * template — so the property worth pinning is the opposite one.
    */
-  it('asks its four translated questions in Tamil and the rest in English', () => {
+  it('asks the whole interview in Tamil, not the first question of it', () => {
     withOverride(true, () => {
       const tamil = createClinicalState({ sessionId: 's1', language: 'ta' });
       expect(selectNext(tamil)?.fallbackPrompt).toMatch(TAMIL_SCRIPT);
 
-      const untranslated = STATIC_FIELDS.find(
-        (field) => field.key === 'hpi.previous_episodes',
-      );
-      if (!untranslated) {
-        throw new Error('hpi.previous_episodes left the registry');
+      for (const field of STATIC_FIELDS) {
+        // `social.age_band` carries no prompt in any language: it is read off
+        // the patient record and never asked. See `phrasebookCoverage`.
+        if (field.key === 'social.age_band') continue;
+        expect(phrasingFor(field, 'ta')).toMatch(TAMIL_SCRIPT);
+        expect(phrasingFor(field, 'ta')).not.toContain(field.prompt);
       }
-      expect(phrasingFor(untranslated, 'ta')).toContain(untranslated.prompt);
-      // The hint still comes out in Tamil: the two halves fall back apart.
-      expect(phrasingFor(untranslated, 'ta')).toMatch(TAMIL_SCRIPT);
     });
   });
 });

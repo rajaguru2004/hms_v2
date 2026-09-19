@@ -14,6 +14,11 @@ import { AuthenticatedUser } from '../../common/types/jwt-payload.type';
 import { AppException } from '../../common/exceptions/app.exception';
 import { FactRowData } from './case-state';
 import { ENGLISH_ASIDE_REPLIES } from './engine/phrasebook';
+import {
+  INTERVIEW_LANGUAGE_CODES,
+  SUPPORTED_LANGUAGES,
+} from '../../common/constants/language.constants';
+import { ALLOW_UNREVIEWED_PHRASEBOOKS_ENV } from './engine/phrasebook';
 
 /**
  * The interview, against an in-memory repository.
@@ -424,19 +429,24 @@ describe('CaseTakingService', () => {
     });
 
     /**
-     * And when the model IS worth calling — an opening narrative belongs to no
-     * single field — the response still does not depend on it. The stubbed
-     * provider throws on every call, and the turn succeeds anyway.
+     * An opening narrative belongs to no single field, which used to be the
+     * case the model existed for: this turn queued `extractFacts` and the test
+     * proved the response did not depend on it, by stubbing a provider that
+     * throws on every call.
+     *
+     * There is nothing left to blow up. The provider is still strict — every
+     * method throws — and the turn succeeds because nothing calls one.
      */
-    it('answers even when the model call it queued blows up', async () => {
+    it('answers an unattributed narrative with no model in the path', async () => {
       const h = harness();
       h.repo.seedSession();
 
       const first = await answer(h, 'sess-1', { text: 'chest pain' });
 
-      expect(first.extraction.queued).toBe(true);
+      expect(first.extraction.queued).toBe(false);
       expect(first.nextQuestion).not.toBeNull();
       expect(first.accepted.fieldPath).toBeNull();
+      expect(h.llm.extractFacts).not.toHaveBeenCalled();
     });
 
     it('asks the chief complaint first, then unlocks the history', async () => {
@@ -794,62 +804,133 @@ describe('CaseTakingService', () => {
     });
   });
 
-  describe('background extraction', () => {
-    it('does not queue a model call for a short answer', async () => {
+  describe('reading the rest of what the patient said', () => {
+    /**
+     * The measured case this whole path exists for, and the one that used to
+     * cost eight to twenty seconds of gemma3:4b.
+     *
+     * A patient answering the chief complaint volunteers a duration, a timing
+     * and a denial in the same breath. All four facts are on the chart before
+     * the response is built — which the background model could not do, and
+     * which is why the interview then asked about the three days it had just
+     * been told.
+     */
+    it('files the duration, timing and denial volunteered with the complaint', async () => {
+      const h = harness();
+      h.repo.seedSession();
+
+      await answer(h, 'sess-1', {
+        fieldPath: 'chief_complaint.symptom',
+        text: 'chest pain for three days, it comes and goes, no fever',
+      });
+
+      const filed = (path: string) =>
+        h.repo.facts.find((f) => f.fieldPath === path);
+
+      expect(filed('chief_complaint.symptom')?.presence).toBe('recorded');
+      expect(filed('hpi.duration')?.presence).toBe('recorded');
+      expect(filed('hpi.timing')?.valueJson).toBe('comes_and_goes');
+      // "no fever" is a denial, and a denial is `none` — not a recorded false.
+      expect(filed('hpi.associated.fever')?.presence).toBe('none');
+      // And no model was anywhere near it.
+      expect(h.llm.extractFacts).not.toHaveBeenCalled();
+    });
+
+    it('does not ask again about what it has just been told', async () => {
       const h = harness();
       h.repo.seedSession();
 
       const result = await answer(h, 'sess-1', {
         fieldPath: 'chief_complaint.symptom',
-        text: 'chest pain',
+        text: 'chest pain for three days, it comes and goes',
       });
 
-      expect(result.extraction.queued).toBe(false);
-      expect(result.extraction.reason).toMatch(/without a model/);
+      // The selector runs AFTER the harvest, so the duration it just filed is
+      // not askable any more. Under the old background extraction the facts
+      // landed minutes later and this question was asked anyway.
+      expect(result.nextQuestion?.fieldPath).not.toBe('hpi.duration');
+      expect(result.nextQuestion?.fieldPath).not.toBe('hpi.timing');
     });
 
-    it('queues one for an answer longer than the question', async () => {
+    it('reads a Tamil narrative the same way', async () => {
+      const h = harness();
+      h.repo.seedSession({ language: 'ta' });
+
+      await answer(h, 'sess-1', {
+        modality: 'voice',
+        fieldPath: 'chief_complaint.symptom',
+        text: 'நெஞ்சு வலி மூணு நாளா இருக்கு',
+      });
+
+      const duration = h.repo.facts.find((f) => f.fieldPath === 'hpi.duration');
+      expect(duration?.presence).toBe('recorded');
+      expect(h.llm.extractFacts).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The eager slot filling that was measured coming out of the model:
+     * `hpi.radiation: "when I walk"`, which is an aggravating factor and not a
+     * radiation. A vocabulary lookup cannot make that mistake, because it only
+     * claims what it can look up — and `text` fields are never harvested at all.
+     */
+    it('never slot-fills a free-text field from a narrative', async () => {
       const h = harness();
       h.repo.seedSession();
-      h.llm.extractFacts = jest.fn(() =>
-        Promise.resolve({
-          facts: [],
-          discardedPaths: [],
-          model: 'gemma3:4b',
-          latencyMs: 1,
-          degraded: false,
-          promptVersion: '2026.09.1',
-        }),
-      ) as never;
+
+      await answer(h, 'sess-1', {
+        fieldPath: 'chief_complaint.symptom',
+        text: 'chest pain, worse when I walk up the stairs',
+      });
+
+      expect(
+        h.repo.facts.find((f) => f.fieldPath === 'hpi.radiation'),
+      ).toBeUndefined();
+      expect(
+        h.repo.facts.find((f) => f.fieldPath === 'hpi.location'),
+      ).toBeUndefined();
+    });
+
+    it('reads nothing extra out of a tapped choice', async () => {
+      const h = harness();
+      h.repo.seedSession();
+
+      const opening = await answer(h, 'sess-1', {
+        fieldPath: 'chief_complaint.symptom',
+        text: 'chest pain',
+      });
+      const before = h.repo.facts.length;
+
+      await answer(h, 'sess-1', {
+        modality: 'choice',
+        fieldPath: opening.nextQuestion!.fieldPath,
+        value: 'not_sure',
+      });
+
+      // Exactly one new fact: the one the button answered.
+      expect(h.repo.facts.length).toBe(before + 1);
+    });
+
+    it('says nothing is queued, because nothing is read later any more', async () => {
+      const h = harness();
+      h.repo.seedSession();
 
       const result = await answer(h, 'sess-1', {
         fieldPath: 'chief_complaint.symptom',
         text: 'I have had chest pain for three days. It is worse when I walk up the stairs, and I do not know if I am allergic to anything.',
       });
 
-      expect(result.extraction.queued).toBe(true);
-      // Queued, not awaited: the response is already here.
+      expect(result.extraction.queued).toBe(false);
       expect(result.nextQuestion).not.toBeNull();
     });
 
     /**
-     * A long answer is derived WITHOUT the whole turn as the evidence span,
-     * because judging one field against the whole turn finds the "I don't know"
-     * that was meant for another. The engine says so by flagging the result.
+     * A long answer is still derived WITHOUT the whole turn as the evidence
+     * span for the asked field, because judging one field against the whole
+     * turn finds the "I don't know" that was meant for another.
      */
     it('flags a long answer for patient confirmation', async () => {
       const h = harness();
       h.repo.seedSession();
-      h.llm.extractFacts = jest.fn(() =>
-        Promise.resolve({
-          facts: [],
-          discardedPaths: [],
-          model: 'gemma3:4b',
-          latencyMs: 1,
-          degraded: false,
-          promptVersion: '2026.09.1',
-        }),
-      ) as never;
 
       await answer(h, 'sess-1', {
         fieldPath: 'chief_complaint.symptom',
@@ -1283,13 +1364,51 @@ describe('CaseTakingService', () => {
       };
     }
 
-    it('is the whole set, in display order', async () => {
+    /**
+     * Three rows, not twelve. The catalogue is the languages the *interview*
+     * exists in — questions translated, answers readable with no model, a voice
+     * on disk — and not the languages the recogniser happens to hear. Offering
+     * Bengali would give a patient Bengali speech recognition and an English
+     * interview, which reads as broken.
+     */
+    /**
+     * The review gate, opened for the rows that need it.
+     *
+     * Tamil and Hindi ship with `reviewedAt: null` — nobody who reads them has
+     * signed the clinical wording off — so on a default deployment
+     * `interviewLanguageFor` answers English for both and the catalogue says
+     * so. That is the shipped behaviour and it is tested below too; these cases
+     * are about what the catalogue reports once a deployment has opted in.
+     */
+    // `async`, and it has to be: a synchronous version returns the promise and
+    // runs its `finally` immediately, restoring the variable before the body it
+    // was opened for has got past its first await. The catalogue then reads the
+    // gate as shut and the test fails for a reason that has nothing to do with
+    // what it is testing.
+    async function withGateOpen<T>(body: () => Promise<T>): Promise<T> {
+      const before = process.env[ALLOW_UNREVIEWED_PHRASEBOOKS_ENV];
+      process.env[ALLOW_UNREVIEWED_PHRASEBOOKS_ENV] = 'true';
+      try {
+        return await body();
+      } finally {
+        if (before === undefined) {
+          delete process.env[ALLOW_UNREVIEWED_PHRASEBOOKS_ENV];
+        } else {
+          process.env[ALLOW_UNREVIEWED_PHRASEBOOKS_ENV] = before;
+        }
+      }
+    }
+
+    it('offers the languages the interview exists in, in display order', async () => {
       const catalogue = await harness().service.languages();
 
       expect(catalogue.default).toBe('en');
-      expect(catalogue.languages).toHaveLength(12);
+      expect(catalogue.languages.map((l) => l.code)).toEqual([
+        'en',
+        'hi',
+        'ta',
+      ]);
       expect(catalogue.languages[0].code).toBe('en');
-      expect(catalogue.languages.map((l) => l.code)).toContain('or');
     });
 
     /**
@@ -1302,8 +1421,8 @@ describe('CaseTakingService', () => {
 
       expect(catalogue.source).toBe('catalogue');
       expect(
-        catalogue.languages.find((language) => language.code === 'or'),
-      ).toMatchObject({ nativeName: 'ଓଡ଼ିଆ', stt: false, tts: true });
+        catalogue.languages.find((language) => language.code === 'ta'),
+      ).toMatchObject({ nativeName: 'தமிழ்', stt: true, tts: true });
     });
 
     /**
@@ -1326,17 +1445,19 @@ describe('CaseTakingService', () => {
         catalogue.languages.find((language) => language.code === code);
 
       expect(catalogue.source).toBe('sidecar');
+      // The table says Tamil has a voice; this box says it does not, and the
+      // box is the one holding the weights.
       expect(by('ta')).toMatchObject({ stt: true, tts: false });
-      expect(by('or')).toMatchObject({ stt: false, tts: false });
+      // Odia is not offered at all, so there is no row to disagree about.
+      expect(by('or')).toBeUndefined();
     });
 
     /**
-     * The catalogue has to say what the patient actually gets, and what they
-     * get is English. A row's own `tts` is now a coverage fact about the
-     * system; `outputTts` is the one a speaker button belongs on, and it is
-     * true for a Tamil patient whose own language has no voice on this box.
+     * `outputLanguage` used to be `en` on every row, because the interview was.
+     * It follows the patient now — so a Tamil row says Tamil, and `outputTts`
+     * is about the **Tamil** voice rather than the English one.
      */
-    it('says every row is answered in English, and whether English can be heard', async () => {
+    it('says what language each row is answered in, and whether it can be heard', async () => {
       const h = harness();
       h.sidecar.health.mockResolvedValue(
         healthWith({
@@ -1345,25 +1466,26 @@ describe('CaseTakingService', () => {
         }),
       );
 
-      const catalogue = await h.service.languages();
+      const catalogue = await withGateOpen(() => h.service.languages());
       const tamil = catalogue.languages.find((l) => l.code === 'ta');
 
       expect(tamil).toMatchObject({
         stt: true,
-        // Tamil itself cannot be spoken aloud on this box...
+        // No Tamil voice on this box...
         tts: false,
-        // ...and it does not matter, because the questions are English and
-        // English has a voice.
-        outputLanguage: 'en',
-        outputTts: true,
+        // ...and the interview is in Tamil, so there is nothing to read it
+        // aloud with. The speaker button belongs off for this row.
+        outputLanguage: 'ta',
+        outputTts: false,
       });
     });
 
     /**
-     * And when the English voice is the one that is missing, the speaker button
-     * goes for everybody — including the rows whose own voice is installed.
+     * A row whose questions are NOT translated is still answered in English, so
+     * it is the English voice that decides its speaker button. That is the case
+     * the per-row output language exists to tell apart from the one above.
      */
-    it('reports no output voice when the output language has none here', async () => {
+    it('reports the English voice for a row the interview cannot be held in', async () => {
       const h = harness();
       h.sidecar.health.mockResolvedValue(
         healthWith({
@@ -1372,26 +1494,60 @@ describe('CaseTakingService', () => {
         }),
       );
 
-      const catalogue = await h.service.languages();
+      const catalogue = await withGateOpen(() => h.service.languages());
 
+      // Tamil's own voice is installed and Tamil is what it is answered in.
       expect(catalogue.languages.find((l) => l.code === 'ta')).toMatchObject({
         tts: true,
+        outputLanguage: 'ta',
+        outputTts: true,
+      });
+      // English has no voice here, and English is what English is answered in.
+      expect(catalogue.languages.find((l) => l.code === 'en')).toMatchObject({
+        outputLanguage: 'en',
         outputTts: false,
       });
     });
 
     /**
-     * The one row that is still not fully usable, and the reason it is not is
-     * the microphone rather than the interview. Reported honestly whatever the
-     * output language is.
+     * The shipped default, and the reason the two tests above have to open a
+     * gate to see anything else: nobody has signed the Tamil or Hindi wording
+     * off, so `phrasebookFor` refuses both books and every row is answered in
+     * English. A deployment opts in with
+     * `MEDIHIVE_ALLOW_UNREVIEWED_PHRASEBOOKS`, and a clinician who reads the
+     * language retires the flag by putting a date on `reviewedAt`.
      */
-    it('still refuses to claim a microphone for Odia', async () => {
-      const catalogue = await harness().service.languages();
+    it('answers in English until somebody has signed the translation off', async () => {
+      const h = harness();
+      h.sidecar.health.mockResolvedValue(
+        healthWith({
+          en: { stt: true, tts: true },
+          ta: { stt: true, tts: true },
+        }),
+      );
 
-      expect(catalogue.languages.find((l) => l.code === 'or')).toMatchObject({
-        stt: false,
+      const catalogue = await h.service.languages();
+
+      expect(catalogue.languages.find((l) => l.code === 'ta')).toMatchObject({
+        // Tamil speech in, Tamil voice on the box...
+        stt: true,
+        tts: true,
+        // ...and an English interview, because the gate is shut.
         outputLanguage: 'en',
+        questions: 'none',
       });
+    });
+
+    /**
+     * Odia is the row the two-flag design was written for — a voice, and no
+     * recogniser anywhere. It is not offered today because its questions are
+     * not translated, but the honesty it forced is still in the table and is
+     * still what the picker would report if it came back.
+     */
+    it('keeps Odia in the catalogue table even though it is not offered', () => {
+      const odia = SUPPORTED_LANGUAGES.find((l) => l.code === 'or');
+      expect(odia).toMatchObject({ stt: false, tts: true });
+      expect(INTERVIEW_LANGUAGE_CODES).not.toContain('or');
     });
 
     /**
@@ -1407,7 +1563,7 @@ describe('CaseTakingService', () => {
 
       const catalogue = await h.service.languages();
       expect(
-        catalogue.languages.find((language) => language.code === 'bn'),
+        catalogue.languages.find((language) => language.code === 'hi'),
       ).toMatchObject({ stt: false, tts: false });
     });
   });

@@ -22,23 +22,22 @@ import { LanguageCatalogueDto } from './dto/language.dto';
 import { VoiceGrantDto, VoiceTokenDto } from './dto/voice-token.dto';
 import {
   ClinicalState,
+  SectionKey,
   applyFact,
   clearPending,
   expirePending,
   markAsked,
-  readFactAt,
   sectionOf,
 } from './engine/clinical-state';
 import { AsideIntent, classifyAside, looksInterrogative } from './engine/aside';
 import {
   FieldDefinition,
-  applicableFields,
-  fieldsFor,
   findField,
   valueSpecFor,
 } from './engine/field-registry';
+import { harvest, spanForAsked } from './engine/harvest';
+import { leadFor } from './engine/conversation';
 import {
-  compareFields,
   fallbackPhrasing,
   spokenPhrasingFor,
   interviewProgress,
@@ -50,6 +49,7 @@ import {
   PHRASEBOOKS,
   PhrasebookSource,
   asideReplyFor,
+  interviewLanguageFor,
   phrasebookFor,
 } from './engine/phrasebook';
 import { evaluate, SafetyAssessment } from './engine/safety-engine';
@@ -63,6 +63,7 @@ import {
   AnswerInput,
   AnswerModality,
   ANSWER_MODALITIES,
+  FactPresence,
   FactProvenance,
   FactSource,
   PresenceDerivation,
@@ -70,10 +71,6 @@ import {
   presenceLabel,
 } from './engine/tri-state';
 import { LLM_PROVIDER, LlmProvider } from '../ai/llm-provider.interface';
-import {
-  TRANSLATION_PROVIDER,
-  TranslationProvider,
-} from '../ai/translation-provider.interface';
 import { SidecarClient, SidecarUnavailableError } from '../ai/sidecar.client';
 import { AuditService } from '../../audit/audit.service';
 import { AuditAction } from '../../common/enums/action.enum';
@@ -91,9 +88,8 @@ import {
 import {
   DEFAULT_LANGUAGE,
   DEFAULT_OUTPUT_LANGUAGE,
-  SUPPORTED_LANGUAGES,
+  INTERVIEW_LANGUAGES,
   findLanguage,
-  isNonEnglishScript,
   normaliseLanguage,
   sttLanguageFor,
 } from '../../common/constants/language.constants';
@@ -116,25 +112,23 @@ import {
  * of them has ever seen a model. The measured handler time is a few
  * milliseconds plus the database round trips.
  *
- * ── Where the model does run, and how it lands
+ * ── Where the model runs in an interview, which is nowhere
  *
- * Extraction is only interesting for free text that answers more than the
- * question asked — the opening "tell me what's wrong", or a duration answered
- * with a paragraph. Those go to `extractInBackground`, which is fire-and-forget
- * and writes `CaseFact` rows when it finishes, minutes later if need be. Two
- * properties make that safe rather than merely fast:
+ * It used to run in one place: `extractInBackground`, reading a narrative for
+ * the fields it answered beyond the question asked. That is `engine/harvest.ts`
+ * now — a checked-in vocabulary in English, Tamil and Hindi — and the whole
+ * background apparatus went with it: the fire-and-forget promise, the second
+ * safety pass minutes later, the translation hop that existed only so an
+ * English keyword table could read Hindi.
  *
- *   • Facts are append-only rows, so a background write cannot clobber a
- *     foreground one — there is no shared document to race over.
- *   • `ClinicalState.pending` keeps the selector from re-asking a question
- *     whose answer is still being parsed, and `expirePending` releases it if
- *     the extraction never comes back, so a lost job costs a repeated question
- *     rather than a permanent hole in the chart.
+ * What that bought is not only speed. The harvest finishes before `askNext`
+ * runs, so the selector sees the volunteered facts and stops asking about the
+ * three days the patient has just described — which the background job could
+ * never do, because it landed two questions too late.
  *
- * A short answer never goes near the model at all. "Three days", "no", "8",
- * "I don't know" are all handled by the engine's phrase lists and field-shape
- * validation, which is both faster and more trustworthy than asking a 4B model
- * to agree.
+ * The one model call left in this file is `draftReviewSummary`, behind
+ * `review({narrative: true})`. It drafts prose for a clinician reading a
+ * finished case, it is opt-in, and no patient waits on it.
  */
 
 /**
@@ -151,9 +145,6 @@ import {
  * the model to be split into properly attributed spans.
  */
 const SHORT_ANSWER_CHARS = 120;
-
-/** How many fields the extraction prompt offers. The menu is sorted by ask order. */
-const EXTRACTION_MENU_SIZE = 30;
 
 /** The wording the patient agreed to. Bumped when the consent text changes. */
 export const CONSENT_VERSION = '2026.09.1';
@@ -283,19 +274,7 @@ export class CaseTakingService {
     private readonly sidecar: SidecarClient,
     private readonly auditService: AuditService,
     /**
-     * Optional on purpose.
-     *
-     * Translation is an improvement to a background job, not a dependency of
-     * the interview: with no translator wired the service behaves exactly as it
-     * did before this seam existed, which is the same behaviour a translator
-     * that is down produces. Making it required would mean a missing provider
-     * could stop a patient being interviewed at all.
-     */
-    @Optional()
-    @Inject(TRANSLATION_PROVIDER)
-    private readonly translator?: TranslationProvider,
-    /**
-     * Optional for the same reason the translator is: a box with no LiveKit
+     * Optional: a box with no LiveKit
      * credentials still runs a complete interview. Nothing on the clinical
      * path reads this.
      */
@@ -345,15 +324,17 @@ export class CaseTakingService {
       // the wrong data: it sends the *session's* input language, which was not
       // the one the patient had just chosen.
       //
-      // Only the INPUT language moves. `outputLanguage` stays as it is, and
-      // the facts already recorded keep the language they were recorded in —
-      // this changes what the recogniser is told next, nothing retrospective.
+      // The OUTPUT language follows, which it did not use to. A patient who
+      // resumes in Tamil is asked in Tamil from the next question on — the
+      // questions already asked keep the language they were asked in, because
+      // the turn log records what was actually put to them.
       const chosen = normaliseLanguage(dto.language);
       const resumed =
         chosen && chosen !== sessionInputLanguage(existing)
           ? await this.repository.touchSession(existing.id, {
               language: chosen,
               inputLanguage: chosen,
+              outputLanguage: interviewLanguageFor(chosen),
             })
           : existing;
 
@@ -375,18 +356,19 @@ export class CaseTakingService {
       kind: dto.kind ?? 'new_consultation',
       // Written three times on purpose, and only two of them mean anything.
       //
-      // `inputLanguage` is the patient's choice. `outputLanguage` is the
-      // product's — English, on every session, for the reasons written beside
-      // `DEFAULT_OUTPUT_LANGUAGE` — and it is not taken from the request, so a
-      // handset cannot put an unreviewed clinical translation in front of a
-      // patient by sending a field.
+      // `inputLanguage` is the patient's choice. `outputLanguage` is derived
+      // from it and never taken from the request, so a handset still cannot put
+      // an unreviewed clinical translation in front of a patient by sending a
+      // field — `interviewLanguageFor` asks the same review gate the renderer
+      // asks, and answers English for any language whose questions would not
+      // actually be spoken.
       //
       // `language` is the legacy column, kept in step with `inputLanguage` so
       // that the mobile client, the demo seed and anything else written before
       // the split keeps reading the value it always read. Nothing routes off it.
       language: inputLanguage,
       inputLanguage,
-      outputLanguage: DEFAULT_OUTPUT_LANGUAGE,
+      outputLanguage: interviewLanguageFor(inputLanguage),
       appointmentId: dto.appointmentId,
       status: 'in_progress',
     });
@@ -563,6 +545,15 @@ export class CaseTakingService {
         sourceRef: patientTurn.id,
         source: sourceForModality(modality),
         verification: 'unverified',
+        // The clause that answers the question, out of a turn that may answer
+        // several. Null for a single-clause answer, where `applyAnswer`'s own
+        // short-answer rule is already right.
+        evidenceSpan:
+          spanForAsked(
+            answerText,
+            field,
+            sessionInputLanguage(session) ?? DEFAULT_LANGUAGE,
+          ) ?? undefined,
       });
       state = applied.state;
       derivation = applied.derivation;
@@ -605,38 +596,43 @@ export class CaseTakingService {
       });
     }
 
-    // ── Decide whether the model has anything to add ────────────────────────
-    const extraction = this.extractionDecision({
-      field,
-      text: answerText,
-      derivation,
+    // ── Everything else the patient just told us ────────────────────────────
+    //
+    // In front of the response, not behind it, and that is the change the model
+    // leaving paid for. This used to be `extractInBackground`: a fire-and-forget
+    // job that woke gemma3:4b, waited eight to twenty seconds, re-read a state
+    // by then two questions stale, and wrote its facts into a session the
+    // patient had moved on from. `harvest` is regex matching over one sentence
+    // and costs microseconds, so its facts land *before* `askNext` runs — which
+    // means the selector can see them, and the interview stops asking about the
+    // three days the patient has just described.
+    //
+    // The patient's own language, never the output one. These are their words.
+    const harvested = await this.harvestVolunteered({
+      session,
+      patientId,
+      state,
+      utterance: answerText,
+      askedFieldPath: answeredPath,
+      modality,
+      sourceRef: patientTurn.id,
+      language: sessionInputLanguage(session) ?? DEFAULT_LANGUAGE,
     });
-
-    if (extraction.queued) {
-      // Fire and forget, deliberately. Awaiting this is the twenty-second wait
-      // the whole design exists to avoid, and there is nothing in the response
-      // that depends on it: the next question comes from the selector, which
-      // reads a state one turn behind on purpose.
-      void this.extractInBackground({
-        sessionId: session.id,
-        patientId,
-        organizationId: user.organizationId,
-        utterance: answerText,
-        askedFieldPath: answeredPath ?? undefined,
-        // The utterance being extracted is in the patient's own language, so
-        // this is the INPUT language. Telling the model the output language
-        // would have it read Tamil as though it were English.
-        language: sessionInputLanguage(session) ?? DEFAULT_LANGUAGE,
-        turnId: patientTurn.id,
-      });
-    }
+    state = harvested.state;
 
     // ── Safety, over the state as it now stands ─────────────────────────────
     const safety = evaluate(state);
     const redFlags = await this.persistNewRedFlags(session.id, safety);
 
     // ── The next question, from the selector, with no model in the path ─────
-    const next = await this.askNext(session, state);
+    const next = await this.askNext(session, state, {
+      presence: derivation ? derivation.presence : null,
+      previousSection: answeredPath ? sectionOf(answeredPath) : null,
+      // A rule that has just fired is about to be spoken as a routing
+      // instruction. "Good." in front of it is the interview sounding pleased
+      // about the answer that triggered it.
+      safetyFired: redFlags.length > 0,
+    });
 
     await this.saveProjection(session, next.state, safety);
 
@@ -651,7 +647,19 @@ export class CaseTakingService {
         needsPatientConfirmation: derivation?.needsPatientConfirmation ?? false,
         factId,
       },
-      extraction,
+      extraction: {
+        // Kept on the wire, always false, and worth a sentence rather than a
+        // deletion: the app reads it to draw a "still reading this properly"
+        // mark under an answer. Nothing is read later any more — the harvest
+        // finished before this response was built — so the mark is never
+        // earned, and the field says so rather than disappearing and taking an
+        // older client's parser with it.
+        queued: false,
+        reason:
+          harvested.fields.length > 0
+            ? `read ${harvested.fields.length} more field(s) from the same answer`
+            : 'the engine read the answer in full',
+      },
       aside: null,
       nextQuestion: next.question,
       interviewStatus: interviewStatus(next.state),
@@ -1110,18 +1118,30 @@ export class CaseTakingService {
     const live = health?.languages ?? {};
     const known = Object.keys(live).length > 0;
 
-    // Resolved once, not per row: every row's output is the same language, and
-    // asking the same question twelve times would invite twelve answers.
-    const outputLanguage = DEFAULT_OUTPUT_LANGUAGE;
-    const outputTts = known
-      ? live[outputLanguage]?.tts === true
-      : findLanguage(outputLanguage)?.tts === true;
+    // Per row now, not once. `outputLanguage` used to be the same on every row
+    // because it was the same on every session — English, always — and the
+    // comment here said so. It follows the patient's choice wherever the
+    // questions exist in it, so Tamil answers Tamil and Bengali still answers
+    // English, and the row has to say which.
+    const outputFor = (code: string): { language: string; tts: boolean } => {
+      const language = interviewLanguageFor(code);
+      return {
+        language,
+        tts: known
+          ? live[language]?.tts === true
+          : findLanguage(language)?.tts === true,
+      };
+    };
 
     return {
       default: DEFAULT_LANGUAGE,
       source: known ? 'sidecar' : 'catalogue',
-      languages: SUPPORTED_LANGUAGES.map((language) => {
+      // `INTERVIEW_LANGUAGES`, not `SUPPORTED_LANGUAGES`: the picker shows the
+      // languages the whole interview exists in, which is three of the twelve
+      // the sidecar can hear. See the note beside the constant.
+      languages: INTERVIEW_LANGUAGES.map((language) => {
         const reported = live[language.code];
+        const output = outputFor(language.code);
         return {
           code: language.code,
           nativeName: language.nativeName,
@@ -1141,13 +1161,14 @@ export class CaseTakingService {
           // Hindi" is reading the wrong flag. So the two are reported side by
           // side and separately.
           ...questionCapability(language.code),
-          // The two fields that say what this patient actually gets. They are
-          // the same on every row on purpose: the output language is a product
-          // decision, not a consequence of what the patient picked, and a
-          // client should be able to read it off the row it is rendering
-          // rather than infer it from a rule written down somewhere else.
-          outputLanguage,
-          outputTts,
+          // What a patient picking THIS row actually gets: the language the
+          // questions will be in, and whether there is a voice to read them
+          // aloud. No longer the same on every row — picking Tamil gets a Tamil
+          // interview, picking Bengali gets an English one — so a client must
+          // read these off the row it is rendering rather than off a rule
+          // written down somewhere else.
+          outputLanguage: output.language,
+          outputTts: output.tts,
         };
       }),
     };
@@ -1724,6 +1745,11 @@ export class CaseTakingService {
     source: FactSource;
     verification: 'unverified' | 'patient_confirmed';
     /**
+     * The words to judge this field's presence by, when they are a part of the
+     * turn rather than all of it. See `spanForAsked`.
+     */
+    evidenceSpan?: string;
+    /**
      * What language `text` is in, when it is not the language the patient
      * speaks. The only caller that passes it is the extraction path, after a
      * translation has actually run: the span it hands over is English by then,
@@ -1746,7 +1772,13 @@ export class CaseTakingService {
       // A short reply *is* the evidence for the field that was asked; a
       // narrative is not, and passing it as one is how "I don't know if I'm
       // allergic to anything" ends up deciding a duration.
-      evidenceSpan: isShortAnswer(input.text) ? input.text : undefined,
+      //
+      // `evidenceSpan` overrides both: the caller has picked the clause out of
+      // a longer turn, which is the only thing that stops "chest pain for three
+      // days, no fever" being filed as an absent chief complaint.
+      evidenceSpan:
+        input.evidenceSpan ??
+        (isShortAnswer(input.text) ? input.text : undefined),
       extractedValue: input.value ?? (input.text || undefined),
       field: valueSpecFor(input.field),
       // The language of THESE WORDS. Normally the session's INPUT language,
@@ -1803,296 +1835,112 @@ export class CaseTakingService {
   }
 
   /**
-   * Is there anything here the model could add that the engine could not?
+   * Everything the patient volunteered beyond the question they were asked.
    *
-   * The bar is deliberately high. Every yes costs a background job and, on this
-   * box, eight to twenty seconds of one CPU; every no is an answer that was
-   * fully understood by deterministic code that can be read and argued with.
-   */
-  private extractionDecision(input: {
-    field?: FieldDefinition;
-    text: string;
-    derivation: PresenceDerivation | null;
-    language?: string;
-  }): { queued: boolean; reason: string } {
-    if (input.text.length === 0) {
-      return { queued: false, reason: 'no free text in this turn' };
-    }
-
-    // Text the engine cannot read is text the engine did not read, however
-    // short it is and however cleanly it stored.
-    //
-    // This branch has to come before the `isShortAnswer` one below, and that
-    // ordering is the whole fix. A chief complaint is a `text` field: the
-    // engine "reads" it by storing it verbatim, so derivation succeeds and a
-    // short answer took the "engine read the answer without a model" exit —
-    // which for `எனக்கு மூணு நாளா நெஞ்சு வலி இருக்கு` is not true. It stored
-    // it; it understood none of it.
-    //
-    // The cost of that was precise and measured: no extraction meant no
-    // translation, so `classifyComplaint` — an English keyword table — went on
-    // reading Tamil, and a cardiac complaint never reached the cardiac
-    // pathway. The short chief complaint is the single most common utterance
-    // in the whole interview and it was the one case that skipped the model.
-    //
-    // `chief_complaint.symptom` is also the highest-value text in the session:
-    // `complaintCategories` reads it to decide which fifty review-of-systems
-    // fields apply and whether ACS_TRIAD is even evaluated. Paying a
-    // background job for it is worth it.
-    if (isNonEnglishScript(input.text)) {
-      return {
-        queued: true,
-        reason: 'answer is not in a script the engine can read',
-      };
-    }
-
-    if (!input.field) {
-      // An opening narrative belongs to no single field, which is exactly the
-      // case the model is for.
-      return { queued: true, reason: 'narrative turn with no field' };
-    }
-
-    if (!isShortAnswer(input.text)) {
-      // More was said than the question asked for. The engine has taken the
-      // conservative reading; the model's job is to split it into properly
-      // attributed spans.
-      return { queued: true, reason: 'answer is longer than the question' };
-    }
-
-    if (input.derivation && input.derivation.presence === 'not_assessed') {
-      return {
-        queued: true,
-        reason: `engine could not read it (${input.derivation.reason})`,
-      };
-    }
-
-    return { queued: false, reason: 'engine read the answer without a model' };
-  }
-
-  /**
-   * Extraction, behind the response.
+   * ── What this is the replacement for
    *
-   * Nothing awaits this and nothing may throw out of it — a rejected
-   * floating promise takes the process down under Node's default handler, and
-   * an interview is not worth a hospital API. Everything it writes goes through
-   * the same `derivePresence` the foreground path uses: the model supplies a
-   * value and a span, and the engine still decides what state they represent.
+   * `extractInBackground`, and through it `LlmProvider.extractFacts`. The shape
+   * is deliberately similar — candidates in, `applyAnswer` for each, the engine
+   * still deciding every presence — because the shape was never the problem.
+   * What changed is where the candidates come from: a checked-in vocabulary
+   * (`engine/harvest.ts`) instead of a 4B model, which makes this fast enough
+   * to run in front of the response instead of behind it.
+   *
+   * ── Why it may run synchronously when the model could not
+   *
+   * Measured: gemma3:4b took eight seconds for a two-fact extraction and twenty
+   * for a seven-fact one, warm, on a card it never fully fits in. Nothing may
+   * make a patient wait that long between a sentence and the next question, so
+   * the model had to be fire-and-forget, which cost the interview two things it
+   * is now getting back — the selector seeing the harvested facts before it
+   * chooses, and the safety rules evaluating over them in the same turn rather
+   * than minutes later.
+   *
+   * ── What it is still not allowed to do
+   *
+   * Decide anything. Every span goes through `applyAnswer`, which calls
+   * `derivePresence`, which is the only function in this system permitted to
+   * turn words into a presence. A harvested span that reads as "I don't know"
+   * records `unknown`; one that fails the field's shape records nothing at all
+   * and leaves the question askable.
    */
-  private async extractInBackground(input: {
-    sessionId: string;
+  private async harvestVolunteered(input: {
+    session: CaseSession;
     patientId: string;
-    organizationId: string;
+    state: ClinicalState;
     utterance: string;
-    askedFieldPath?: string;
+    askedFieldPath: string | null;
+    modality: AnswerModality;
+    sourceRef: string;
     language: string;
-    turnId: string;
-  }): Promise<void> {
-    try {
-      const session = await this.repository.findSessionForPatient(
-        input.sessionId,
-        input.patientId,
-        input.organizationId,
-      );
-      if (!session) return;
+  }): Promise<{ state: ClinicalState; fields: readonly string[] }> {
+    // A tapped tile answers exactly one field and carries no narrative. Reading
+    // a button press for extra facts would be inventing them.
+    if (input.modality === 'choice' || input.utterance.length === 0) {
+      return { state: input.state, fields: [] };
+    }
 
-      const loaded = await this.loadState(session);
-      const menu = extractionMenu(loaded.state, input.askedFieldPath);
-      if (menu.length === 0) return;
+    const candidates = harvest({
+      state: input.state,
+      utterance: input.utterance,
+      language: input.language,
+      askedFieldPath: input.askedFieldPath ?? undefined,
+    });
+    if (candidates.length === 0) {
+      return { state: input.state, fields: [] };
+    }
 
-      // ── The patient's words, in English, for the English engine ───────────
-      //
-      // Everything after this line that reads *meaning* reads English;
-      // everything that is a *record of what the patient said* still reads the
-      // original, which was written to `CaseTurn.answerRaw` before the response
-      // shipped and is not touched here or anywhere below.
-      //
-      // This is on the background path deliberately. It is a second model call
-      // on a job that already costs eight to twenty seconds and already lands
-      // minutes late — which is affordable — and it would be a catastrophe on
-      // the turn path, where the measured handler time is a few milliseconds.
-      const englishUtterance = await this.translateForEngine(
-        input.utterance,
-        input.language,
-      );
+    let state = input.state;
+    const written: string[] = [];
 
-      const result = await this.llm.extractFacts({
-        // English when there is English to give. The values that come back
-        // populate `chief_complaint.symptom`, which is what `classifyComplaint`
-        // reads — an English keyword table that returned `[unclassified]` for
-        // "तीन दिन से सीने में दर्द हो रहा है" and silenced ACS_TRIAD.
-        utterance: englishUtterance.text,
-        candidateFields: menu,
-        askedFieldPath: input.askedFieldPath,
-        // `en` only when the text really is English, because this tag drives
-        // the prompt's "copy their words, do not translate" line. Telling the
-        // model a Hindi sentence is English would invite it to translate — the
-        // one thing extraction must never do, since a translated value cannot
-        // be matched back to the span it came from.
-        language: englishUtterance.translated
-          ? DEFAULT_LANGUAGE
-          : input.language,
+    for (const candidate of candidates) {
+      const field = findField(state, candidate.fieldPath);
+      if (!field) continue;
+
+      const applied = await this.applyAnswer({
+        session: input.session,
+        patientId: input.patientId,
+        state,
+        field,
+        modality: input.modality,
+        // The clause, not the whole turn. This is the entire reason `harvest`
+        // returns a span: given the whole turn, "three days, I don't know about
+        // allergies" derives the duration as unknown, because the uncertainty
+        // phrase is in there somewhere.
+        text: candidate.span,
+        value: candidate.span,
+        sourceRef: input.sourceRef,
+        source: sourceForModality(input.modality),
+        verification: 'unverified',
       });
 
-      if (result.degraded) {
-        this.logger.warn(
-          `extraction degraded for session ${input.sessionId}: ${result.degradedReason ?? 'unknown'}`,
+      if (applied.factId) {
+        state = applied.state;
+        written.push(candidate.fieldPath);
+        this.logger.debug(
+          `harvested ${candidate.fieldPath} (${candidate.reason})`,
         );
-        return;
       }
-
-      // Re-read rather than reuse: the patient has answered one or two more
-      // questions while this ran, and the state that was loaded before the call
-      // is minutes old by now.
-      const fresh = await this.loadState(session);
-      let state = fresh.state;
-      let written = 0;
-
-      for (const extracted of result.facts) {
-        const field = findField(state, extracted.fieldPath);
-        if (!field) continue;
-
-        const applied = await this.applyAnswer({
-          session,
-          patientId: input.patientId,
-          state,
-          field,
-          // Not the patient's original modality: what reached us here is text
-          // the model attributed, and the source has to say so.
-          modality: 'text',
-          // The span the extractor returned, verified against the same text the
-          // extractor was given — so when translation ran, both are English and
-          // the fallback is the English utterance rather than the original. It
-          // has to be one or the other: a span verified against English cannot
-          // be found in Devanagari, and `derivePresence`'s phrase lists are
-          // English too. None of this is stored: `rowDataFromFact` writes a
-          // value and a presence, never the text. The patient's own words stay
-          // where they were put, in the turn row, untouched.
-          text: extracted.evidenceSpan ?? englishUtterance.text,
-          // ...and when it is English, `derivePresence` is told so, so its
-          // English phrase lists actually run over it. Without this the span
-          // would be tagged with the language the patient spoke, the lists
-          // would be skipped as uncovered, and the translation would have
-          // bought nothing for the one thing it was meant to help.
-          ...(englishUtterance.translated
-            ? { textLanguage: DEFAULT_LANGUAGE }
-            : {}),
-          value: extracted.value,
-          sourceRef: input.turnId,
-          source: 'patient_text',
-          verification: 'unverified',
-        });
-
-        if (applied.factId) {
-          state = applied.state;
-          written++;
-        }
-      }
-
-      if (written === 0) return;
-
-      // A fact the model found can be the one that completes a red flag, so the
-      // rules run again here rather than only on the next turn. Waiting would
-      // mean a patient who stopped answering after their opening narrative
-      // never saw the alert their own words triggered.
-      const safety = evaluate(state);
-      await this.persistNewRedFlags(session.id, safety);
-      await this.saveProjection(session, state, safety);
-
-      this.logger.log(
-        `extraction landed ${written} fact(s) for session ${input.sessionId} in ${result.latencyMs}ms`,
-      );
-    } catch (error) {
-      this.logger.error(
-        `background extraction failed for session ${input.sessionId}: ${
-          error instanceof Error ? error.message : 'unknown'
-        }`,
-      );
     }
+
+    return { state, fields: written };
   }
 
-  /**
-   * The patient's utterance in English — or the utterance, unchanged.
-   *
-   * ── What this is for
-   *
-   * `classifyComplaint` is an English keyword table and `complaintCategories`
-   * runs it over `chief_complaint.symptom`. Given the patient's own Hindi it
-   * returned `[unclassified]`, which cut the applicable field set from 64 to 44
-   * and left ACS_TRIAD silent for a patient describing cardiac chest pain. The
-   * table is not wrong; it was being handed something it cannot read. This
-   * hands it English.
-   *
-   * ── What it is careful not to be
-   *
-   * It returns a *pair*, never a replacement. The original utterance was
-   * written to `CaseTurn.answerRaw` on the synchronous path before the response
-   * shipped, and nothing downstream of here rewrites it — `rowDataFromFact`
-   * persists a value and a presence and has no column for text at all. So the
-   * verbatim record a clinician reads is the patient's, and English is a
-   * derived reading of it that exists only in memory, for the duration of one
-   * background job.
-   *
-   * Three ways out, all of them today's behaviour: no translator wired, the
-   * session already in English, or a translation that failed. The last is the
-   * common one on this box and it is a `warn`, not a throw — the caller is
-   * inside a fire-and-forget promise, and a rejection there takes the process
-   * down under Node's default handler.
-   *
-   * Nothing here logs the utterance. It is PHI, and a translation failure is
-   * diagnosable from the language tag and the reason.
-   */
-  private async translateForEngine(
-    utterance: string,
-    language: string,
-  ): Promise<{ text: string; translated: boolean }> {
-    const untranslated = { text: utterance, translated: false };
-
-    if (!this.translator) return untranslated;
-    if (normaliseLanguage(language) === DEFAULT_LANGUAGE) return untranslated;
-
-    try {
-      const result = await this.translator.translateToEnglish({
-        text: utterance,
-        sourceLanguage: language,
-      });
-
-      if (result.englishText === null) {
-        this.logger.warn(
-          `translation degraded for a "${language}" utterance (${
-            result.degradedReason ?? 'unknown'
-          }); extracting from the patient's own words instead`,
-        );
-        return untranslated;
-      }
-
-      this.logger.log(
-        `translated a "${language}" utterance for extraction in ${result.latencyMs}ms`,
-      );
-      return { text: result.englishText, translated: !result.passthrough };
-    } catch (error) {
-      // The provider contract says this cannot happen. The contract is not a
-      // reason to let a background promise reject if it ever does.
-      this.logger.error(
-        `translation threw for a "${language}" utterance: ${
-          error instanceof Error ? error.message : 'unknown'
-        }`,
-      );
-      return untranslated;
-    }
-  }
-
-  /**
-   * Choose the next question and record that it was asked.
-   *
-   * The assistant turn is written before the response goes out, so a client
-   * that drops the reply and re-reads the session gets the same question back
-   * rather than skipping one. That is also why `describeSession` reads the
-   * current question off the turn log instead of re-running the selector: the
-   * selector would see the field it just asked sitting in `pending` and move on.
-   */
   private async askNext(
     session: CaseSession,
     state: ClinicalState,
+    /**
+     * What just happened, so the question can be led into rather than fired.
+     *
+     * Omitted by callers with nothing to acknowledge — the opening question of
+     * an interview, and `answerAside`, where the patient has already been
+     * answered and the question is being repeated rather than introduced.
+     */
+    lead?: {
+      presence: FactPresence | null;
+      previousSection: SectionKey | null;
+      safetyFired: boolean;
+    },
   ): Promise<{ question: NextQuestionView | null; state: ClinicalState }> {
     const selected = selectNext(state);
     if (!selected) return { question: null, state };
@@ -2107,12 +1955,32 @@ export class CaseTakingService {
     // this handler is a few milliseconds plus the database round trips; a
     // per-turn translation would be eight to twenty seconds of it, sixty times
     // an interview, and nobody would have read the question it produced.
-    const prompt = selected.fallbackPrompt;
+    // The two or three words in front of the question — an acknowledgement of
+    // the answer just given, and a lead-in when the subject changes. Checked-in
+    // phrasebook copy in the session's own language, so it is the same class of
+    // text as the question itself and travels the same way. See
+    // `engine/conversation.ts` for why it is not a model.
+    const opener = lead
+      ? leadFor({
+          presence: lead.presence,
+          previousSection: lead.previousSection,
+          nextSection: selected.field.section,
+          language: state.language,
+          // The revision counts questions asked, which is exactly the "how far
+          // in are we" this needs to vary the wording without randomness.
+          turnIndex: state.revision,
+          safetyFired: lead.safetyFired,
+        })
+      : '';
+
+    const prompt = joinSpoken(opener, selected.fallbackPrompt);
 
     await this.repository.appendTurn(session.id, {
       role: 'assistant',
       section: selected.field.section,
       fieldKey: selected.field.key,
+      // What was actually put to the patient, opener and all. A clinician
+      // reading the log back sees the interview as it was conducted.
       questionText: prompt,
     });
 
@@ -2124,7 +1992,10 @@ export class CaseTakingService {
         kind: selected.field.kind,
         choices: selected.field.choices,
         prompt,
-        spokenPrompt: spokenPhrasingFor(selected.field, state.language),
+        spokenPrompt: joinSpoken(
+          opener,
+          spokenPhrasingFor(selected.field, state.language),
+        ),
         remaining: selected.remaining,
       },
       // `markAsked` rather than the selector's combined call, because the turn
@@ -2473,29 +2344,18 @@ function currentQuestionFrom(
  * there. Capped, because a sixty-line menu costs tokens on a model that has
  * few to spare.
  */
-function extractionMenu(
-  state: ClinicalState,
-  askedFieldPath?: string,
-): readonly FieldDefinition[] {
-  const unanswered = fieldsFor(state).filter(
-    (field) => readFactAt(state, field.key).presence === 'not_assessed',
-  );
-  const applicable = new Set(applicableFields(state).map((field) => field.key));
-
-  const ordered = unanswered.slice().sort((a, b) => {
-    // Applicable fields first — they are what the interview is about to ask —
-    // then the selector's own order, so the menu and the interview agree.
-    const byApplicable =
-      Number(applicable.has(b.key)) - Number(applicable.has(a.key));
-    return byApplicable !== 0 ? byApplicable : compareFields(a, b);
-  });
-
-  const menu = ordered.slice(0, EXTRACTION_MENU_SIZE);
-  if (askedFieldPath && !menu.some((field) => field.key === askedFieldPath)) {
-    const asked = ordered.find((field) => field.key === askedFieldPath);
-    if (asked) menu.push(asked);
-  }
-  return menu;
+/**
+ * An opener and a question, as one thing said.
+ *
+ * A plain join, because every part is a finished sentence with its own
+ * punctuation — "Alright." and "Now about your health in the past." and the
+ * question. Nothing here builds a sentence out of fragments: word order is the
+ * first thing a translation moves, and a line assembled at a call site is a
+ * line that cannot be re-ordered.
+ */
+function joinSpoken(opener: string, question: string): string {
+  const lead = opener.trim();
+  return lead.length > 0 ? `${lead} ${question.trim()}` : question;
 }
 
 /** `markAsked` throws on a malformed path; a question we just chose cannot be one. */
