@@ -43,6 +43,20 @@ interface PlacedBlock {
 }
 
 /**
+ * One printed row, rendered.
+ *
+ * The single definition of how a row becomes a string, used by both
+ * [readPageText] and [readDocumentLines]. The two must agree byte for byte:
+ * `confidence.ts` grounds a value by asking whether it appears in the text
+ * `readPageText` produced, and the rules extractor only ever emits slices of a
+ * [DocumentLine.text]. If these two ever rendered a row differently, every
+ * rules-extracted value on that row would read as ungrounded.
+ */
+function rowText(row: OcrBlock[]): string {
+  return row.map((block) => block.text.trim()).join('\t');
+}
+
+/**
  * The page's text in reading order, rows tab-separated.
  *
  * Falls back to the engine's own ordering when the blocks carry no usable
@@ -53,9 +67,7 @@ interface PlacedBlock {
 export function readPageText(page: OcrPage): string {
   const rows = groupIntoRows(page.blocks);
   if (rows.length === 0) return page.text ?? '';
-  return rows
-    .map((row) => row.map((block) => block.text.trim()).join('\t'))
-    .join('\n');
+  return rows.map(rowText).join('\n');
 }
 
 /** Every page of a document, separated so a citation can name a page. */
@@ -67,6 +79,138 @@ export function readDocumentText(pages: OcrPage[]): string {
         : readPageText(page),
     )
     .join('\n\n');
+}
+
+/**
+ * One cell of a printed line — a single recogniser block, with what it knew.
+ *
+ * `confidence` and `left` are the two things `readPageText` throws away and the
+ * rules extractor cannot work without: the first is the only honest input to a
+ * medication's `uncertain` flag (a measurement of the pixels the name came
+ * from, not a model's opinion of itself), and the second is what tells a lab
+ * table's columns apart and what attaches an indented continuation line to the
+ * drug above it.
+ */
+export interface LineCell {
+  /** Verbatim, trimmed. Never normalised — see [DocumentLine.text]. */
+  text: string;
+  /** The recogniser's score for this block. 1 when it did not say. */
+  confidence: number;
+  /** Left edge in page pixels. Null for text-derived lines, which have no boxes. */
+  left: number | null;
+}
+
+/**
+ * A printed line, with the geometry that proves it was one.
+ *
+ * The rules extractor's input. Every value it emits is a contiguous slice of
+ * some line's [text], which is what makes the whole deterministic path
+ * grounded by construction rather than by checking.
+ */
+export interface DocumentLine {
+  /** 1-based. */
+  page: number;
+  /** 0-based within the page. With [page], the key a rule claims. */
+  index: number;
+  cells: LineCell[];
+  /** Cells tab-joined — byte-identical to this row inside [readPageText]. */
+  text: string;
+  /**
+   * The *minimum* cell confidence, not the mean.
+   *
+   * A line is as legible as its worst word. Averaging lets six crisp cells
+   * carry one garbled drug name over any threshold, and the garbled one is
+   * precisely the cell worth escalating over.
+   */
+  confidence: number;
+  /** Top edge and height in page pixels; null for text-derived lines. */
+  top: number | null;
+  height: number | null;
+}
+
+/** A block's confidence, defaulting to "it did not say" rather than to zero. */
+function blockConfidence(block: OcrBlock): number {
+  return typeof block.confidence === 'number' &&
+    Number.isFinite(block.confidence)
+    ? block.confidence
+    : 1;
+}
+
+/** One page as lines, with geometry when the blocks carried any. */
+function pageLines(page: OcrPage, pageNumber: number): DocumentLine[] {
+  const rows = groupIntoRows(page.blocks);
+  if (rows.length === 0) return linesFromText(page.text ?? '', pageNumber);
+
+  return rows.map((row, index) => {
+    const cells: LineCell[] = row.map((block) => {
+      const xs = (block.box ?? []).map((point) => point?.[0]);
+      const usable = xs.length > 0 && xs.every((x) => typeof x === 'number');
+      return {
+        text: block.text.trim(),
+        confidence: blockConfidence(block),
+        left: usable ? Math.min(...xs) : null,
+      };
+    });
+
+    const ys = row
+      .flatMap((block) => (block.box ?? []).map((point) => point?.[1]))
+      .filter((y): y is number => typeof y === 'number');
+
+    return {
+      page: pageNumber,
+      index,
+      cells,
+      text: rowText(row),
+      confidence: cells.reduce(
+        (lowest, cell) => Math.min(lowest, cell.confidence),
+        1,
+      ),
+      top: ys.length > 0 ? Math.min(...ys) : null,
+      height: ys.length > 0 ? Math.max(...ys) - Math.min(...ys) : null,
+    };
+  });
+}
+
+/**
+ * Every page of a document as lines. The rules extractor's input.
+ *
+ * Page-numbered rather than flattened, because §16 wants a citation to name a
+ * page and because a coverage metric that cannot tell page 1 line 4 from page 2
+ * line 4 counts the same line twice.
+ */
+export function readDocumentLines(pages: OcrPage[]): DocumentLine[] {
+  return pages.flatMap((page, index) => pageLines(page, index + 1));
+}
+
+/**
+ * Lines from a plain string, for text that never had boxes.
+ *
+ * Two callers: the §9 vision fallback, whose transcript is a model's prose and
+ * carries no coordinates, and every spec in `rules/`, which is why this exists
+ * as an export rather than a private helper — it lets a test fixture be a
+ * template literal with tabs for cell boundaries instead of a hand-built pile
+ * of `OcrBlock`s.
+ *
+ * `confidence` is 1 and `left`/`top` are null: unknown, never low. Anything
+ * downstream that treats a null coordinate as a measurement would be reading a
+ * fact out of the absence of one.
+ */
+export function linesFromText(text: string, page = 1): DocumentLine[] {
+  return text.split('\n').map((line, index) => {
+    const cells: LineCell[] = line
+      .split('\t')
+      .map((cell) => ({ text: cell.trim(), confidence: 1, left: null }));
+
+    return {
+      page,
+      index,
+      cells,
+      text: cells.map((cell) => cell.text).join('\t'),
+      confidence: 1,
+      top: null,
+      height: null,
+    };
+  });
 }
 
 /** Blocks gathered into printed lines, top to bottom, each left to right. */

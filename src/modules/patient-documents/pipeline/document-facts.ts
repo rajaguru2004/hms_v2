@@ -213,23 +213,59 @@ function dropDenials(items: string[]): string[] {
  */
 export function describeFacts(
   facts: DocumentFacts,
+  /**
+   * Topics nothing actually read — because the rule set for this document type
+   * does not cover them and no model ran.
+   *
+   * §19 arrives by a new door once a deterministic reader goes first. "This
+   * document does not mention allergies" is a sentence about the document, and
+   * a rule set with no allergy pattern has not established it — it has
+   * established only that it did not look. Printed anyway, it is the same
+   * false "no" the rest of this file exists to prevent, manufactured out of a
+   * blind spot rather than out of an empty array.
+   */
+  unread?: ReadonlySet<FactTopic>,
 ): Record<
   FactTopic,
-  { presence: FactPresence; label: string; values: string[] }
+  { presence: FactPresence; label: string; values: string[]; read: boolean }
 > {
   const described = {} as Record<
     FactTopic,
-    { presence: FactPresence; label: string; values: string[] }
+    { presence: FactPresence; label: string; values: string[]; read: boolean }
   >;
 
   for (const topic of Object.keys(facts) as FactTopic[]) {
     const fact = facts[topic];
+
+    // Only `not_assessed` is relabelled. `recorded` means something was found,
+    // so the topic plainly was read; and `assertedNone` comes from
+    // `statesAbsence`, which is a finding about the *page* — "NKDA is printed
+    // here" stays true whether or not any rule parsed the section.
+    const wasRead = !(unread?.has(topic) && fact.presence === 'not_assessed');
+
     described[topic] = {
       presence: fact.presence,
-      label: presenceLabel(fact.presence, LABELS[topic]),
+      label: wasRead
+        ? presenceLabel(fact.presence, LABELS[topic])
+        : UNREAD_LABELS[topic],
       values: fact.presence === 'recorded' ? fact.value : [],
+      read: wasRead,
     };
   }
 
   return described;
 }
+
+/**
+ * What to say about a topic nothing looked at.
+ *
+ * Never "does not mention". Every sentence here is about us rather than about
+ * the document, which is the only honest thing to say when nobody read it.
+ */
+const UNREAD_LABELS: Record<FactTopic, string> = {
+  allergies: 'We have not read the allergy information on this document',
+  medications: 'We have not read the medicines on this document',
+  diagnoses: 'We have not read the diagnosis on this document',
+  procedures: 'We have not read the procedures on this document',
+  investigations: 'We have not read the test results on this document',
+};

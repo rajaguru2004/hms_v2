@@ -36,12 +36,12 @@ import {
 import { readExistingRecord } from './pipeline/contradictions';
 import { DocumentPipelineService } from './pipeline/document-pipeline.service';
 import { documentSha256, findTextDuplicate } from './pipeline/duplicates';
+import { LEGACY_EXTRACTION_METHOD } from './pipeline/extraction-method';
 import {
-  AWAITING_REVIEW,
   CORRECTION_RECORDED,
   DUPLICATE_DOCUMENT,
   DUPLICATE_OF_UNREADABLE,
-  NOTHING_EXTRACTED,
+  extractionMessage,
   PROCESSING,
   UNREADABLE_DOCUMENT,
   UNSUPPORTED_FILE,
@@ -324,6 +324,11 @@ export class PatientDocumentsService {
         docType: outcome.docType,
         ocrConfidence: outcome.ocrConfidence,
         extractionConfidence: outcome.extractionConfidence,
+        // Which reader produced it, beside the two existing "which path ran"
+        // facts. Without it, a run of thin extractions cannot be told apart
+        // from a run where the model was simply switched off.
+        extractionMethod: outcome.extractionMethod,
+        extractionPartial: outcome.extractionPartial,
         visionFallbackUsed: outcome.visionFallbackUsed,
         duplicateOfId: textDuplicate?.duplicateOfId,
       },
@@ -971,15 +976,51 @@ export function messageFor(document: {
       ) {
         return CORRECTION_RECORDED;
       }
-      return hasFindings(document.extraction)
-        ? AWAITING_REVIEW
-        : NOTHING_EXTRACTED;
+      return sentenceFor(document.extraction);
     default:
       // A stored `failureReason` is already a sentence — the column exists for
       // exactly this and nothing else writes to it. The fallback is for a row
       // that failed before the pipeline could write one.
       return document.failureReason ?? UNREADABLE_DOCUMENT;
   }
+}
+
+/**
+ * The stored envelope's own sentence, re-derived on read.
+ *
+ * This used to choose from `hasFindings` alone, and that was a real defect
+ * rather than a simplification: `failureReason` is deliberately null for a
+ * `needs_review` row, so the pipeline's careful choice between "nobody looked"
+ * and "we looked and found nothing" was computed, stored nowhere, and replaced
+ * on the very next GET by whichever of the two the findings implied. A
+ * document whose extraction never ran came back to the patient as though it
+ * had been read and found to contain no medicines — the §19 failure
+ * `messages.ts` is built around, arriving by the read path.
+ *
+ * Defensive about shape because it is parsing a JSON column: a row written
+ * before the deterministic reader existed carries no `extractionMethod`, and
+ * `model` is what it was.
+ */
+function sentenceFor(extraction: unknown): string {
+  const envelope =
+    typeof extraction === 'object' && extraction !== null
+      ? (extraction as Record<string, unknown>)
+      : {};
+
+  const stored = envelope.extractionMethod;
+  const method =
+    stored === 'rules' || stored === 'model' || stored === 'rules_then_model'
+      ? stored
+      : stored === 'none'
+        ? 'none'
+        : LEGACY_EXTRACTION_METHOD;
+
+  return extractionMessage({
+    method,
+    partial: envelope.extractionPartial === true,
+    failed: envelope.extractionFailed === true,
+    hasFindings: hasFindings(extraction),
+  });
 }
 
 function hasFindings(extraction: unknown): boolean {

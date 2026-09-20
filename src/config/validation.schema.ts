@@ -69,6 +69,41 @@ export const validationSchema = Joi.object({
   // model releases the request, not to make the call fast.
   AI_TIMEOUT_MS: Joi.number().default(90000),
 
+  // Whether the medical-document pipeline may call a language model at all.
+  //
+  // Separate from AI_ENABLED because the two answer different questions. That
+  // one is the platform's master switch: it also gates `SidecarClient`, whose
+  // Whisper and Piper models are CPU-capable and are what make the voice
+  // interview work. Turning AI_ENABLED off to spare a GPU-less box the cost of
+  // a language model takes speech-to-text and text-to-speech down with it, for
+  // a saving that this flag makes on its own.
+  //
+  // Document OCR is NOT affected by either flag, and the asymmetry is worth
+  // knowing rather than discovering. The document pipeline reads through
+  // `SidecarOcrClient`, which has its own `MEDIHIVE_SIDECAR_URL` and no enable
+  // gate; `SidecarClient` — the gated one — is used only by case-taking. So a
+  // box with every AI flag off still OCRs uploaded documents and still parses
+  // them deterministically. That is the degradation this design is for.
+  //
+  // Off, the pipeline runs deterministic extraction alone: `rules-extractor.ts`
+  // reads a printed prescription or lab report end to end with no model, and
+  // says on the row how much of the page it accounted for. It does not fail,
+  // and it does not claim to have read what it did not — the envelope carries
+  // `extractionMethod` and `escalation.modelEnabled` so that "switched off
+  // here" stays distinguishable from "tried and broke" a month later.
+  MEDIHIVE_DOCUMENT_LLM_ENABLED: Joi.string()
+    .valid('true', 'false')
+    .default('true'),
+
+  // The §9 vision fallback, separately, and the first thing to turn off on a
+  // box with no accelerator. It is the most expensive call in the feature —
+  // the whole page as pixels through a 4B model — and unlike text extraction
+  // there is no deterministic path behind it, so on a GPU-less box it buys a
+  // minutes-long spinner and then a transcript nobody should store anyway.
+  MEDIHIVE_DOCUMENT_VISION_ENABLED: Joi.string()
+    .valid('true', 'false')
+    .default('true'),
+
   // Whether an unreviewed question translation may be spoken to a patient.
   //
   // Declared here so it is documented in one place and so a misspelt value is a

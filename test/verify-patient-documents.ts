@@ -23,6 +23,21 @@ import { Pool } from 'pg';
  * about five seconds of OCR and fifteen to seventy of the model, so the polls
  * below wait minutes rather than seconds — slow is not the same as broken.
  *
+ * **Run it a second time with the model off.** This is the pass that proves
+ * the GPU-less deployment, and it has to be a separate run rather than a
+ * section below: the flags are read when `DocumentPipelineService` is
+ * constructed, so they belong to the server process, not to this script.
+ *
+ *   MEDIHIVE_DOCUMENT_LLM_ENABLED=false npm run start:dev
+ *   npm run verify:patient-documents
+ *
+ * Everything below should still pass, with three differences worth watching in
+ * the output: `extraction.extractionMethod` reads `rules` rather than `model`
+ * or `rules_then_model`, `confidence.extractionSource` reads `rule_coverage`
+ * rather than `grounding`, and Ollama's logs stay silent for the whole run.
+ * The prescription's three drugs and the report's seven investigations are
+ * expected either way — that is the point of the deterministic reader.
+ *
  * The fixtures come from `test/fixtures/generate-documents.py`. The prescription
  * is the important one and it is important for what it does *not* have: no
  * allergy section, so "not found must never become no" can be watched rather
@@ -152,6 +167,10 @@ interface Provenance {
   documentId: string;
   verification: string;
   ocrConfidence: number | null;
+  /** Which reader produced this value: the rules, or the model. */
+  producedBy: string;
+  /** The named rule, for the deterministic path. Null for model values. */
+  rule: string | null;
 }
 
 interface DocumentFact {
@@ -177,6 +196,22 @@ interface ExtractionEnvelope {
     ocrSource: string;
     extraction: number | null;
     extractionSource: string;
+    grounding: number | null;
+    ruleCoverage: number | null;
+  };
+  extractionMethod?: string;
+  extractionPartial?: boolean;
+  escalation?: {
+    reasons: string[];
+    modelEnabled: boolean;
+    modelRan: boolean;
+    modelFailed: boolean;
+  };
+  coverage?: {
+    ruleSet: string;
+    requiredSatisfaction: number;
+    lineClaim: number;
+    score: number;
   };
   verificationStatus: string;
 }
@@ -1044,41 +1079,63 @@ async function main(): Promise<void> {
     `${String(prescription.ocrConfidence)} (${extraction.confidence.ocrSource})`,
   );
   check(
-    'the extraction carries a separate number, marked as derived here',
+    'the extraction carries a separate number, and says which scale it is on',
     typeof prescription.extractionConfidence === 'number' &&
       extraction.confidence.extraction === prescription.extractionConfidence &&
-      extraction.confidence.extractionSource === 'derived',
+      ['grounding', 'rule_coverage'].includes(
+        extraction.confidence.extractionSource,
+      ),
     `${String(prescription.extractionConfidence)} (${
       extraction.confidence.extractionSource
     })`,
   );
   check(
-    'they are stored as two fields, never blended into one score',
+    'they are stored as separate fields, never blended into one score',
     Object.keys(extraction.confidence).sort().join(',') ===
-      'extraction,extractionSource,ocr,ocrSource',
+      'extraction,extractionSource,grounding,ocr,ocrSource,ruleCoverage',
     Object.keys(extraction.confidence).join(','),
   );
 
-  // The derivation, recomputed: extraction confidence is the share of extracted
-  // values found verbatim in the source text. If it were the model's own
-  // number, this arithmetic would not land on it.
-  const grounded = extraction.sources.filter(
-    (source) => source.grounded,
-  ).length;
-  const derived =
-    extraction.sources.length > 0 ? grounded / extraction.sources.length : null;
-  check(
-    'and the extraction number is the evidence, recomputed from the provenance',
-    derived !== null &&
-      Math.abs((prescription.extractionConfidence ?? -1) - derived) < 0.01,
-    `${grounded}/${extraction.sources.length} = ${String(derived)} vs stored ${String(
-      prescription.extractionConfidence,
-    )}`,
+  // The derivation, recomputed. Which arithmetic to check depends on which
+  // reader produced the extraction, and `extractionSource` is the only thing
+  // that says: grounding counts model values found verbatim in the source
+  // text, while rule coverage measures how much of the page the deterministic
+  // reader accounted for. Checking the wrong one of the two proves nothing —
+  // rules values ground by construction and always score 1.0.
+  const modelValues = extraction.sources.filter(
+    (source) => source.producedBy === 'model',
   );
+  const grounded = modelValues.filter((source) => source.grounded).length;
+  const derived = modelValues.length > 0 ? grounded / modelValues.length : null;
+
+  if (extraction.confidence.extractionSource === 'grounding') {
+    check(
+      'and the extraction number is the evidence, recomputed from the provenance',
+      derived !== null &&
+        Math.abs((prescription.extractionConfidence ?? -1) - derived) < 0.01,
+      `${grounded}/${modelValues.length} = ${String(derived)} vs stored ${String(
+        prescription.extractionConfidence,
+      )}`,
+    );
+  } else {
+    check(
+      'and the extraction number is the coverage the rules reported',
+      extraction.coverage !== undefined &&
+        Math.abs(
+          (prescription.extractionConfidence ?? -1) - extraction.coverage.score,
+        ) < 0.01,
+      `coverage ${String(extraction.coverage?.score)} vs stored ${String(
+        prescription.extractionConfidence,
+      )}`,
+    );
+  }
+
   note(
     `ocr ${String(prescription.ocrConfidence)} (measured) · ` +
-      `extraction ${String(prescription.extractionConfidence)} (derived from ` +
-      `${grounded}/${extraction.sources.length} grounded values)`,
+      `extraction ${String(prescription.extractionConfidence)} ` +
+      `(${extraction.confidence.extractionSource}) · ` +
+      `read by ${String(extraction.extractionMethod)} · ` +
+      `${grounded}/${modelValues.length} model values grounded`,
   );
 
   check(

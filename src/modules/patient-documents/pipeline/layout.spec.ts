@@ -1,8 +1,19 @@
 import { OcrBlock, OcrPage } from '../ocr/sidecar-ocr.client';
-import { groupIntoRows, readPageText } from './layout';
+import {
+  groupIntoRows,
+  linesFromText,
+  readDocumentLines,
+  readPageText,
+} from './layout';
 
 /** A recognised region, given a bounding box by its row and column. */
-function block(text: string, top: number, left: number, height = 30): OcrBlock {
+function block(
+  text: string,
+  top: number,
+  left: number,
+  height = 30,
+  confidence = 0.98,
+): OcrBlock {
   const right = left + Math.max(40, text.length * 12);
   return {
     text,
@@ -12,7 +23,7 @@ function block(text: string, top: number, left: number, height = 30): OcrBlock {
       [right, top + height],
       [left, top + height],
     ],
-    confidence: 0.98,
+    confidence,
   };
 }
 
@@ -86,5 +97,101 @@ describe('reading order from coordinates', () => {
     expect(readPageText(transcribed)).toBe(
       'PRESCRIPTION\nTab. METFORMIN 500 mg',
     );
+  });
+});
+
+describe('lines, for the rules extractor', () => {
+  const table = page([
+    block('Haemoglobin', 400, 90),
+    block('11.2', 400, 600),
+    block('g/dL', 400, 800),
+    block('13.0 - 17.0', 400, 980),
+    block('Total WBC Count', 444, 90),
+    block('8400', 444, 600),
+  ]);
+
+  it('renders a line exactly as readPageText renders that row', () => {
+    // The invariant the whole deterministic path rests on. `confidence.ts`
+    // grounds a value against readPageText's output, and every rules value is
+    // a slice of a line's `text`. If these two ever disagreed, correctly-read
+    // values would be reported as invented.
+    const lines = readDocumentLines([table]);
+
+    expect(lines.map((line) => line.text).join('\n')).toBe(readPageText(table));
+  });
+
+  it('carries the column geometry that readPageText throws away', () => {
+    const [first] = readDocumentLines([table]);
+
+    expect(first.cells.map((cell) => cell.text)).toEqual([
+      'Haemoglobin',
+      '11.2',
+      'g/dL',
+      '13.0 - 17.0',
+    ]);
+    expect(first.cells.map((cell) => cell.left)).toEqual([90, 600, 800, 980]);
+    expect(first.page).toBe(1);
+    expect(first.index).toBe(0);
+  });
+
+  it('takes the worst cell confidence, not the mean', () => {
+    // A line is as legible as its worst word. Averaging lets three crisp cells
+    // carry one garbled drug name over any threshold — and the garbled one is
+    // exactly the cell worth escalating over.
+    const [line] = readDocumentLines([
+      page([
+        block('Tab.', 100, 90, 30, 0.99),
+        block('METF0RM1N', 100, 200, 30, 0.42),
+        block('500 mg', 100, 500, 30, 0.97),
+      ]),
+    ]);
+
+    expect(line.confidence).toBe(0.42);
+  });
+
+  it('numbers pages, so a citation can name one', () => {
+    const lines = readDocumentLines([
+      page([block('page one', 100, 90)]),
+      page([block('page two', 100, 90)]),
+    ]);
+
+    expect(lines.map((line) => [line.page, line.index])).toEqual([
+      [1, 0],
+      [2, 0],
+    ]);
+  });
+
+  it('splits text into cells on tabs, for fixtures and vision transcripts', () => {
+    const lines = linesFromText('Patient:\tRamesh Kumar\nDate:\t12/09/2026');
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0].cells.map((cell) => cell.text)).toEqual([
+      'Patient:',
+      'Ramesh Kumar',
+    ]);
+    expect(lines[1].text).toBe('Date:\t12/09/2026');
+  });
+
+  it('reports an absent coordinate as unknown, never as low', () => {
+    // A transcript has no boxes. Reading a measurement out of that absence is
+    // how "we could not tell" becomes "we measured it and it was bad".
+    const [line] = linesFromText('Tab. METFORMIN 500 mg');
+
+    expect(line.confidence).toBe(1);
+    expect(line.top).toBeNull();
+    expect(line.cells[0].left).toBeNull();
+  });
+
+  it('falls back to the engine order when a page has no coordinates', () => {
+    const transcribed: OcrPage = {
+      blocks: [],
+      text: 'PRESCRIPTION\nTab. METFORMIN 500 mg',
+      meanConfidence: 0,
+    };
+
+    expect(readDocumentLines([transcribed]).map((line) => line.text)).toEqual([
+      'PRESCRIPTION',
+      'Tab. METFORMIN 500 mg',
+    ]);
   });
 });

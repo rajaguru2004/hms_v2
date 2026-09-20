@@ -349,6 +349,8 @@ describe('processing', () => {
     pageCount: 1,
     extraction: null,
     extractionConfidence: 0.91,
+    extractionMethod: 'rules_then_model' as const,
+    extractionPartial: false,
     visionFallbackUsed: false,
     message: AWAITING_REVIEW,
   };
