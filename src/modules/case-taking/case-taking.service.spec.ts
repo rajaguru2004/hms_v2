@@ -471,14 +471,112 @@ describe('CaseTakingService', () => {
         fieldPath: 'chief_complaint.symptom',
         text: 'chest pain',
       });
+      // Answered in words the field can actually read. This used to say "three
+      // days" against a boolean, which is a *failed* answer rather than an
+      // answered question — and so tested the wrong thing: it passed because
+      // the field was retired while still pending, which is the bug in
+      // `awaiting_extraction` below rather than the behaviour named here.
       const second = await answer(h, 'sess-1', {
         fieldPath: first.nextQuestion!.fieldPath,
-        text: 'three days',
+        text: 'no',
       });
 
+      expect(second.accepted.presence).not.toBe('not_assessed');
       expect(second.nextQuestion?.fieldPath).not.toBe(
         first.nextQuestion?.fieldPath,
       );
+    });
+
+    /**
+     * ─────────────────────────────────────────────────────────────────────
+     * An answer the field cannot read puts the question back
+     *
+     * Measured on a live voice session, 2026-09-20 20:26-20:28. The patient
+     * answered `allergies.reported` with something the field could not read;
+     * the field had been marked pending when it was asked and nothing cleared
+     * it, so `askableFields` skipped it, nothing else was askable, and the API
+     * answered `interviewStatus: awaiting_extraction` with `nextQuestion:
+     * null` — three turns running. The voice worker logged "engine returned
+     * nothing to say" each time and said nothing at all. From the patient's
+     * side the interview simply stopped.
+     *
+     * `pending` used to mean "gemma3:4b is reading this, do not ask again
+     * while it works". Extraction is gone, so nothing was ever coming back to
+     * clear it.
+     * ─────────────────────────────────────────────────────────────────────
+     */
+    describe('an answer the field cannot read', () => {
+      it('asks the question again rather than going quiet', async () => {
+        const h = harness();
+        h.repo.seedSession();
+
+        const first = await answer(h, 'sess-1', {
+          fieldPath: 'chief_complaint.symptom',
+          text: 'chest pain',
+        });
+        const asked = first.nextQuestion!.fieldPath;
+
+        const second = await answer(h, 'sess-1', {
+          fieldPath: asked,
+          // A duration against a yes/no question: readable as words, not as
+          // this field's answer.
+          text: 'three days',
+        });
+
+        expect(second.accepted.presence).toBe('not_assessed');
+        expect(second.nextQuestion).not.toBeNull();
+        expect(second.nextQuestion?.fieldPath).toBe(asked);
+        expect(second.interviewStatus).toBe('ready');
+      });
+
+      it('never leaves the patient with no question and no reason', async () => {
+        const h = harness();
+        h.repo.seedSession();
+
+        const first = await answer(h, 'sess-1', {
+          fieldPath: 'chief_complaint.symptom',
+          text: 'chest pain',
+        });
+
+        let asked = first.nextQuestion!.fieldPath;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const result = await answer(h, 'sess-1', {
+            fieldPath: asked,
+            text: 'three days',
+          });
+          // The failure being pinned is `nextQuestion: null` with the
+          // interview neither finished nor waiting on anything real.
+          expect(result.nextQuestion).not.toBeNull();
+          asked = result.nextQuestion!.fieldPath;
+        }
+      });
+
+      it('moves on rather than asking one question forever', async () => {
+        const h = harness();
+        h.repo.seedSession();
+
+        const first = await answer(h, 'sess-1', {
+          fieldPath: 'chief_complaint.symptom',
+          text: 'chest pain',
+        });
+        const stuck = first.nextQuestion!.fieldPath;
+
+        const asked: string[] = [];
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const result = await answer(h, 'sess-1', {
+            fieldPath: stuck,
+            text: 'three days',
+          });
+          asked.push(result.nextQuestion?.fieldPath ?? '(none)');
+        }
+
+        // MAX_ASKS_PER_FIELD is 3: the original plus two more goes at it. Past
+        // that the field stays pending and the interview carries on, which is
+        // what stops a recogniser that mangles everything from pinning the
+        // patient to one sentence.
+        expect(asked.filter((path) => path === stuck).length).toBeLessThan(5);
+        expect(asked).toContain(stuck);
+      });
     });
 
     it('files the answer against the last question asked when the client names none', async () => {

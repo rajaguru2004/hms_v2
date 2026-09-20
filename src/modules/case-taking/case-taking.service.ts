@@ -559,6 +559,44 @@ export class CaseTakingService {
       derivation = applied.derivation;
       factId = applied.factId;
 
+      // ── An unreadable answer puts the question back ─────────────────────
+      //
+      // `markAsked` files a field under `state.pending` the moment it is put to
+      // the patient, and `askableFields` skips everything pending. That was
+      // right when `pending` meant "gemma3:4b is reading this answer, do not
+      // ask again while it works": the extraction came back seconds later and
+      // cleared it.
+      //
+      // Extraction is gone. `markPending` has no callers left and
+      // `extraction.queued` is hard-coded false, so `pending` now means only
+      // "asked, and not yet answered readably" — and nothing is in flight to
+      // clear it. A `not_assessed` derivation therefore retired the question
+      // instead of repeating it, which is the opposite of what
+      // `acknowledgementFor` in engine/conversation.ts already says happens:
+      //
+      //   `not_assessed` means the answer was not readable and the question is
+      //   about to be asked again
+      //
+      // Measured on a live voice session, 2026-09-20 20:26-20:28: the patient
+      // answered `allergies.reported` with something the field could not read,
+      // the field stayed pending, nothing else was askable, and
+      // `interviewStatus` answered `awaiting_extraction` with `nextQuestion:
+      // null` for three turns running. The worker logged "engine returned
+      // nothing to say" each time and said nothing. From the patient's side the
+      // interview simply stopped, with a question still on the screen, and only
+      // `releaseLostExtractions`' two-minute wall clock would ever have ended
+      // it.
+      //
+      // So the field goes back in the queue and the selector asks it again,
+      // which is what a person does when an answer did not make sense.
+      if (
+        answeredPath &&
+        derivation.presence === 'not_assessed' &&
+        timesAsked(loaded.turns, answeredPath) < MAX_ASKS_PER_FIELD
+      ) {
+        state = clearPending(state, answeredPath);
+      }
+
       // ── The second stage, and the only one that may run after derivation ──
       //
       // `classifyAside` above is a closed list of phrasings and misses anything
@@ -2274,10 +2312,47 @@ function questionCapability(code: string): {
  * A sentence boundary is disqualifying on its own, regardless of length: two
  * sentences are two things said, and the second is rarely about the question.
  */
+/**
+ * How many times one question may be asked before the interview moves on.
+ *
+ * Three: the question, and two more goes at it. The bound exists because the
+ * re-ask above is otherwise unconditional, and a patient whose answers the
+ * field cannot read — a recogniser mangling every utterance, a scale question
+ * answered in words the phrasebook has no entry for — would hear the same
+ * sentence until they gave up.
+ *
+ * Past the bound the field simply stays pending, which is the behaviour that
+ * was there before: `askableFields` skips it, the selector moves to the rest of
+ * the interview, and `expirePending` releases it a couple of questions later so
+ * it can be tried once more with the rest of the section behind it. Nothing is
+ * written to the chart either way — an unreadable answer is `not_assessed` and
+ * files no fact — so the question is left unanswered rather than guessed at.
+ *
+ * The other way out is the one the app draws: a question with `choices` is a
+ * row of tiles, and a tapped tile is `modality: 'choice'`, which needs no
+ * phrase matching and works in every language.
+ */
+const MAX_ASKS_PER_FIELD = 3;
+
 function isShortAnswer(text: string): boolean {
   if (text.length === 0 || text.length > SHORT_ANSWER_CHARS) return false;
   // A trailing full stop is punctuation, not a second sentence.
   return !/[.!?]\s+\S/.test(text);
+}
+
+/**
+ * How many times one question has already been put to the patient.
+ *
+ * Read off the assistant turns rather than counted on the state, because the
+ * state is rebuilt from those turns on every request and carries no memory of
+ * its own.
+ */
+function timesAsked(turns: readonly CaseTurn[], fieldPath: string): number {
+  let asked = 0;
+  for (const turn of turns) {
+    if (turn.role === 'assistant' && turn.fieldKey === fieldPath) asked++;
+  }
+  return asked;
 }
 
 function lastAssistantFieldKey(turns: readonly CaseTurn[]): string | null {

@@ -198,6 +198,32 @@ const ENGLISH: AnswerPhrases = Object.freeze({
     /\bi (have|had) (not|n'?t|never)\b/i,
     /\bhaven'?t (had|got)\b/i,
     /\bthere (is|are|was|were) (no|none)\b/i,
+    // ── Contracted auxiliaries ────────────────────────────────────────────
+    //
+    // The gap that sent real answers to the floor. Until this line the only
+    // contraction in the list was `haven't`, so a patient who said
+    //
+    //   "No, I hadn't had a fever along with this"
+    //
+    // matched nothing. `clausesOf` in harvest.ts splits on the comma, the span
+    // handed to this function is "I hadn't had a fever along with this", the
+    // leading "No" is in a different clause, and `hadn't` was a word this
+    // engine could not read. Measured live on 2026-09-20: the field came back
+    // `not_assessed` / `value_failed_field_shape` and the interview asked about
+    // fever again forty seconds later. Whisper transcribes natural speech, and
+    // natural speech contracts.
+    //
+    // Safe below the uncertainty list rather than above it, which is where the
+    // whole tri-state ordering matters: "I can't remember" and "I don't know"
+    // are matched as uncertainty before this line is ever reached, so a general
+    // `n't` cannot collapse doubt into an asserted no.
+    //
+    // The apostrophe is optional throughout because a recogniser sometimes
+    // drops it, and "didnt" has to read the same as "didn't".
+    /\b(is|are|was|were|has|have|had|do|does|did|would|should|could|must|need)n'?t\b/i,
+    /\b(can'?t|cannot|won'?t|ain'?t)\b/i,
+    /\b(i'?m|you'?re|he'?s|she'?s|it'?s|we'?re|they'?re|that'?s|there'?s)\s+not\b/i,
+    /\bnot (had|having|got|getting|been|taking|on|really)\b/i,
   ],
 
   affirmation: [
@@ -208,6 +234,17 @@ const ENGLISH: AnswerPhrases = Object.freeze({
     /\bi did\b/i,
     /\bthat'?s right\b/i,
     /\bof course\b/i,
+    // The same contraction gap on the other side. "I've been unusually drowsy
+    // for two hours" is an affirmed neurological symptom and it read as nothing
+    // at all, because `\bi have\b` does not match `I've`. Measured in the same
+    // session as the negation case above.
+    //
+    // Each of these requires a following verb rather than matching `I've` or
+    // `I'm` alone: a bare pronoun contraction opens a sentence of any kind, and
+    // this list only means anything for a boolean field.
+    /\bi'?ve (had|got|been|noticed|felt)\b/i,
+    /\bi'?m (having|feeling|getting)\b/i,
+    /^\s*(sure|absolutely|definitely|certainly|indeed)\b/i,
   ],
 
   numberWords: {

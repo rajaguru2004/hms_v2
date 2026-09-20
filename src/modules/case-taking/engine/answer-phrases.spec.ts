@@ -155,3 +155,69 @@ describe('word boundaries that work on a non-Latin script', () => {
     expect(/(?<!\p{L})नहीं(?!\p{L})/u.test('मुझे नहीं है')).toBe(true);
   });
 });
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Contractions, which is how people actually speak
+ *
+ * Every case below is a real transcript from agent.log, session
+ * `case-cmu9lvb6r00045eijv8xe1o2y` on 2026-09-20, and every one of them read as
+ * `not_assessed` / `value_failed_field_shape` before these patterns existed —
+ * a 200 in which the patient's answer was dropped on the floor and the
+ * interview asked the same question again a minute later.
+ *
+ * The mechanism is worth stating because it is not obvious from the phrase
+ * list alone: `clausesOf` in harvest.ts splits an utterance on punctuation, so
+ * "No, I hadn't had a fever along with this" hands this function the span
+ * *after* the comma. The leading "No" is in a different clause and cannot save
+ * it. The span has to stand on its own words, and `hadn't` was a word this
+ * engine could not read.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+describe('English contractions', () => {
+  describe.each([
+    ["I hadn't had a fever along with this", 'hpi.associated.fever'],
+    ["I didn't have any fever", 'hpi.associated.fever'],
+    ["I haven't had shaking chills", 'ros.constitutional.rigors'],
+    ["It wasn't there before", 'hpi.onset'],
+    ["I'm not taking any medicine", 'medications.any_current'],
+    ['I dont have that', 'ros.constitutional.rigors'],
+  ])('%s', (utterance) => {
+    it('reads as an asserted no', () => {
+      expect(read(utterance, BOOLEAN, 'en').presence).toBe('none');
+      expect(read(utterance, BOOLEAN, 'en').reason).toBe('negation_phrase');
+    });
+  });
+
+  describe.each([
+    "I've been unusually drowsy for 2 hours",
+    "I've had chest pain",
+    "I'm feeling dizzy",
+  ])('%s', (utterance) => {
+    it('reads as an asserted yes', () => {
+      const derived = read(utterance, BOOLEAN, 'en');
+      expect(derived.presence).toBe('recorded');
+      expect(derived.value).toBe(true);
+    });
+  });
+
+  /**
+   * The reason a general `n't` is safe to add at all: the uncertainty list is
+   * consulted first, and every one of these contains a contraction that would
+   * otherwise read as an asserted no. A patient who does not know something has
+   * not told us it is absent, and collapsing the two is the single failure this
+   * module exists to prevent.
+   */
+  describe.each([
+    "I can't remember",
+    "I don't know",
+    "I'm not sure",
+    "I don't remember",
+    "I can't say",
+    "I couldn't tell you, no idea",
+  ])('%s', (utterance) => {
+    it('stays not knowing rather than becoming no', () => {
+      expect(read(utterance, BOOLEAN, 'en').presence).toBe('unknown');
+    });
+  });
+});

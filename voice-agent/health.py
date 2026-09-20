@@ -41,6 +41,15 @@ class WorkerStatus:
     turns: int = 0
     interims: int = 0
     interruptions: int = 0
+    # Questions whose audio was cut off before the patient could have heard
+    # them. Distinct from `interruptions`, which counts every barge-in: this
+    # one counts only the ones early enough that the next answer cannot be
+    # treated as an answer to that question.
+    unheard_questions: int = 0
+    # Finals the library never closed a turn for, posted by the watchdog
+    # instead. Should be zero; anything else means the end-of-turn commit is
+    # being lost and the backstop in agent.py is carrying the interview.
+    uncommitted_turns: int = 0
     # How many times the audio input had to be moved to a reconnecting phone.
     # Nonzero means patients are dropping and coming back, which is a network
     # story an operator otherwise has no way to see.
@@ -64,6 +73,8 @@ class WorkerStatus:
             # Barge-ins. livekit-agents does not log these, so the worker times
             # each `say()` against the audio it handed over. See agent.py.
             "interruptions": self.interruptions,
+            "unheardQuestions": self.unheard_questions,
+            "uncommittedTurns": self.uncommitted_turns,
             "participantRelinks": self.relinks,
             "agentState": self.agent_state,
             "lastError": self.last_error,

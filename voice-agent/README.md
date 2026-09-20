@@ -61,22 +61,24 @@ staying out of it is the easy path:
 
 ## Files
 
-| File                       | What it is                                                                             |
-| -------------------------- | -------------------------------------------------------------------------------------- |
-| `agent.py`                 | The worker: entrypoint, `AgentSession`, the turn loop                                  |
-| `stt_adapter.py`           | faster-whisper over HTTP, presented to LiveKit as a streaming STT with interim results |
-| `sidecar.py`               | `/stt` and `/tts` client; passes the language refusals through                         |
-| `engine.py`                | `/turns` client; the clinical boundary                                                 |
-| `audio.py`                 | WAV ↔ `rtc.AudioFrame`, and the sample rates at each hop                               |
-| `config.py`                | Every environment variable, with redaction for secrets                                 |
-| `health.py`                | `GET /healthz` — connected, models, RSS                                                |
-| `httpclient.py`            | One shared SSL context, built off the event loop                                       |
-| `run.ps1`                  | Launcher, mirroring `ai-sidecar/run.ps1`                                               |
-| `tools/selftest.py`        | Everything except LiveKit, in one pass                                                 |
-| `tools/speak_into_room.py` | A fake patient that speaks into a real room                                            |
-| `tools/mint_token.py`      | A development LiveKit token                                                            |
-| `tools/fake_engine.py`     | A contract-shaped stand-in for Nest                                                    |
-| `tools/verify_imports.py`  | Post-install check across **both** venvs                                               |
+| File                       | What it is                                                                              |
+| -------------------------- | --------------------------------------------------------------------------------------- |
+| `agent.py`                 | The worker: entrypoint, `AgentSession`, the turn loop                                   |
+| `stt_adapter.py`           | faster-whisper over HTTP, presented to LiveKit as a streaming STT with interim results  |
+| `sidecar.py`               | `/stt` and `/tts` client; passes the language refusals through                          |
+| `engine.py`                | `/turns` client; the clinical boundary                                                  |
+| `delivery.py`              | Pipelined speech, and the turn boundary — the two places this worker was silently wrong |
+| `audio.py`                 | WAV ↔ `rtc.AudioFrame`, and the sample rates at each hop                                |
+| `config.py`                | Every environment variable, with redaction for secrets                                  |
+| `health.py`                | `GET /healthz` — connected, models, RSS                                                 |
+| `httpclient.py`            | One shared SSL context, built off the event loop                                        |
+| `run.ps1`                  | Launcher, mirroring `ai-sidecar/run.ps1`                                                |
+| `tools/selftest.py`        | Everything except LiveKit, in one pass                                                  |
+| `tools/test_delivery.py`   | `delivery.py` against fakes — no sidecar, no room, milliseconds                         |
+| `tools/speak_into_room.py` | A fake patient that speaks into a real room                                             |
+| `tools/mint_token.py`      | A development LiveKit token                                                             |
+| `tools/fake_engine.py`     | A contract-shaped stand-in for Nest                                                     |
+| `tools/verify_imports.py`  | Post-install check across **both** venvs                                                |
 
 ## Running it
 
@@ -184,6 +186,24 @@ silence, 0.5 activation) cut a hesitant speaker off.
 | `BARGE_MIN_SEC`                | `0.2`   | Speech needed to cut off the question. About one word |
 | `BARGE_MIN_SILENCE_MS`         | `250`   | This instance only has to notice speech starting      |
 | `MEDIHIVE_ALLOW_INTERRUPTIONS` | `1`     | Whether the patient can talk over the question        |
+
+### The turn boundary
+
+| Variable                         | Default | Meaning                                                        |
+| -------------------------------- | ------- | -------------------------------------------------------------- |
+| `MEDIHIVE_TURN_COMMIT_GRACE_SEC` | `3.5`   | How long a final transcript may sit before it is posted anyway |
+
+A turn starts when livekit-agents commits the user's turn, not when Whisper
+returns a final transcript — see `CaseTakingAgent` in `agent.py`. Starting on
+the transcript raced the library into cutting the question off as if the patient
+had barged in: measured on 2026-09-20, five of one session's nine questions were
+cut, one of them after ten milliseconds, and every one of them still appeared on
+the patient's screen in full.
+
+The grace period is the backstop for a commit that never arrives. It is set
+above livekit-agents' own `max_delay` of 3.0 s so it only fires when the commit
+has genuinely been lost. `uncommittedTurns` on `/healthz` counts the times it
+did.
 
 ### Interim transcripts
 
