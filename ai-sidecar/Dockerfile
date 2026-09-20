@@ -79,3 +79,108 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8801", "--workers", 
 # box is not fast.
 HEALTHCHECK --interval=15s --timeout=10s --start-period=60s --retries=5 \
   CMD curl -fsS http://localhost:8801/health || exit 1
+
+# ──────────────────────────────────────────────────────────────
+# Optional: the eleven Indian languages.
+# ──────────────────────────────────────────────────────────────
+#
+#   docker build --target indic -t medihive-sidecar:indic ./ai-sidecar
+#
+# A separate stage rather than a line in requirements.txt, because IndicF5
+# costs several gigabytes of torch and the demo container only ever speaks
+# English through Piper. Building with no --target still stops at `runtime`
+# and produces the lean image, so nothing that exists today gets larger.
+#
+# Only the install differs. ENV, USER, CMD and HEALTHCHECK are inherited from
+# `runtime`, which is the point of extending it rather than restating it: the
+# two images cannot drift in how they run, only in what they can speak.
+#
+# The weights are NOT baked in. `ai4bharat/IndicF5` is a gated repo (~1.4 GB,
+# plus 52 MB for the charactr/vocos-mel-24khz vocoder), and it is read from the
+# HuggingFace cache that docker-compose.demo.yml and scripts/dev.mjs bind-mount
+# at HF_HOME. An image carrying gated weights is one nobody can publish.
+FROM runtime AS indic
+
+USER root
+COPY requirements-indic.txt ./
+RUN pip install --no-cache-dir -r requirements-indic.txt
+
+# AI4Bharat's own f5_tts, not the PyPI `f5-tts`. requirements-indic.txt has the
+# argument in full; the short version is that the `model.py` shipped with the
+# weights calls a `load_model` signature that exists only in this fork, and
+# `--no-deps` is what keeps its `numpy<=1.26.4` pin from taking OCR down with
+# it. Its dependencies are in requirements-indic.txt, installed above.
+#
+# A tarball rather than `git+https://`, so the image does not need git. `main`
+# rather than a tag because the repository publishes none; it is pinned by the
+# weights it has to match, which are themselves a fixed HuggingFace revision.
+RUN pip install --no-cache-dir --no-deps       https://github.com/AI4Bharat/IndicF5/archive/refs/heads/main.tar.gz
+
+# Two caches that have to be writable, and are not by default.
+#
+# librosa - imported by f5_tts.model.modules - decorates functions with
+# `@jit(cache=True)`, and numba's default cache location is a `__pycache__`
+# beside the source. site-packages is root-owned and this process is `sidecar`,
+# so the *first IndicF5 synthesis* dies with
+#
+#   RuntimeError: cannot cache function '__o_fold': no locator available
+#   for file '/usr/local/lib/python3.12/site-packages/librosa/core/notation.py'
+#
+# which is a permissions problem wearing the costume of a numba bug, reported
+# at load time rather than at import, i.e. against the first patient who picks
+# an Indian language. matplotlib has the same shape of problem and only warns.
+#
+# /tmp rather than a directory under /app: both are caches that can be thrown
+# away, and a container filesystem is the right place for them. Nothing here
+# needs to survive a restart - a cold numba cache costs one compile.
+# `OMP_WAIT_POLICY=PASSIVE` is not a tuning knob here, it is a bug fix.
+#
+# torch's OpenMP threads spin-wait when idle by default. After one IndicF5
+# synthesis this container sat at ~600% CPU *forever* - not during the
+# request, after it - and the next English question, which Piper answers in
+# 180 ms, timed out at the API's 30 s ceiling and reached the patient as
+# "We cannot read this aloud right now." One Tamil question poisoned every
+# question after it until a restart. PASSIVE makes those threads sleep:
+# measured idle afterwards is 0.19%.
+#
+# Four threads rather than the twelve torch would take: a spoken interview is
+# one sentence at a time, and the rest of the box - Whisper, Piper, OCR and
+# the API - has to stay responsive while IndicF5 runs. It costs a slow engine
+# a little more time and stops it taking the machine.
+ENV NUMBA_CACHE_DIR=/tmp/numba-cache     MPLCONFIGDIR=/tmp/matplotlib     OMP_WAIT_POLICY=PASSIVE     OMP_NUM_THREADS=4     MKL_NUM_THREADS=4
+RUN mkdir -p /tmp/numba-cache /tmp/matplotlib && chown sidecar:sidecar /tmp/numba-cache /tmp/matplotlib
+
+USER sidecar
+
+
+# ──────────────────────────────────────────────────────────────
+# Optional: the Indian languages, on a GPU.
+# ──────────────────────────────────────────────────────────────
+#
+#   docker build --target indic-gpu -t medihive-sidecar:indic-gpu ./ai-sidecar
+#   docker run --gpus all ... medihive-sidecar:indic-gpu
+#
+# `FROM indic` rather than `FROM runtime`, so the whole f5_tts install above is
+# reused and this stage only swaps the three CPU wheels for their CUDA builds.
+# The dependency list stays in one place; a torch version bump cannot leave the
+# two stages disagreeing about anything except the device.
+#
+# Why bother: IndicF5 on the CPU takes 95-155 s per question, which is a way to
+# hear a language rather than a way to be interviewed in one. The weights are
+# ~1.4 GB in fp32, so a 4 GB card fits them with room for the vocoder - but
+# only if nothing else is holding the VRAM. Whisper stays on the CPU
+# (MEDIHIVE_STT_DEVICE=cpu) for exactly that reason, and Ollama will evict or
+# be evicted if it is serving a model at the same time.
+#
+# `--gpus all` is required at run time. Without it torch sees no device, and
+# `MEDIHIVE_TTS_DEVICE=cuda` then fails at load rather than falling back - so
+# a box with no GPU should run `medihive-sidecar:indic` instead.
+FROM indic AS indic-gpu
+
+USER root
+# Default index, deliberately: this is the one place that wants the CUDA build
+# requirements-indic.txt goes out of its way to avoid.
+RUN pip install --no-cache-dir --force-reinstall torch torchaudio torchcodec
+USER sidecar
+
+ENV MEDIHIVE_TTS_DEVICE=cuda

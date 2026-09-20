@@ -45,6 +45,17 @@ const NO_API = args.has('--no-api');
 // bind that port while this is up, and stopping it is the whole reason we look.
 const DEMO_API_CONTAINER = 'hms_v2_api_demo';
 const DEV_SIDECAR_CONTAINER = 'medihive_sidecar_dev';
+// `medihive-sidecar:demo` speaks English through Piper and nothing else.
+// `medihive-sidecar:indic` is the same image plus torch, transformers and
+// f5-tts - the Dockerfile's `indic` stage - which is what the eleven Indian
+// languages need:
+//
+//   docker build --target indic -t medihive-sidecar:indic ./ai-sidecar
+//
+// Which one a box runs is a property of the box, not of the branch: the extra
+// image is several gigabytes and a developer working on billing has no reason
+// to build it. So this is only the default, and `MEDIHIVE_SIDECAR_IMAGE` in
+// .env.local or in the shell overrides it - see `cfg.sidecarImage`.
 const SIDECAR_IMAGE = 'medihive-sidecar:demo';
 
 const log = (msg) => console.log(msg);
@@ -136,6 +147,7 @@ function readEnvLocal() {
     ollamaUrl: 'http://127.0.0.1:11434',
     ollamaModel: 'gemma3:4b',
     sidecarUrl: 'http://127.0.0.1:8801',
+    sidecarImage: SIDECAR_IMAGE,
     livekitUrl: '',
     livekitNodeIp: '',
   };
@@ -163,6 +175,14 @@ function readEnvLocal() {
   cfg.ollamaUrl = pick(/^\s*OLLAMA_URL\s*=\s*"?([^"\r\n]+)/m) ?? cfg.ollamaUrl;
   cfg.ollamaModel = pick(/^\s*OLLAMA_MODEL\s*=\s*"?([^"\r\n]+)/m) ?? cfg.ollamaModel;
   cfg.sidecarUrl = pick(/^\s*AI_SIDECAR_URL\s*=\s*"?([^"\r\n]+)/m) ?? cfg.sidecarUrl;
+  // The shell wins over the file here, unlike every key above it. Those name
+  // where a service already is, and disagreeing with the API would be a bug;
+  // this one names which image to start, which is exactly the thing somebody
+  // wants to change for one run without editing anything.
+  cfg.sidecarImage =
+    process.env.MEDIHIVE_SIDECAR_IMAGE?.trim() ||
+    pick(/^\s*MEDIHIVE_SIDECAR_IMAGE\s*=\s*"?([^"\r\n]+)/m)?.trim() ||
+    cfg.sidecarImage;
   // Empty is meaningful for both: it is how "this deployment has no media
   // server" is said, and it is what makes the live-voice steps skippable rather
   // than fatal. The API says the same thing to the handset — /voice/token
@@ -447,7 +467,8 @@ async function ensureSidecar(cfg) {
   // Prefer the container: the image already carries the Python runtime, Piper
   // and rapidocr, so it does not depend on a host virtualenv being in whatever
   // state someone last left it in.
-  const hasImage = sh('docker', ['image', 'inspect', SIDECAR_IMAGE]).status === 0;
+  const image = cfg.sidecarImage;
+  const hasImage = sh('docker', ['image', 'inspect', image]).status === 0;
   if (hasImage) {
     // A previous dev run may have left a stopped container of the same name.
     sh('docker', ['rm', '-f', DEV_SIDECAR_CONTAINER]);
@@ -478,13 +499,13 @@ async function ensureSidecar(cfg) {
       // the first spoken request downloads ~460 MB.
       '-v',
       `${hfCache}:/home/sidecar/.cache/huggingface`,
-      SIDECAR_IMAGE,
+      image,
     ]);
     if (run.status !== 0) {
       warn(`could not start sidecar container: ${run.stderr || run.stdout}`);
       return false;
     }
-    log(`  started ${DEV_SIDECAR_CONTAINER} from ${SIDECAR_IMAGE}`);
+    log(`  started ${DEV_SIDECAR_CONTAINER} from ${image}`);
     return waitPort(port, 'sidecar', 120);
   }
 
@@ -502,8 +523,8 @@ async function ensureSidecar(cfg) {
     return waitPort(port, 'sidecar', 120);
   }
 
-  warn(`no ${SIDECAR_IMAGE} image and no usable virtualenv - STT/TTS/OCR will be unavailable`);
-  warn(`build it:  docker build -t ${SIDECAR_IMAGE} ./ai-sidecar`);
+  warn(`no ${image} image and no usable virtualenv - STT/TTS/OCR will be unavailable`);
+  warn(`build it:  docker build -t ${image} ./ai-sidecar`);
   return false;
 }
 

@@ -1,0 +1,28 @@
+# Machine-local host-port override for docker-compose.local.yml.
+#
+# `scripts/dev.mjs` adds this file to the compose invocation when it exists,
+# and nothing else depends on it, so a machine where the canonical ports are
+# free simply does not have it.
+#
+# Postgres: 5432 is taken on this box by a native Windows PostgreSQL 18
+# service (`postgresql-x64-18`, data dir C:\Program Files\PostgreSQL\18\data),
+# which starts at boot and wins the bind. Docker still reports the container's
+# 0.0.0.0:5432 mapping as published, so `docker ps` looks correct while every
+# connection from the host lands on the native server instead — which has no
+# `db_user` role, and answers with
+#   28P01 password authentication failed for user "db_user"
+# on the first query the API runs at startup. A missing role reads like a
+# credentials problem, which is why this is worth a note rather than a port
+# number.
+#
+# 5442 keeps the last digit of the canonical port and is what `.env.local`'s
+# DATABASE_URL points at. Anything reaching the database from *inside* the
+# compose network still uses `postgres:5432` and is unaffected.
+#
+# `!override` rather than a plain `ports:` list, because Compose *merges*
+# sequences across -f files: without it the container publishes 5432 as well,
+# which is the mapping this file exists to remove.
+services:
+  postgres:
+    ports: !override
+      - '5442:5432'

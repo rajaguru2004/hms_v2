@@ -55,8 +55,31 @@ actually spoke.
 - **IndicF5** (`ai4bharat/IndicF5`) — as bn gu hi kn ml mr or pa ta te. Needs
   torch and transformers, which are **not** in requirements.txt, and a
   reference pair per language in `tts/voices/<code>/`. Missing either, it
-  reports itself unavailable and the chain falls through. `tts/voices/README.md`
+  reports itself unavailable and the chain falls through. `requirements-indic.txt`
+  and the Dockerfile's `indic` stage are the supported way to install it:
+
+  ```sh
+  docker build --target indic -t medihive-sidecar:indic ./ai-sidecar
+  MEDIHIVE_SIDECAR_IMAGE=medihive-sidecar:indic npm run dev   # from hms_v2
+  ```
+
+  **It is slow on a CPU and that is not a tuning problem.** One question takes
+  95-155 s against 0.2-2 s for English through Piper, so on a box with no GPU
+  this is a way to hear the Indian languages, not a way to hold a conversation
+  in one. `--workers 1` means it holds the service while it runs, so an English
+  question asked during an Indic one waits behind it and can exceed the API's
+  30 s TTS ceiling. `tts/config.yaml` `indicf5.device: cuda` is the fix where there is VRAM
+  to spare; `MEDIHIVE_TTS_PROVIDERS=piper` takes it out of the chain for one
+  run without uninstalling anything.
+
+  Two things it does not survive, both written up in `requirements-indic.txt`:
+  the PyPI `f5-tts` is the wrong f5_tts (its `load_model` takes a `ckpt_path`
+  the model never passes), and transformers 4.50+ builds the model on the meta
+  device, which the published `model.py` was not written for. Both fail at the
+  first synthesis rather than at import, so `/health` reports every language
+  ready and each one 503s. `tts/voices/README.md`
   is the contract for a reference pair.
+
 - **Piper** — fallback, and the only English voice here. Reads `.onnx` voices
   out of `MEDIHIVE_VOICE_DIR`, discovering them by filename, so dropping
   `xx_YY-speaker-medium.onnx` in adds a language with no restart.

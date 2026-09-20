@@ -438,6 +438,26 @@ class IndicF5TTS(TTSProvider):
         )
         return model
 
+    def warm(self) -> None:
+        """Load the weights now, so the first patient does not wait for them.
+
+        IndicF5 is lazily loaded and the load is not small - a gigabyte and a
+        half off disk, then a vocoder fetched beside it. Paid on demand that
+        lands on the first question of an interview, and it is long enough to
+        exceed the API's own TTS timeout: the patient gets the written
+        fallback for a question that would have been spoken fine thirty
+        seconds later.
+
+        Failure here is deliberately swallowed. This runs on a background
+        thread at startup and there is nobody to tell; `_model()` will raise
+        the same error, with the same message, to the first caller who
+        actually needs it, and `/health` already reports why.
+        """
+        try:
+            self._model()
+        except Exception:  # noqa: BLE001 - see docstring
+            logger.debug("indicf5 prewarm failed; the first request will report it", exc_info=True)
+
     def synthesize(self, text: str, language: str) -> bytes:
         code = normalise(language)
         reference = self.reference(code) if self.supports(code) else None

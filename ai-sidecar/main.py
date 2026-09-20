@@ -93,6 +93,25 @@ async def _prewarm_stt() -> None:
     threading.Thread(target=stt.warm, name="stt-prewarm", daemon=True).start()
 
 
+@app.on_event("startup")
+async def _prewarm_tts() -> None:
+    """Load IndicF5 before the first patient taps the speaker, not during.
+
+    The same argument as `_prewarm_stt`, with a sharper edge. IndicF5's
+    weights are ~1.4 GB and the vocoder is fetched beside them, so a cold
+    first `/tts` can take longer than the API's 30 s TTS timeout on its own -
+    and what the patient gets for a question that was perfectly speakable is
+    the silent written fallback, with nothing on screen to say why.
+
+    Piper does not implement `warm` and is not affected; on a box without
+    IndicF5 installed this does nothing at all. `MEDIHIVE_TTS_PREWARM=0` opts
+    out where the memory matters more than the first question.
+    """
+    if os.environ.get("MEDIHIVE_TTS_PREWARM", "1").strip() in {"0", "false", "no"}:
+        return
+    threading.Thread(target=tts.warm, name="tts-prewarm", daemon=True).start()
+
+
 @app.get("/health")
 async def health() -> JSONResponse:
     """What can actually run right now.

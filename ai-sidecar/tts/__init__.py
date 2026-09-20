@@ -229,6 +229,22 @@ def languages() -> list[str]:
     return sorted(code for code in SUPPORTED_LANGUAGES if available(code))
 
 
+def warm() -> None:
+    """Load what is slow to load, before anybody asks for it.
+
+    Only providers that choose to implement `warm` - Piper's voices are tens
+    of megabytes and load in a couple of seconds, so it does not bother. A
+    provider that cannot speak anything right now is skipped rather than
+    asked, because warming a model whose weights are missing is a download
+    nobody requested.
+    """
+    for provider in providers():
+        warmer = getattr(provider, "warm", None)
+        if warmer is None or not provider.languages():
+            continue
+        warmer()
+
+
 def speak(text: str, language: str = "en") -> bytes:
     """One WAV, whole, in the language asked for or not at all."""
     return speak_with_provider(text, language)[0]
