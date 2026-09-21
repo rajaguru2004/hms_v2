@@ -1,0 +1,23 @@
+2026-09-21 09:35:43,350 INFO    medihive.agent: env file: (none found; using the shell environment)
+2026-09-21 09:35:43,350 INFO    medihive.agent:   LIVEKIT_URL                  (unset)
+2026-09-21 09:35:43,350 INFO    medihive.agent:   LIVEKIT_API_KEY              (unset)
+2026-09-21 09:35:43,350 INFO    medihive.agent:   LIVEKIT_API_SECRET           (unset)
+2026-09-21 09:35:43,350 INFO    medihive.agent:   AI_SIDECAR_URL               http://127.0.0.1:8801
+2026-09-21 09:35:43,350 INFO    medihive.agent:   MEDIHIVE_API_URL             http://127.0.0.1:3000/api
+2026-09-21 09:35:43,351 INFO    medihive.agent:   MEDIHIVE_API_TOKEN           (unset)
+2026-09-21 09:35:43,351 INFO    medihive.agent:   MEDIHIVE_SESSION_LANGUAGE    en
+2026-09-21 09:35:43,351 INFO    medihive.agent:   MEDIHIVE_SESSION_ID          (from room name or job metadata)
+2026-09-21 09:35:43,351 INFO    medihive.agent:   SILERO_MIN_SPEECH_MS         50
+2026-09-21 09:35:43,351 INFO    medihive.agent:   SILERO_MIN_SILENCE_MS        650
+2026-09-21 09:35:43,351 INFO    medihive.agent:   SILERO_PREFIX_PAD_MS         900
+2026-09-21 09:35:43,351 INFO    medihive.agent:   SILERO_ACTIVATION            0.26
+2026-09-21 09:35:43,351 INFO    medihive.agent:   SILERO_DEACTIVATION          0.16
+2026-09-21 09:35:43,351 INFO    medihive.agent:   BARGE_MIN_SEC                0.2
+2026-09-21 09:35:43,351 INFO    medihive.agent:   BARGE_MIN_SILENCE_MS         250
+2026-09-21 09:35:43,351 INFO    medihive.agent:   MEDIHIVE_ALLOW_INTERRUPTIONS 1
+2026-09-21 09:35:43,351 INFO    medihive.agent:   MEDIHIVE_TURN_COMMIT_GRACE_SEC 3.5
+2026-09-21 09:35:43,351 INFO    medihive.agent:   MEDIHIVE_INTERIM_TRANSCRIPTS 1
+2026-09-21 09:35:43,351 INFO    medihive.agent:   MEDIHIVE_INTERIM_EVERY_SEC   1.4
+2026-09-21 09:35:43,351 INFO    medihive.agent:   AGENT_HEALTH_PORT            9090
+2026-09-21 09:35:43,351 INFO    medihive.agent:   MEDIHIVE_FRAME_MS            20
+missing required environment: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET. They live in hms_v2/.env.local, which is untracked.

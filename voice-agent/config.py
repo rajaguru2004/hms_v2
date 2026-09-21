@@ -20,7 +20,27 @@ from pathlib import Path
 # hms_v2/.env.local, which is untracked. Resolved rather than assumed so that
 # running the worker from any cwd finds the same file.
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ENV_FILE = REPO_ROOT / ".env.local"
+
+# In preference order, and the fallback is the whole point.
+#
+# `.env.local` stays first: it is untracked, so it is where a credential
+# belongs and where a per-machine override wins. But Nest reads `.env`, and the
+# day those two files were consolidated into one this worker stopped starting —
+# `missing required environment: LIVEKIT_URL, ...` at import, seconds after
+# launch, on a machine where the API had every one of those values. Nothing in
+# the app said so: the room still opened, no agent was ever dispatched into it,
+# and the handset quietly fell back to record-then-upload. A silent downgrade
+# from a live conversation to a transcription box, caused by which filename the
+# credentials happened to be sitting in.
+#
+# So this reads whichever of the two is present rather than insisting on one.
+# Both, and `.env.local` wins per-key, because `load_dotenv(override=False)`
+# keeps the first value seen.
+ENV_FILES = (REPO_ROOT / ".env.local", REPO_ROOT / ".env")
+
+# The preferred location, and what the error message points at when neither
+# file exists. Kept as a name because the launchers and the README both name it.
+ENV_FILE = ENV_FILES[0]
 
 
 def _str(name: str, default: str) -> str:
@@ -266,15 +286,25 @@ def describe(settings: Settings) -> list[tuple[str, str]]:
 
 
 def load_env_file() -> Path | None:
-    """Pull hms_v2/.env.local into the environment if it is there.
+    """Pull the first of [ENV_FILES] that exists into the environment.
 
     `override=False`: a variable already set in the shell wins. That is what
     makes `$env:SILERO_MIN_SILENCE_MS=900; .\\run.ps1` work for a single run
-    without editing the shared credentials file.
+    without editing the shared credentials file. It is also what orders
+    [ENV_FILES] — the earlier file is loaded first, so its value is the one
+    that survives, key by key.
+
+    Returns the first file actually loaded, which is what the startup banner
+    prints, so a worker that came up on the wrong credentials says which file
+    it read rather than leaving that to be guessed.
     """
-    if not ENV_FILE.exists():
-        return None
     from dotenv import load_dotenv
 
-    load_dotenv(ENV_FILE, override=False)
-    return ENV_FILE
+    loaded: Path | None = None
+    for candidate in ENV_FILES:
+        if not candidate.exists():
+            continue
+        load_dotenv(candidate, override=False)
+        if loaded is None:
+            loaded = candidate
+    return loaded
