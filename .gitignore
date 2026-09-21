@@ -8,6 +8,12 @@ build/
 
 # Environment files — NEVER commit real secrets
 
+# `.env.local` is the per-machine override both the API (prisma/env-paths.ts)
+# and the voice worker (voice-agent/config.py) load first, and every comment
+# that names it calls it untracked. It was not: `.env.*.local` matches
+# `.env.development.local` and not this, so the one file the codebase treats as
+# the safe place for a local credential was the one file staged by `git add -A`.
+.env.local
 .env.*.local
 .env.development
 .env.staging

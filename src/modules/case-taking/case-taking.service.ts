@@ -238,7 +238,7 @@ export interface TurnResult {
 const VOICE_TOKEN_TTL_SECONDS = 60 * 30;
 
 /**
- * The worker this API dispatches an interview to.
+ * The default name of the worker this API dispatches an interview to.
  *
  * Must match `AGENT_NAME` in `voice-agent/agent.py`. They are two languages
  * naming one worker: if they drift, this creates a dispatch for an agent
@@ -246,8 +246,22 @@ const VOICE_TOKEN_TTL_SECONDS = 60 * 30;
  * waits in a room that never gets a second participant. Nothing fails loudly,
  * which is exactly why the constant is named on both sides rather than typed
  * twice.
+ *
+ * Overridable per environment with `VOICE_AGENT_NAME`, and the reason is that
+ * a LiveKit project is shared by everyone holding its credentials. The name is
+ * the only thing a dispatch routes on, so two machines running the worker
+ * under one name are two candidates for every job and LiveKit picks one. A
+ * developer's interview then gets served by whichever worker won — possibly a
+ * checkout on another desk, which joins the room, publishes nothing because it
+ * cannot reach this machine's API or sidecar, and leaves the handset with a
+ * participant that never speaks.
+ *
+ * `dispatchVoiceAgent` then makes it permanent: an agent is in the room, so it
+ * declines to dispatch another. Naming each environment's worker separately is
+ * what keeps one project's credentials from turning into one shared worker
+ * pool. See `voice-agent/agent.py`.
  */
-const VOICE_AGENT_NAME = 'medihive';
+const DEFAULT_VOICE_AGENT_NAME = 'medihive';
 
 /**
  * `ParticipantInfo.Kind.AGENT` on the LiveKit wire.
@@ -1378,6 +1392,23 @@ export class CaseTakingService {
    * It is logged at error, because a silent room is not something to discover
    * from a patient.
    */
+  /**
+   * The worker name this environment dispatches to.
+   *
+   * Read per call rather than cached in a field: `ConfigService` is the one
+   * source, and a value read once at construction is a value that cannot be
+   * corrected without a restart of the API — which is the opposite of what a
+   * per-machine override is for. The read is a map lookup.
+   *
+   * Trimmed, and an empty string falls back, because `VOICE_AGENT_NAME=` with
+   * nothing after it is what a half-finished .env line looks like, and
+   * dispatching to `''` is a dispatch no worker is registered for.
+   */
+  private get voiceAgentName(): string {
+    const configured = this.config?.get<string>('VOICE_AGENT_NAME')?.trim();
+    return configured || DEFAULT_VOICE_AGENT_NAME;
+  }
+
   private async dispatchVoiceAgent(
     sessionId: string,
     roomName: string,
@@ -1442,8 +1473,9 @@ export class CaseTakingService {
       }
 
       const dispatcher = new AgentDispatchClient(host, key, secret);
+      const agentName = this.voiceAgentName;
 
-      await dispatcher.createDispatch(roomName, VOICE_AGENT_NAME, {
+      await dispatcher.createDispatch(roomName, agentName, {
         metadata: JSON.stringify({
           sessionId,
           token: this.mintWorkerToken(user, ttlSeconds),
@@ -1451,7 +1483,7 @@ export class CaseTakingService {
           outputLanguage: languages.output,
         }),
       });
-      this.logger.log(`dispatched ${VOICE_AGENT_NAME} to ${roomName}`);
+      this.logger.log(`dispatched ${agentName} to ${roomName}`);
     } catch (error) {
       this.logger.error(
         `could not dispatch the voice agent to ${roomName}; the patient will ` +

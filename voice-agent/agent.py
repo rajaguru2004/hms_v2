@@ -61,6 +61,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
 from typing import Any, Callable
 
@@ -94,7 +95,8 @@ from stt_adapter import SidecarSTT
 
 logger = logging.getLogger("medihive.agent")
 
-# Read hms_v2/.env.local at *import* time, before Settings.load() below.
+# Read hms_v2/.env.local, then hms_v2/.env, at *import* time — before both
+# Settings.load() and AGENT_NAME below, each of which reads os.environ.
 #
 # Not in `main()`, and not under `if __name__ == "__main__"`. `cli.run_app` may
 # run jobs in spawned subprocesses, and a spawned child re-imports this module
@@ -110,7 +112,27 @@ STATUS = health.WorkerStatus(language=SETTINGS.language)
 # case-taking.service.ts — they are two languages naming one worker, and if they
 # drift the dispatch is created for an agent nobody is registered as, so the
 # patient sits in a room no one ever joins.
-AGENT_NAME = "medihive"
+#
+# ── Why this is an environment variable and not just "medihive"
+#
+# The name is the *only* thing LiveKit routes a dispatch on, and a LiveKit
+# project is shared by everyone holding its credentials. Two machines running
+# this worker under one name are two candidates for every job, and LiveKit
+# hands each job to one of them — so a developer's interview is served by
+# whichever worker won that race, which may be a checkout on somebody else's
+# desk that cannot reach this machine's API or sidecar at 127.0.0.1.
+#
+# That failure is silent and it is sticky. The foreign worker joins, publishes
+# no audio because it has nothing to say, and `dispatchVoiceAgent` then refuses
+# to dispatch again because an agent is already in the room. The handset sees a
+# room with a participant that never speaks, never raises `carriesTheVoice`,
+# and quietly falls back to record-then-upload — with every service on this
+# machine healthy and nothing in any log to point at.
+#
+# So each environment names its own worker. Set VOICE_AGENT_NAME in
+# hms_v2/.env.local, which is untracked and which both this worker and Nest
+# read before .env. The default keeps a single-machine setup working untouched.
+AGENT_NAME = os.environ.get("VOICE_AGENT_NAME", "").strip() or "medihive"
 
 # Loading Silero and opening two HTTP clients is not instant, and the default
 # 10 s is measured on a box that is not also holding Ollama and Docker.

@@ -140,6 +140,16 @@ export const validationSchema = Joi.object({
     .optional(),
   LIVEKIT_API_KEY: Joi.string().optional(),
   LIVEKIT_API_SECRET: Joi.string().optional(),
+
+  // Which worker a dispatch is routed to, and the one thing LiveKit routes on.
+  //
+  // Optional, defaulting to `medihive` in `case-taking.service.ts`, so a single
+  // machine needs nothing here. Set it per environment — in `.env.local`, which
+  // is untracked — wherever a LiveKit project is shared: two workers registered
+  // under one name are two candidates for every job, and the loser's patient
+  // ends up in a room with a silent agent. `voice-agent/agent.py` reads the same
+  // variable and must resolve to the same string.
+  VOICE_AGENT_NAME: Joi.string().optional(),
 });
 
 export const validationOptions = {
