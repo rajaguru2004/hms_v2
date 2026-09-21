@@ -895,6 +895,81 @@ In case of error, `success` is `false`, `data` is `null` or omitted, and `errorC
 
 ---
 
+### `GET /api/appointments/doctors`
+
+**Purpose:** List the clinicians a booking can be made with, for a picker
+
+- **Authentication Required:** ✅ Yes
+- **Permission:** `APPOINTMENT_CREATE`
+
+Gated on the booking permission rather than on `PATIENT_READ`, which is what
+`GET /api/users/staff` asks for. A portal account holds no `patients` module at
+all, so a patient booking their own appointment cannot use the staff lookup —
+and this projection carries only a name and a specialism, never an email or a
+role.
+
+**Query Parameters:** None.
+
+**Request Body:** None.
+
+**Responses:**
+
+- **Status `200`**:
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "id": "cuid-doctor-456",
+        "fullName": "Dr Amara Okonkwo",
+        "specialization": "Emergency medicine"
+      }
+    ],
+    "message": null,
+    "errorCode": null,
+    "timestamp": "2026-06-13T16:39:03.286Z"
+  }
+  ```
+
+---
+
+### `GET /api/appointments/availability`
+
+**Purpose:** The start times already taken in one clinician's day
+
+- **Authentication Required:** ✅ Yes
+- **Permission:** `APPOINTMENT_CREATE`
+
+Times and lengths only. The caller may be a patient, so nothing about who holds
+a slot is sent. Cancelled bookings are excluded — that slot is free again;
+`no_show` and `rescheduled` rows stay in.
+
+**Query Parameters:**
+
+- `doctorId` (Required): _(type: string)_
+- `date` (Required): The day, as `YYYY-MM-DD` _(type: string)_
+
+**Request Body:** None.
+
+**Responses:**
+
+- **Status `200`**:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "doctorId": "cuid-doctor-456",
+      "date": "2026-06-10",
+      "taken": [{ "appointmentTime": "09:30", "durationMinutes": 30 }]
+    },
+    "message": null,
+    "errorCode": null,
+    "timestamp": "2026-06-13T16:39:03.286Z"
+  }
+  ```
+
+---
+
 ### `GET /api/appointments/{id}`
 
 **Purpose:** Get details of a single appointment
@@ -969,6 +1044,19 @@ In case of error, `success` is `false`, `data` is `null` or omitted, and `errorC
 **Purpose:** Schedule a new appointment
 
 - **Authentication Required:** ✅ Yes
+- **Permission:** `APPOINTMENT_CREATE`
+
+**When the caller is a patient**, three extra rules apply and none of them
+touch a staff booking:
+
+- `patientId` is **overwritten** with the id on the bearer token. A patient
+  books for themselves; the key is still required by the DTO, and whatever it
+  carries is discarded.
+- `doctorId` becomes required — a booking with no clinician is a request
+  nobody owns.
+- `durationMinutes` is capped at 60, and a start time the clinician already
+  holds is refused with `409 APPOINTMENT_CONFLICT`. A desk may double-book a
+  clinic on purpose and is not held to either.
 
 **Request Body:**
 
@@ -1055,11 +1143,15 @@ In case of error, `success` is `false`, `data` is `null` or omitted, and `errorC
 
 ---
 
-### `PUT /api/appointments/{id}`
+### `PUT /api/appointments/{id}` · `PATCH /api/appointments/{id}`
 
 **Purpose:** Update appointment details or status
 
+Both verbs reach the same handler and take the same body — the mobile app
+sends PATCH, the web console sends PUT.
+
 - **Authentication Required:** ✅ Yes
+- **Permission:** `APPOINTMENT_UPDATE`
 
 **Path Parameters:**
 
@@ -8795,7 +8887,7 @@ In case of error, `success` is `false`, `data` is `null` or omitted, and `errorC
 - `limit` (Optional): Items per page (max 100) _(type: number) (default: `10`)_
 - `orderBy` (Optional): Field to order by _(type: string) (default: `screenedAt`)_
 - `orderDir` (Optional): _(type: string) (default: `desc`)_
-- `status` (Optional): Filter by screening status (e.g. screening, routed, registered_as_patient, all) _(type: string) (default: `all`)_
+- `status` (Optional): Filter by screening status (e.g. screening, routed, registered*as_patient, all) *(type: string) (default: `all`)\_
 - `search` (Optional): Search term for first/last name or screening number _(type: string)_
 
 **Request Body:** None.

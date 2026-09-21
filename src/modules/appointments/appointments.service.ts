@@ -12,6 +12,8 @@ import { AuditAction } from '../../common/enums/action.enum';
 import {
   NotFoundException,
   ForbiddenException,
+  BadRequestException,
+  ConflictException,
 } from '../../common/exceptions/app.exception';
 import { ErrorCodes } from '../../common/exceptions/error-codes';
 import { PaginatedResult } from '../../common/types/paginated.type';
@@ -35,6 +37,7 @@ export class AppointmentsService {
     dto: CreateAppointmentDto,
     organizationId: string,
     userId?: string,
+    options: { bookedByPatient?: boolean } = {},
   ): Promise<Appointment> {
     // 1. Verify patient exists in the same organization
     await this.patientsService.findById(dto.patientId, organizationId);
@@ -48,6 +51,37 @@ export class AppointmentsService {
           ErrorCodes.FORBIDDEN,
         );
       }
+    }
+
+    // 3. A booking a patient made for themselves is held to two rules a
+    //    booking a receptionist made is not.
+    //
+    //    Both exist because there is nobody in the room to catch the mistake.
+    //    A desk that double-books a clinic knows it is doing it — a clinic
+    //    deliberately overbooks its morning all the time, and refusing that
+    //    would be the app telling a hospital how to run its diary. A patient
+    //    tapping a slot that a stale screen still shows as free does not know,
+    //    and neither does anybody else until both of them arrive.
+    if (options.bookedByPatient) {
+      if (!dto.doctorId) {
+        throw new BadRequestException(
+          'Choose a clinician for this appointment.',
+          ErrorCodes.VALIDATION_ERROR,
+        );
+      }
+
+      // The DTO's ceiling is 480 minutes, which is a whole clinic day. That is
+      // the right bound for a theatre list a surgeon books; it is not a thing
+      // a patient may take from a diary, so their bookings are capped at an
+      // hour and the value is otherwise theirs to send.
+      dto.durationMinutes = Math.min(dto.durationMinutes ?? 30, 60);
+
+      await this.assertSlotFree(
+        dto.doctorId,
+        dto.appointmentDate,
+        dto.appointmentTime,
+        organizationId,
+      );
     }
 
     const createData: Prisma.AppointmentCreateInput = {
@@ -85,6 +119,100 @@ export class AppointmentsService {
 
     // Return populated appointment
     return this.findById(appointment.id, organizationId);
+  }
+
+  /**
+   * The clinicians a booking can be made with.
+   *
+   * A name and a specialism, which is what a picker shows. Delegated to
+   * `UserService.findStaff` rather than re-querying so that "who can hold a
+   * clinic" has one answer: the staff picker on the console and the booking
+   * screen on a patient's phone offering different lists is the kind of
+   * difference nobody notices until somebody is booked with a clinician who
+   * left.
+   */
+  async bookableDoctors(organizationId: string) {
+    const staff = await this.userService.findStaff(organizationId, 'DOCTOR');
+    return staff.map((doctor) => ({
+      id: doctor.id,
+      fullName: doctor.fullName,
+      specialization: doctor.specialization,
+    }));
+  }
+
+  /**
+   * What is already booked in one clinician's day.
+   *
+   * Times and lengths only. The caller may be a patient, so the rows carry
+   * nothing about who holds the slot — a booking screen needs to know that
+   * 10:20 is gone, not who is in it.
+   *
+   * Cancelled bookings are left out: the slot they were holding is free
+   * again, and showing it as taken would shrink a clinic's day every time
+   * somebody rang to cancel. `no_show` and `rescheduled` stay in — the first
+   * is a slot that was consumed, and the second is a row the reschedule left
+   * behind pointing at a time that genuinely passed.
+   */
+  async availability(
+    doctorId: string,
+    date: string,
+    organizationId: string,
+  ): Promise<{
+    doctorId: string;
+    date: string;
+    taken: { appointmentTime: string; durationMinutes: number }[];
+  }> {
+    const rows = await this.appointmentRepository.findMany(
+      {
+        organizationId,
+        doctorId,
+        appointmentDate: dayWindow(date),
+        status: { not: 'cancelled' },
+      },
+      { orderBy: { appointmentTime: 'asc' } },
+    );
+
+    return {
+      doctorId,
+      date,
+      taken: rows.map((row) => ({
+        appointmentTime: row.appointmentTime,
+        durationMinutes: row.durationMinutes,
+      })),
+    };
+  }
+
+  /**
+   * Refuses a slot somebody else already holds.
+   *
+   * Compared on the start time rather than on the interval, deliberately.
+   * Overlap would be the more thorough test and it is the wrong one here: a
+   * clinic whose diary is cut into twenty-minute slots books a forty-minute
+   * appointment across two of them on purpose, and an overlap test would
+   * refuse the second half of a booking the desk made itself. What a patient
+   * must not be able to do is take a start time that is already taken, which
+   * is exactly what the grid on their screen offers them.
+   */
+  private async assertSlotFree(
+    doctorId: string,
+    date: string,
+    time: string,
+    organizationId: string,
+  ): Promise<void> {
+    const clash = await this.appointmentRepository.findOne({
+      organizationId,
+      doctorId,
+      appointmentDate: dayWindow(date),
+      appointmentTime: time,
+      status: { not: 'cancelled' },
+    });
+
+    if (clash) {
+      throw new ConflictException(
+        'That time has just been taken. Please choose another.',
+        ErrorCodes.APPOINTMENT_CONFLICT,
+      );
+    }
   }
 
   /**
@@ -147,10 +275,7 @@ export class AppointmentsService {
     };
 
     if (query.date) {
-      const targetDate = new Date(query.date);
-      const startOfDay = new Date(targetDate.setHours(0, 0, 0, 0));
-      const endOfDay = new Date(targetDate.setHours(23, 59, 59, 999));
-      where.appointmentDate = { gte: startOfDay, lte: endOfDay };
+      where.appointmentDate = dayWindow(query.date);
     }
 
     if (query.status) {
@@ -351,4 +476,21 @@ export class AppointmentsService {
       metadata: { organizationId },
     });
   }
+}
+
+/**
+ * One calendar day, as a range the date column can be compared against.
+ *
+ * `appointmentDate` is a timestamp holding a day, so a booking stored at
+ * midnight and one stored at midday are both "the tenth" and an equality test
+ * finds only the first. Written once and shared by the listing and the
+ * availability read: two ways of deciding which bookings are on a day is two
+ * answers to "is this slot free".
+ */
+function dayWindow(date: string): { gte: Date; lte: Date } {
+  const start = new Date(date);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(date);
+  end.setHours(23, 59, 59, 999);
+  return { gte: start, lte: end };
 }

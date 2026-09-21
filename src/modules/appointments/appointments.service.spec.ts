@@ -17,6 +17,8 @@ import { AppointmentQueryDto } from './dto/appointment-query.dto';
 import {
   NotFoundException,
   ForbiddenException,
+  BadRequestException,
+  ConflictException,
 } from '../../common/exceptions/app.exception';
 
 describe('AppointmentsService', () => {
@@ -84,6 +86,7 @@ describe('AppointmentsService', () => {
       update: jest.fn(),
       softDelete: jest.fn(),
       paginate: jest.fn(),
+      findMany: jest.fn(),
     };
 
     const mockPatientsService = {
@@ -164,6 +167,79 @@ describe('AppointmentsService', () => {
       await expect(
         service.create(createDto, 'org-1', 'user-1'),
       ).rejects.toThrow(ForbiddenException);
+    });
+
+    // The three rules that only apply to a booking a patient made themselves.
+    // A desk booking is unaffected by every one of them, which is what the
+    // first test above is now also pinning.
+    describe('booked by the patient', () => {
+      beforeEach(() => {
+        patientsService.findById.mockResolvedValue(mockPatient as any);
+        userService.findById.mockResolvedValue(mockDoctor as any);
+        repository.create.mockResolvedValue(mockAppointment);
+      });
+
+      it('refuses a booking with no clinician', async () => {
+        await expect(
+          service.create(
+            { ...createDto, doctorId: undefined },
+            'org-1',
+            'u-1',
+            {
+              bookedByPatient: true,
+            },
+          ),
+        ).rejects.toThrow(BadRequestException);
+      });
+
+      it('refuses a slot the clinician already holds', async () => {
+        repository.findOne.mockResolvedValue(mockAppointment);
+
+        await expect(
+          service.create(createDto, 'org-1', 'u-1', { bookedByPatient: true }),
+        ).rejects.toThrow(ConflictException);
+        expect(repository.create).not.toHaveBeenCalled();
+      });
+
+      it('caps the appointment at an hour', async () => {
+        // The free-slot check and the populate read both go through findOne;
+        // the first must answer null or the booking is refused before it is
+        // written, and the second must answer the row so `create` can return.
+        repository.findOne
+          .mockResolvedValueOnce(null)
+          .mockResolvedValue(mockAppointment);
+
+        await service.create(
+          { ...createDto, durationMinutes: 480 },
+          'org-1',
+          'u-1',
+          { bookedByPatient: true },
+        );
+
+        expect(repository.create).toHaveBeenCalledWith(
+          expect.objectContaining({ durationMinutes: 60 }),
+        );
+      });
+    });
+  });
+
+  describe('availability', () => {
+    it('leaves cancelled bookings out and sends no patient with the slots', async () => {
+      repository.findMany.mockResolvedValue([mockAppointment]);
+
+      const result = await service.availability('doc-1', '2026-06-10', 'org-1');
+
+      expect(repository.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          doctorId: 'doc-1',
+          organizationId: 'org-1',
+          status: { not: 'cancelled' },
+        }),
+        expect.anything(),
+      );
+      expect(result.taken).toEqual([
+        { appointmentTime: '09:30', durationMinutes: 30 },
+      ]);
     });
   });
 
