@@ -216,6 +216,45 @@ export class CaseTakingRepository extends BaseRepository<
   }
 
   /**
+   * The intakes a clinician may open, newest first.
+   *
+   * Spelled out rather than inherited for the reason at the top of this file:
+   * `paginate` injects `isDeleted: false` and `CaseSubmission` has no such
+   * column, so the inherited read is a Prisma validation error rather than an
+   * empty page.
+   *
+   * The patient is joined in because the list is read from a ward as well as
+   * from one chart, and a row that says only "submitted at 09:14" is a row
+   * nobody can act on.
+   */
+  async listSubmissions(
+    where: Prisma.CaseSubmissionWhereInput,
+    options: { skip: number; take: number },
+  ): Promise<{ rows: CaseSubmissionWithPatient[]; total: number }> {
+    const [rows, total] = await Promise.all([
+      this.prisma.caseSubmission.findMany({
+        where,
+        orderBy: { submittedAt: 'desc' },
+        skip: options.skip,
+        take: options.take,
+        include: { patient: { select: PATIENT_CARD } },
+      }),
+      this.prisma.caseSubmission.count({ where }),
+    ]);
+    return { rows, total };
+  }
+
+  async findSubmissionById(
+    id: string,
+    organizationId: string,
+  ): Promise<CaseSubmissionWithPatient | null> {
+    return this.prisma.caseSubmission.findFirst({
+      where: { id, organizationId },
+      include: { patient: { select: PATIENT_CARD } },
+    });
+  }
+
+  /**
    * The patient's date of birth, for the age band the interview never asks.
    *
    * `social.age_band` is declared `NEVER_ASKED` in the registry precisely so it
@@ -237,3 +276,31 @@ export class CaseTakingRepository extends BaseRepository<
     });
   }
 }
+
+/**
+ * The patient fields an intake list needs to be actionable, and no more.
+ *
+ * The same five the appointment and consultation includes select. A clinician
+ * scanning submitted intakes needs to know who and how to find them; the rest
+ * of the record is one tap away on the chart.
+ */
+const PATIENT_CARD = {
+  id: true,
+  mrn: true,
+  firstName: true,
+  lastName: true,
+  dateOfBirth: true,
+  gender: true,
+} as const;
+
+/** A submission with the patient it belongs to. */
+export type CaseSubmissionWithPatient = CaseSubmission & {
+  patient: {
+    id: string;
+    mrn: string;
+    firstName: string;
+    lastName: string;
+    dateOfBirth: Date | null;
+    gender: string | null;
+  };
+};

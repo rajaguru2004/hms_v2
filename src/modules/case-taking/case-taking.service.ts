@@ -8,7 +8,10 @@ import {
   CaseTurn,
   Prisma,
 } from '@prisma/client';
-import { CaseTakingRepository } from './case-taking.repository';
+import {
+  CaseSubmissionWithPatient,
+  CaseTakingRepository,
+} from './case-taking.repository';
 import { FactRowData, rebuildState, rowDataFromFact } from './case-state';
 import {
   CaseConsentDto,
@@ -81,6 +84,8 @@ import {
   NotFoundException,
 } from '../../common/exceptions/app.exception';
 import { ErrorCode, ErrorCodes } from '../../common/exceptions/error-codes';
+import { PaginatedResult } from '../../common/types/paginated.type';
+import { resolveOrganizationId } from '../../common/utils/tenant.util';
 import {
   AuthenticatedUser,
   JwtPayload,
@@ -1106,6 +1111,117 @@ export class CaseTakingService {
       missingInformation: rendered.missingInformation,
       safety: toPatientSafetyView(safety),
       structuredCase,
+    };
+  }
+
+  /* ════════════════════════ reading it, as a clinician ════════════════════ */
+
+  /**
+   * The intakes that have been sent in, newest first.
+   *
+   * This is the other half of §38 and the sentence `CaseTakingController`'s
+   * header has been making a promise about: "a clinician reads a finished
+   * intake through the submission on the patient record". Until now there was
+   * no route that did — the document was written and nothing could open it.
+   *
+   * Two callers, one query:
+   *
+   *  * a **clinician**, who names a patient (reading one chart) or names
+   *    nobody (the intakes waiting on this site today);
+   *  * a **patient**, whose own scope is forced onto the filter by the
+   *    controller, so the route is safe if the portal ever calls it.
+   *
+   * Organisation-scoped before anything else, the way every other collection
+   * in this API is.
+   */
+  async listSubmissions(
+    query: { patientId?: string; page?: number; limit?: number },
+    user: AuthenticatedUser,
+  ): Promise<PaginatedResult<Record<string, unknown>>> {
+    const page = Math.max(query.page ?? 1, 1);
+    const limit = Math.min(Math.max(query.limit ?? 20, 1), 100);
+
+    const { rows, total } = await this.repository.listSubmissions(
+      {
+        // Through `resolveOrganizationId`, which throws on an absent id.
+        // Prisma **drops** an `undefined` where-field rather than matching
+        // nothing, so a missing organisation here would silently widen this
+        // listing to every hospital's intakes in one response — the one
+        // failure in this file that is not an error but a disclosure.
+        organizationId: resolveOrganizationId(user),
+        ...(query.patientId && { patientId: query.patientId }),
+      },
+      { skip: (page - 1) * limit, take: limit },
+    );
+
+    return {
+      data: rows.map((row) => toSubmissionCard(row)),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.max(Math.ceil(total / limit), 1),
+        hasNextPage: page * limit < total,
+        hasPreviousPage: page > 1,
+      },
+    };
+  }
+
+  /**
+   * One intake, as the clinician who opens it needs to read it.
+   *
+   * Answered **from the stored document and never re-rendered.** The session
+   * keeps moving after a submission — a patient may correct a fact the next
+   * morning — and re-running the renderer here would quietly change what the
+   * doctor is reading from what the patient sent. `submit()` writes it whole
+   * for exactly this reason.
+   *
+   * The safety block is the full one, rules and all, and that is the
+   * difference from the patient's own view of the same case. `§43`'s rule is
+   * that a *patient* is never shown a rule set's titles, because they name
+   * syndromes and a syndrome on a patient's screen is a diagnosis nobody
+   * qualified made. A clinician is the qualified reader — withholding which
+   * rules fired from the person deciding what to do about them would be the
+   * inverse mistake.
+   */
+  async readSubmission(
+    submissionId: string,
+    user: AuthenticatedUser,
+    scopedPatientId?: string,
+  ): Promise<Record<string, unknown>> {
+    const submission = await this.repository.findSubmissionById(
+      submissionId,
+      resolveOrganizationId(user),
+    );
+
+    // Not-found rather than forbidden when a patient asks for somebody else's,
+    // the same way `AppointmentsController` answers: a 403 on an id that
+    // exists and a 404 on one that does not are different answers, and the
+    // difference is an oracle.
+    if (
+      !submission ||
+      (scopedPatientId && submission.patientId !== scopedPatientId)
+    ) {
+      throw new NotFoundException(
+        'That intake could not be found.',
+        ErrorCodes.CASE_SESSION_NOT_FOUND,
+      );
+    }
+
+    const stored = asCaseDocument(submission.structuredCase);
+
+    return {
+      ...toSubmissionCard(submission),
+      // The document as it was rendered when it was sent.
+      sections: withPresenceLabels(stored.sections),
+      missingInformation: stored.missingInformation,
+      safety: stored.safety,
+      text: stored.text,
+      rulesetVersion: stored.rulesetVersion,
+      consentVersion: stored.consentVersion,
+      inputLanguage: stored.inputLanguage,
+      outputLanguage: stored.outputLanguage,
+      renderedAt: stored.renderedAt,
     };
   }
 
@@ -2508,6 +2624,154 @@ function toPatientRedFlag(flag: CaseRedFlag): PatientRedFlagView {
     message: flag.message,
     triggeredAt: flag.triggeredAt,
   };
+}
+
+/**
+ * The header a clinician scans a list of intakes by.
+ *
+ * Read off the stored document rather than recomputed: `percentComplete` and
+ * the severity a row is sorted and coloured by must be the ones the case was
+ * sent with, or a list and the case it opens disagree.
+ *
+ * `triggeredCount` is here and the rules themselves are not — not for the
+ * §43 reason, which does not apply to a clinician, but because a list row has
+ * no room to say what fired and a half-quoted rule is worse than a count that
+ * says "open this one".
+ */
+/**
+ * The stored sections, with each line's presence spelled out.
+ *
+ * The one thing added to a stored document on the way out, and it is a label
+ * rather than a re-render: `structuredCase.sections` holds the engine's own
+ * `RenderedItem`s, which carry `presence` as a token and no `presenceText` —
+ * `toReviewView` adds that for the patient's screen and the submission writer
+ * does not.
+ *
+ * Without it a client has to map six tokens to six sentences itself, and the
+ * failure mode when it does not is the one this whole feature is built to
+ * avoid: a blank where "Patient unsure" belongs, read as a question nobody
+ * asked. Derived from the token that was stored, so it says what the patient
+ * said and not what the registry says today.
+ */
+function withPresenceLabels(sections: unknown[]): unknown[] {
+  return sections.map((section) => {
+    const row = (section ?? {}) as Record<string, unknown>;
+    const items = Array.isArray(row.items) ? row.items : [];
+
+    return {
+      ...row,
+      items: items.map((entry) => {
+        const item = (entry ?? {}) as Record<string, unknown>;
+        const presence = asText(item.presence, 'not_assessed') as FactPresence;
+        return {
+          ...item,
+          presenceText: asText(item.presenceText, presenceLabel(presence)),
+        };
+      }),
+    };
+  });
+}
+
+function toSubmissionCard(
+  submission: CaseSubmissionWithPatient,
+): Record<string, unknown> {
+  const stored = asCaseDocument(submission.structuredCase);
+  const safety = stored.safety;
+
+  return {
+    id: submission.id,
+    sessionId: submission.sessionId,
+    patientId: submission.patientId,
+    submittedAt: submission.submittedAt,
+    percentComplete: stored.percentComplete,
+    sectionCount: stored.sections.length,
+    missingCount: stored.missingInformation.length,
+    highestSeverity: safety.highestSeverity,
+    triggeredCount: safety.triggered.length,
+    // Both languages, because one cannot say what happened: a Tamil-speaking
+    // patient answered in English is a fact the clinician reading the case
+    // needs, and `language: ta` over an English transcript reads as a
+    // translation that never ran.
+    inputLanguage: stored.inputLanguage,
+    outputLanguage: stored.outputLanguage,
+    patient: {
+      id: submission.patient.id,
+      mrn: submission.patient.mrn,
+      firstName: submission.patient.firstName,
+      lastName: submission.patient.lastName,
+      fullName:
+        `${submission.patient.firstName} ${submission.patient.lastName}`.trim(),
+      dateOfBirth: submission.patient.dateOfBirth,
+      gender: submission.patient.gender,
+    },
+  };
+}
+
+/**
+ * The stored document, read defensively.
+ *
+ * `structuredCase` is a JSON column written by a build that may be older than
+ * the one reading it — a case sent a year ago was rendered by a ruleset that
+ * has since moved. Every field is therefore defaulted rather than asserted:
+ * a row this build cannot fully parse must still open as the parts it can
+ * read, because the alternative is a clinician being shown an error where a
+ * patient's own account of their symptoms is.
+ */
+function asCaseDocument(value: unknown): {
+  percentComplete: number;
+  missingInformation: string[];
+  sections: unknown[];
+  safety: {
+    rulesetVersion: string;
+    highestSeverity: string;
+    triggered: unknown[];
+  };
+  text: string;
+  rulesetVersion: string;
+  consentVersion: string | null;
+  inputLanguage: string;
+  outputLanguage: string;
+  renderedAt: string | null;
+} {
+  const doc = (value ?? {}) as Record<string, unknown>;
+  const safety = (doc.safety ?? {}) as Record<string, unknown>;
+
+  return {
+    percentComplete:
+      typeof doc.percentComplete === 'number' ? doc.percentComplete : 0,
+    missingInformation: Array.isArray(doc.missingInformation)
+      ? (doc.missingInformation as string[])
+      : [],
+    sections: Array.isArray(doc.sections) ? doc.sections : [],
+    safety: {
+      rulesetVersion: asText(safety.rulesetVersion, ''),
+      highestSeverity: asText(safety.highestSeverity, 'none'),
+      triggered: Array.isArray(safety.triggered) ? safety.triggered : [],
+    },
+    text: asText(doc.text, ''),
+    rulesetVersion: asText(doc.rulesetVersion, ''),
+    consentVersion: asTextOrNull(doc.consentVersion),
+    inputLanguage: asText(doc.inputLanguage ?? doc.language, DEFAULT_LANGUAGE),
+    outputLanguage: asText(doc.outputLanguage, DEFAULT_OUTPUT_LANGUAGE),
+    renderedAt: asTextOrNull(doc.renderedAt),
+  };
+}
+
+/**
+ * A string out of a JSON column, or the fallback.
+ *
+ * Only a string counts. Template-stringifying whatever the column happens to
+ * hold turns an object into the literal text `[object Object]` and puts it on
+ * a clinician's screen as if it were a language code — which is the failure
+ * mode this whole reader is defensive about, arriving through the defence.
+ */
+function asText(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.length > 0 ? value : fallback;
+}
+
+/** The same, where absent is a meaningful answer rather than a default. */
+function asTextOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 function toPatientSafetyView(

@@ -25,7 +25,21 @@ import { join } from 'path';
 
 const MODULES_DIR = join(__dirname, '..', '..', 'modules');
 
-/** Controllers that put themselves behind the guard, whatever else they do. */
+/**
+ * Controllers that are actually **behind** the guard, whatever else they do.
+ *
+ * Mounted, not mentioned. The rule this file enforces exists because
+ * `PatientSelfGuard` *rewrites* `params.id` — so it binds on a controller that
+ * runs the guard, and on nothing else. Matching any source that contains the
+ * string pulled in `appointments.controller.ts`, which names the guard in a
+ * comment explaining why it scopes its own writes and is not behind it: every
+ * `:id` on that staff controller is an appointment id nothing rewrites, and
+ * the spec failed on four of them.
+ *
+ * `@PatientScope()` still counts on its own. A handler reading that decorator
+ * is reading a value only the guard sets, so the guard is mounted whether this
+ * regex can see the `@UseGuards` line or not.
+ */
 function patientScopedControllers(): { path: string; source: string }[] {
   const found: { path: string; source: string }[] = [];
 
@@ -42,16 +56,30 @@ function patientScopedControllers(): { path: string; source: string }[] {
       if (!entry.endsWith('.controller.ts')) continue;
       const path = join(moduleDir, entry);
       const source = readFileSync(path, 'utf8');
-      if (
-        source.includes('PatientSelfGuard') ||
-        source.includes('@PatientScope')
-      ) {
+      if (mountsPatientSelfGuard(source) || source.includes('@PatientScope(')) {
         found.push({ path: `${moduleName}/${entry}`, source });
       }
     }
   }
 
   return found;
+}
+
+/**
+ * True when `PatientSelfGuard` is inside a `@UseGuards(...)` on this source.
+ *
+ * Deliberately not `source.includes('PatientSelfGuard')`: a controller may
+ * name the guard in prose to explain why it does its own scoping instead, and
+ * a detector that cannot tell a mount from a mention reports the wrong file
+ * and teaches the next reader to relax the rule.
+ */
+function mountsPatientSelfGuard(source: string): boolean {
+  const mounts = /@UseGuards\(([\s\S]*?)\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = mounts.exec(source)) !== null) {
+    if (match[1].includes('PatientSelfGuard')) return true;
+  }
+  return false;
 }
 
 /** Route paths out of the `@Get('…')` family, as written. */

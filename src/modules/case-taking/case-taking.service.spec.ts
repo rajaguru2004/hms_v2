@@ -231,6 +231,28 @@ class FakeRepository {
 
   findSubmission = jest.fn(() => Promise.resolve(null));
 
+  /** Rows the clinician-facing reads answer from. Seeded per test. */
+  submissions: Record<string, unknown>[] = [];
+
+  listSubmissions = jest.fn(
+    (
+      where: { patientId?: string },
+      options: { skip: number; take: number },
+    ) => {
+      const rows = this.submissions.filter(
+        (row) => !where.patientId || row.patientId === where.patientId,
+      );
+      return Promise.resolve({
+        rows: rows.slice(options.skip, options.skip + options.take),
+        total: rows.length,
+      });
+    },
+  );
+
+  findSubmissionById = jest.fn((id: string) =>
+    Promise.resolve(this.submissions.find((row) => row.id === id) ?? null),
+  );
+
   findPatientForSession = jest.fn(() =>
     Promise.resolve({
       id: PATIENT_ID,
@@ -1936,5 +1958,179 @@ describe('ageBandFrom', () => {
   it('returns nothing rather than a guess when there is no date of birth', () => {
     expect(ageBandFrom(null)).toBeNull();
     expect(ageBandFrom(new Date('not a date'))).toBeNull();
+  });
+});
+
+/**
+ * The clinician's side: reading an intake somebody else wrote.
+ *
+ * Everything above this point is the patient having the interview. These are
+ * the two reads a doctor makes afterwards, and what they are careful about is
+ * the opposite thing: not what may be written, but what may be *seen*.
+ */
+describe('reading submitted intakes', () => {
+  const DOCTOR: AuthenticatedUser = {
+    id: 'user-9',
+    email: 'a.okonkwo@hms.local',
+    organizationId: 'org-1',
+    roles: ['DOCTOR'],
+  } as AuthenticatedUser;
+
+  /** A stored document of the shape `submit()` writes. */
+  const storedCase = (overrides: Record<string, unknown> = {}) => ({
+    rulesetVersion: '2026.09.1',
+    consentVersion: 'v1',
+    language: 'ta',
+    inputLanguage: 'ta',
+    outputLanguage: 'en',
+    renderedAt: '2026-09-20T08:00:00.000Z',
+    percentComplete: 80,
+    missingInformation: ['hpi.radiation'],
+    sections: [{ section: 'chief_complaint', title: 'What brought you in' }],
+    safety: {
+      rulesetVersion: '2026.09.1',
+      highestSeverity: 'urgent',
+      // `TriggeredRule`'s own keys — see `safety-engine.ts`. `{ id, title }`
+      // is a shape this API never sends, and a fixture that invents one lets
+      // a client be written against the invention: the Flutter model read
+      // `id`/`rationale`/`action` for a wire that says
+      // `ruleId`/`clinicianSummary`/`recommendedAction`, and both tiers
+      // agreed with each other while neither agreed with the server.
+      triggered: [
+        {
+          ruleId: 'chest_pain_acs',
+          ruleVersion: 1,
+          severity: 'urgent',
+          title: 'Possible acute coronary syndrome',
+          patientMessage: 'Please tell the desk you are here.',
+          clinicianSummary: 'Meets the ACS screening triad.',
+          recommendedAction: 'Assess before the routine queue.',
+          matched: [],
+        },
+      ],
+    },
+    text: 'Chief Complaint\n  Main concern: chest pain',
+    ...overrides,
+  });
+
+  const row = (
+    id: string,
+    patientId: string,
+    overrides: Record<string, unknown> = {},
+  ) => ({
+    id,
+    sessionId: `sess-${id}`,
+    patientId,
+    organizationId: 'org-1',
+    submittedAt: new Date('2026-09-20T08:05:00.000Z'),
+    structuredCase: storedCase(overrides),
+    patient: {
+      id: patientId,
+      mrn: '10421',
+      firstName: 'Ifeoma',
+      lastName: 'Balogun',
+      dateOfBirth: new Date('1991-04-12'),
+      gender: 'Female',
+    },
+  });
+
+  it('lists intakes with the header a clinician scans by', async () => {
+    const h = harness();
+    h.repo.submissions = [row('sub-1', 'pat-1'), row('sub-2', 'pat-2')];
+
+    const page = await h.service.listSubmissions({}, DOCTOR);
+
+    expect(page.meta.total).toBe(2);
+    const first = page.data[0];
+    expect(first.highestSeverity).toBe('urgent');
+    expect(first.triggeredCount).toBe(1);
+    // Both languages, because one cannot say that a Tamil speaker was
+    // answered in English.
+    expect(first.inputLanguage).toBe('ta');
+    expect(first.outputLanguage).toBe('en');
+    // A row has a count and not the rules: there is no room on a list line
+    // for a rule, and a half-quoted one is worse than "open this".
+    expect(first).not.toHaveProperty('safety');
+    expect(first).not.toHaveProperty('sections');
+  });
+
+  it('filters to one chart when a patient is named', async () => {
+    const h = harness();
+    h.repo.submissions = [row('sub-1', 'pat-1'), row('sub-2', 'pat-2')];
+
+    const page = await h.service.listSubmissions(
+      { patientId: 'pat-2' },
+      DOCTOR,
+    );
+
+    expect(page.data).toHaveLength(1);
+    expect(page.data[0].patientId).toBe('pat-2');
+  });
+
+  it('shows the clinician which rules fired', async () => {
+    const h = harness();
+    h.repo.submissions = [row('sub-1', 'pat-1')];
+
+    const full = await h.service.readSubmission('sub-1', DOCTOR);
+    const safety = full.safety as { triggered: unknown[] };
+
+    // The difference from the patient's own view of the same case. §43 keeps a
+    // rule set's titles off a *patient's* screen because they name syndromes;
+    // withholding them from the clinician deciding what to do would be the
+    // inverse mistake.
+    expect(safety.triggered).toHaveLength(1);
+    expect(full.text).toContain('chest pain');
+    expect(full.sections).toHaveLength(1);
+  });
+
+  it('answers from the stored document rather than re-rendering', async () => {
+    const h = harness();
+    // A session that has moved on since it was sent: the stored case says 80%
+    // and two sections were added to the live state afterwards. What the
+    // doctor opened must stay what the patient sent.
+    h.repo.seedSession();
+    h.repo.submissions = [row('sub-1', 'pat-1', { percentComplete: 80 })];
+
+    const full = await h.service.readSubmission('sub-1', DOCTOR);
+
+    expect(full.percentComplete).toBe(80);
+    expect(h.repo.listCurrentFacts).not.toHaveBeenCalled();
+  });
+
+  it("answers not-found for another patient's intake", async () => {
+    const h = harness();
+    h.repo.submissions = [row('sub-2', 'pat-2')];
+
+    // A patient caller, scoped to themselves. Not-found rather than forbidden:
+    // a 403 on an id that exists and a 404 on one that does not are different
+    // answers, and the difference enumerates the register.
+    expect(
+      await errorCodeOf(() => h.service.readSubmission('sub-2', USER, 'pat-1')),
+    ).toBe('CASE_SESSION_NOT_FOUND');
+  });
+
+  it('opens a document an older build wrote', async () => {
+    const h = harness();
+    // A case rendered before the language split, with no safety block at all.
+    // It must open as the parts this build can read: the alternative is an
+    // error where a patient's own account of their symptoms should be.
+    h.repo.submissions = [
+      {
+        ...row('sub-old', 'pat-1'),
+        structuredCase: {
+          sections: [],
+          text: 'Chief Complaint',
+          language: 'hi',
+        },
+      },
+    ];
+
+    const full = await h.service.readSubmission('sub-old', DOCTOR);
+
+    expect(full.percentComplete).toBe(0);
+    expect((full.safety as { highestSeverity: string }).highestSeverity).toBe(
+      'none',
+    );
+    expect(full.inputLanguage).toBe('hi');
   });
 });

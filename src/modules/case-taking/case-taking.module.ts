@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { CaseSubmissionsController } from './case-submissions.controller';
 import { CaseTakingController } from './case-taking.controller';
 import { CaseTakingService } from './case-taking.service';
 import { CaseTakingRepository } from './case-taking.repository';
@@ -26,7 +27,13 @@ import { AuthModule } from '../auth/auth.module';
  */
 @Module({
   imports: [AiModule, AuthModule],
-  controllers: [CaseTakingController],
+  // Two controllers, and the split is load-bearing rather than tidy:
+  // `CaseTakingController` mounts `PatientSelfGuard`, which rewrites any
+  // patient id in a request to the caller's own. That is right for the
+  // patient's own interview and wrong for a clinician opening somebody's
+  // finished intake, and a guard cannot be unmounted for two of a class's
+  // routes. See the header on `CaseSubmissionsController`.
+  controllers: [CaseTakingController, CaseSubmissionsController],
   providers: [CaseTakingService, CaseTakingRepository],
   exports: [CaseTakingService, CaseTakingRepository],
 })
