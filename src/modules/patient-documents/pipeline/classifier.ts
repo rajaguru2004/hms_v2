@@ -154,7 +154,7 @@ const SATURATION = 6;
  * discharge summary that lists the drugs the patient went home on is the second
  * case, and it is common.
  */
-const ASK_MODEL_BELOW = 0.55;
+export const ASK_MODEL_BELOW = 0.55;
 
 /**
  * A model that answered is trusted this far and no further.
@@ -216,9 +216,20 @@ export function classifyByKeywords(text: string): Classification {
 export async function classifyDocument(
   text: string,
   llm: DocumentLlm,
+  options: { modelEnabled?: boolean } = {},
 ): Promise<Classification> {
   const byKeywords = classifyByKeywords(text);
   if (byKeywords.confidence >= ASK_MODEL_BELOW) return byKeywords;
+
+  // Switched off for this deployment. The keyword verdict is returned exactly
+  // as it stands — *not* demoted to `unknown` the way the `catch` below
+  // demotes it. The distinction is real: a model that is unreachable might
+  // have disagreed, so falling back to a weak guess would be dressing a 0.3 up
+  // as a decision; a model that was never going to be asked cannot have
+  // disagreed with anything, and the keyword score is a real, auditable
+  // measurement that stands on its own. Without this branch a GPU-less box
+  // also spends a 60-second timeout per document on a call that always fails.
+  if (options.modelEnabled === false) return byKeywords;
 
   try {
     const answer = await llm.extractJson<{ documentType?: string }>({

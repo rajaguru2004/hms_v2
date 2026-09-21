@@ -133,8 +133,14 @@ export class PatientDocumentResponseDto {
 
   @ApiPropertyOptional({
     description:
-      'The share of extracted values found verbatim in the source text, 0..1. ' +
-      "Derived here; never a model's self-report.",
+      'How well this document was read, 0..1. Derived here; never a ' +
+      "model's self-report. WHAT IT MEASURES depends on which reader " +
+      'produced the extraction, and `extraction.confidence.extractionSource` ' +
+      'is the only thing that says which: `grounding` is the share of ' +
+      'model-produced values found verbatim in the source text, while ' +
+      '`rule_coverage` is how much of the page the deterministic reader ' +
+      'accounted for. The two are not comparable and must not be averaged ' +
+      'together across documents.',
   })
   extractionConfidence?: number | null;
 

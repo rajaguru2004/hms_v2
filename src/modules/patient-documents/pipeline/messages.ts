@@ -52,6 +52,39 @@ export const EXTRACTION_UNAVAILABLE =
   'We saved this document but could not read it into information just now. ' +
   'It is kept with your records, and a clinician can review it.';
 
+/**
+ * Part of the document was read; the step that would have read the rest did not run.
+ *
+ * A third sentence beside [NOTHING_EXTRACTED] and [EXTRACTION_UNAVAILABLE],
+ * and the three are distinct on purpose:
+ *
+ *     NOTHING_EXTRACTED       we looked at all of it, and there was nothing there
+ *     EXTRACTION_UNAVAILABLE  nobody looked at any of it
+ *     this                    somebody looked at some of it
+ *
+ * The deterministic reader makes the third case ordinary rather than rare: it
+ * reads a printed prescription completely and a handwritten one barely at all,
+ * and on a deployment with no model there is nothing behind it to finish the
+ * job. Saying the first here tells a patient their prescription lists two
+ * medicines when the page lists five — §19 arriving by the side door.
+ */
+export const PARTIALLY_EXTRACTED =
+  'We read part of this document. Please check what we found — there may be ' +
+  'more on the page that we have not listed. The original is kept with your ' +
+  'records, and a clinician can review it.';
+
+/**
+ * This deployment cannot read this kind of document at all.
+ *
+ * [EXTRACTION_UNAVAILABLE] says "just now", which promises that trying again
+ * will go differently. On a box with no model, reading an imaging report will
+ * not go differently tomorrow, and what that promise costs is a patient
+ * photographing the same page three times before giving up.
+ */
+export const EXTRACTION_NOT_SUPPORTED =
+  'We saved this document, but we could not turn it into information. It is ' +
+  'kept with your records, and a clinician can review it.';
+
 /** The file was not a photograph or a PDF. §27. */
 export const UNSUPPORTED_FILE =
   'This kind of file cannot be read. Please upload a photo of the document, ' +
@@ -109,3 +142,33 @@ export const CORRECTION_RECORDED =
 export const VERIFIED =
   'Thank you. You have confirmed this information, and it is now part of your ' +
   'medical history.';
+
+/**
+ * Which of the four outcome sentences this reading earned.
+ *
+ * Lives here, beside the strings, and is called from two places on purpose:
+ * the pipeline when it writes the row, and `messageFor` when it reads one
+ * back. Those two disagreeing is not hypothetical — before this function
+ * existed the read path chose from findings alone, so a row the pipeline had
+ * correctly labelled [EXTRACTION_UNAVAILABLE] came back to the patient as
+ * [NOTHING_EXTRACTED]: "we looked and found nothing" about a document nothing
+ * had looked at.
+ */
+export function extractionMessage(outcome: {
+  /** `none` when no reader applied to this document type. */
+  method: 'rules' | 'model' | 'rules_then_model' | 'none';
+  /** Something was read, but not all of it. */
+  partial: boolean;
+  /** A reader ran and threw, and nothing else produced anything. */
+  failed: boolean;
+  hasFindings: boolean;
+}): string {
+  if (outcome.failed) return EXTRACTION_UNAVAILABLE;
+  if (outcome.method === 'none') return EXTRACTION_NOT_SUPPORTED;
+  if (outcome.partial) {
+    return outcome.hasFindings ? PARTIALLY_EXTRACTED : EXTRACTION_NOT_SUPPORTED;
+  }
+  // The only branch allowed to say "we looked and there was nothing", and it
+  // is reachable only once a reader has finished the whole document.
+  return outcome.hasFindings ? AWAITING_REVIEW : NOTHING_EXTRACTED;
+}

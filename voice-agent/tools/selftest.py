@@ -87,26 +87,49 @@ async def main() -> int:
     )
 
     # ── TTS refusals: a language with no voice must NOT be substituted ──────
-    print("\n=== TTS refusals (must not substitute) ===")
-    for code, name in (("ta", "Tamil"), ("or", "Odia"), ("bn", "Bengali")):
+    #
+    # Which languages those are is **asked, not assumed**. `ta` used to be on
+    # this list as a must-refuse, and it stopped being one the day somebody
+    # dropped `ta_IN-ValluvarNeural-medium.onnx` into ai-sidecar/voices —
+    # PiperTTS._index rescans the directory per request precisely so that
+    # works without a restart. The hard-coded list then failed a correct
+    # system, which is the worst thing a pre-deploy check can do: the next
+    # person reads "SUBSTITUTED by piper — serious", finds nothing wrong, and
+    # learns to ignore the whole file.
+    #
+    # So /health names the languages that have a voice right now, and this
+    # checks the two halves of the contract against it: everything it lists
+    # speaks, everything it does not list refuses with a 503.
+    print("\n=== TTS: /health's list is the contract ===")
+    spoken_languages = [str(code) for code in (health.get("ttsLanguages") or [])]
+    print(f"  /health reports ttsLanguages={spoken_languages or '(none)'}")
+
+    probe = {
+        "en": PHRASE,
+        "hi": "आपको कब से दर्द है?",
+        "ta": "உங்களுக்கு எவ்வளவு நாட்களாக வலி இருக்கிறது?",
+        "bn": "আপনার কতদিন ধরে ব্যথা?",
+        "or": PHRASE,
+    }
+    for code, phrase in probe.items():
+        expected_to_speak = code in spoken_languages
         try:
-            _, sub = await client.speak(PHRASE, code)
-            check(f"/tts {code} ({name}) refused", False, f"SUBSTITUTED by {sub} — serious")
+            wav, provider = await client.speak(phrase, code)
+            check(
+                f"/tts {code} speaks" if expected_to_speak else f"/tts {code} refuses",
+                expected_to_speak and len(wav) > 1000,
+                f"{len(wav)} bytes via {provider}"
+                if expected_to_speak
+                else f"SUBSTITUTED by {provider} — serious",
+            )
         except SidecarRefusal as refusal:
             check(
-                f"/tts {code} ({name}) refused",
-                refusal.status == 503,
+                f"/tts {code} speaks" if expected_to_speak else f"/tts {code} refuses",
+                not expected_to_speak and refusal.status == 503,
                 f"{refusal.status}: {refusal.patient_message}",
             )
         except SidecarUnavailable as exc:
-            check(f"/tts {code} ({name}) refused", False, f"transport: {exc}")
-
-    # Hindi is the other language Piper does serve; it must NOT refuse.
-    try:
-        hi_wav, hi_provider = await client.speak("आपको कब से दर्द है?", "hi")
-        check("/tts hi speaks", len(hi_wav) > 1000, f"{len(hi_wav)} bytes via {hi_provider}")
-    except SidecarRefusal as refusal:
-        check("/tts hi speaks", False, f"refused: {refusal.patient_message}")
+            check(f"/tts {code}", False, f"transport: {exc}")
 
     # ── The 22050 -> 16000 hop, and STT ────────────────────────────────────
     print("\n=== STT (en) ===")

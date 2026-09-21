@@ -50,6 +50,17 @@ export interface ValueProvenance {
   /** The recogniser's measurement for the page. Never the model's opinion. */
   ocrConfidence: number | null;
   verification: VerificationStatus;
+  /**
+   * Which reader produced this value.
+   *
+   * A reviewer looking at a wrong value needs to know which reader to
+   * distrust, and the two fail in different ways: a rule mis-parses a layout
+   * and does it identically on every document from that clinic, while a model
+   * misreads one page and never repeats it.
+   */
+  producedBy: 'rules' | 'model';
+  /** The named rule, for the deterministic path. Null for model values. */
+  rule: string | null;
 }
 
 export interface ProvenanceResult {
@@ -62,6 +73,18 @@ export interface ProvenanceResult {
    * document whose every value was invented.
    */
   extractionConfidence: number | null;
+  /**
+   * The same measure over model-produced values only.
+   *
+   * The number worth publishing once the rules run first. Rule-extracted
+   * values are slices of the source text, so they ground by construction and
+   * counting them measures arithmetic rather than evidence — an extraction
+   * that is ninety per cent rules would report 0.97 whatever the model did.
+   *
+   * Null when the model produced nothing, which is the ordinary case on a box
+   * with no GPU.
+   */
+  modelGrounding: number | null;
   /** The values that could not be found. The reviewer's shortlist. */
   ungrounded: string[];
 }
@@ -159,6 +182,17 @@ export function buildProvenance(
   extraction: ExtractedDocument,
   pages: PageText[],
   documentId: string,
+  /**
+   * Which reader produced each value, keyed as `collectExtractedValues` keys.
+   *
+   * Optional, and absent means "a model produced all of it" — which is what
+   * every caller meant before the deterministic pass existed, and what every
+   * row stored before it is.
+   */
+  origins?: ReadonlyMap<
+    string,
+    { producedBy: 'rules' | 'model'; rule: string | null }
+  >,
 ): ProvenanceResult {
   const normalisedPages = pages.map((page) => ({
     ...page,
@@ -177,6 +211,7 @@ export function buildProvenance(
 
     if (!found) ungrounded.push(field);
 
+    const origin = origins?.get(field);
     sources.push({
       field,
       value,
@@ -186,6 +221,8 @@ export function buildProvenance(
       grounded: Boolean(found),
       ocrConfidence: found?.meanConfidence ?? null,
       verification: UNVERIFIED,
+      producedBy: origin?.producedBy ?? 'model',
+      rule: origin?.rule ?? null,
     });
   }
 
@@ -195,8 +232,28 @@ export function buildProvenance(
       values.length === 0
         ? null
         : round((values.length - ungrounded.length) / values.length),
+    modelGrounding: scoreGrounding(
+      sources,
+      (entry) => entry.producedBy === 'model',
+    ),
     ungrounded,
   };
+}
+
+/**
+ * The grounded share of some subset of values, or null when the subset is empty.
+ *
+ * Null rather than zero, for the reason [ProvenanceResult.extractionConfidence]
+ * gives: "nothing was checked" and "everything checked was invented" are
+ * opposite findings and must not share a number.
+ */
+export function scoreGrounding(
+  sources: readonly ValueProvenance[],
+  include: (source: ValueProvenance) => boolean = () => true,
+): number | null {
+  const subset = sources.filter(include);
+  if (subset.length === 0) return null;
+  return round(subset.filter((entry) => entry.grounded).length / subset.length);
 }
 
 /** The recogniser's own number for the document: the mean across its pages. */

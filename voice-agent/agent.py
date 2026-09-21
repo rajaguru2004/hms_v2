@@ -26,7 +26,13 @@ and a cancellation protocol to move fifteen milliseconds of latency around.
 with a chat context and speak the reply. That is the wrong shape for a clinical
 interview, where the next question comes from a deterministic engine that also
 owns validation, red flags and escalation. So the loop is hand-rolled:
-`user_input_transcribed` -> POST -> `session.say(text=..., audio=...)`.
+`Agent.on_user_turn_completed` -> POST -> `session.say(text=..., audio=...)`.
+
+It hangs off the *turn commit* rather than off `user_input_transcribed`, which
+is the one non-obvious thing in this file and is explained at length on
+[CaseTakingAgent]. In one line: a transcript is not a turn, the library closes
+the turn a few hundred milliseconds later, and starting to speak before it does
+means the library cuts the question off as if the patient had barged in.
 
 The agent never makes a clinical decision. It transcribes, posts, and speaks
 what comes back. Every judgement call — is that answer valid, is this a red
@@ -52,10 +58,11 @@ graph; it is the cheapest thing in this process.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
 from livekit.agents import (
     Agent,
@@ -63,7 +70,9 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
+    StopResponse,
     cli,
+    llm,
     room_io,
 )
 from livekit.plugins import silero
@@ -72,6 +81,7 @@ import health
 import timing
 from audio import frames_duration, frames_stream, wav_to_frames
 from config import Settings, describe, load_env_file
+from delivery import TurnBuffer, speak_all
 from engine import (
     CaseTakingClient,
     EngineRejected,
@@ -152,6 +162,92 @@ def prewarm(proc: JobProcess) -> None:
 
 
 server.setup_fnc = prewarm
+
+
+class CaseTakingAgent(Agent):
+    """Transport only — and the one place the turn is allowed to begin.
+
+    ## The race this exists to end
+
+    The turn used to start on `user_input_transcribed(is_final=True)`, which is
+    the moment [SidecarSTT] finishes a Whisper decode. That was survivable while
+    the reply came from a language model: gemma3:4b took seconds, and in those
+    seconds livekit-agents finished its *own* end-of-turn pipeline and committed
+    the user's turn. The question was spoken afterwards, into a settled session.
+
+    The deterministic engine answers in fifteen milliseconds. The worker now
+    wins that race every time, and winning it is the bug:
+    `AgentActivity._user_turn_completed_impl` reaches
+
+        await current_speech.interrupt(source="user_turn")
+
+    (voice/agent_activity.py) a few hundred milliseconds later and cuts off the
+    question we have just started asking — because from the library's side a
+    user turn has closed while the agent is speaking, which is a barge-in.
+
+    Measured in agent.log, one session, 2026-09-20 20:06-20:08:
+
+        20:07:17,908  final: "I've been unusually drowsy for 2 hours"
+        20:07:18,032  agent state listening -> speaking
+        20:07:18,035  user turn committed          <- 3 ms later
+        20:07:18,040  interrupted after 0.01s of 3.08s:
+                      "Have you had shaking chills where you could not stop..."
+
+    Five of that session's nine questions were cut off this way, one of them
+    after ten milliseconds. And because `session.say(text=...)` forwards the
+    whole transcript to the room the instant it is called, every one of them
+    **appeared on the patient's screen in full**. That is the report this fixes:
+    the bot skips messages and they show up only as text.
+
+    ## The fix, and why it is this one
+
+    The turn starts here instead — `on_user_turn_completed` is the library's own
+    "the patient has finished, it is your move". By the time it runs, the
+    interrupt above has already happened and found nothing to cut; anything that
+    interrupts the question from here on is the patient genuinely talking over
+    it, which is what barge-in is for.
+
+    It costs the library's endpointing delay, measured at 0.13-0.84 s across
+    every turn in the log. That is not a regression to apologise for: a reply
+    that lands fifteen milliseconds after somebody stops speaking is not what a
+    conversation sounds like.
+
+    Two things are deliberately *not* done here:
+
+      * **No clinical judgement.** This reads a transcript and hands it on. The
+        question, the validation, the red flags and the escalation are the
+        engine's, exactly as before.
+      * **No work in the hook.** It starts a task and returns.
+        `_user_turn_completed_impl` awaits the previous hook before handling the
+        next turn, so blocking here would delay the patient's *next* answer by
+        the length of the question we are asking.
+
+    `StopResponse` is raised rather than returned so the library never reaches
+    reply generation. With no `llm=` it would return anyway one branch later;
+    raising says it is a decision rather than a consequence of the session's
+    shape, and keeps it true if an LLM is ever attached for something else.
+    """
+
+    def __init__(self, on_turn: Callable[[str, float], None]) -> None:
+        super().__init__(
+            # Inert. There is no LLM in this session, so nothing ever reads
+            # these. `Agent` requires them, and the string is here to tell the
+            # next reader that its absence is not an oversight.
+            instructions=(
+                "Transport only. Question selection, validation, red flags and "
+                "escalation belong to the deterministic case-taking engine."
+            )
+        )
+        self._on_turn = on_turn
+
+    async def on_user_turn_completed(
+        self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
+    ) -> None:
+        text = (new_message.text_content or "").strip()
+        confidence = float(new_message.transcript_confidence or 0.0)
+        timing.mark("turn.committed", chars=len(text), confidence=round(confidence, 3))
+        self._on_turn(text, confidence)
+        raise StopResponse
 
 
 def _job_metadata(ctx: JobContext) -> dict[str, Any]:
@@ -387,19 +483,24 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # ── Speaking ────────────────────────────────────────────────────────────
 
-    async def say(text: str) -> bool:
-        """Synthesise one piece and push it into the room. True if it was heard.
+    async def synthesise(text: str) -> tuple[list[Any], str] | None:
+        """One piece of engine text as audio frames, or None if it has no voice.
 
-        On a TTS refusal this returns False without speaking anything. It does
-        not fall back to another language's voice: Piper serves `en` and `hi`,
-        everything else 503s, and answering a Tamil session in English would be
-        a clinical record of a question the patient never understood. The text
-        still reaches the phone as a data message, so the question is there to
-        be read.
+        Separated from playing it so the next piece can be synthesised while
+        the current one is in the patient's ear. Piper takes a few hundred
+        milliseconds per sentence and the round trip used to sit *between* two
+        halves of the same question — a dead gap in the middle of a sentence,
+        which is the single most artificial thing this worker did.
+
+        On a refusal this publishes the text and returns None. It does not fall
+        back to another language's voice. Which languages have a voice is the
+        sidecar's to know and it changes — dropping a `.onnx` into its voices
+        directory adds one without a restart — so this asks and believes the
+        answer. Answering a session in a language it did not ask for would be a
+        clinical record of a question the patient never understood. The text still
+        reaches the phone as a data message, so the question is there to be
+        read — which is why a refusal is not counted against delivery below.
         """
-        text = text.strip()
-        if not text:
-            return False
         timing.mark("say.begin", chars=len(text))
         try:
             wav, provider = await sidecar.speak(text, language)
@@ -407,13 +508,31 @@ async def entrypoint(ctx: JobContext) -> None:
             STATUS.tts_refused = language
             STATUS.last_error = refusal.patient_message
             logger.warning("no voice for %s; sending text only: %s", language, text)
-            await publish("speak", {"text": text, "spoken": False, "reason": refusal.patient_message})
-            return False
+            await publish(
+                "speak",
+                {
+                    "phase": "end",
+                    "text": text,
+                    "spoken": False,
+                    "complete": False,
+                    "reason": refusal.patient_message,
+                },
+            )
+            return None
         except SidecarUnavailable as exc:
             STATUS.last_error = str(exc)
             logger.error("tts unavailable: %s", exc)
-            await publish("speak", {"text": text, "spoken": False, "reason": "tts unavailable"})
-            return False
+            await publish(
+                "speak",
+                {
+                    "phase": "end",
+                    "text": text,
+                    "spoken": False,
+                    "complete": False,
+                    "reason": "tts unavailable",
+                },
+            )
+            return None
 
         STATUS.spoken_via = provider
         STATUS.tts_refused = None
@@ -436,11 +555,38 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         if not frames:
             logger.warning("tts returned no audio for: %s", text[:80])
-            return False
+            await publish(
+                "speak",
+                {
+                    "phase": "end",
+                    "text": text,
+                    "spoken": False,
+                    "complete": False,
+                    "reason": "no audio",
+                },
+            )
+            return None
+        return frames, provider
 
+    async def play(text: str, audio: tuple[list[Any], str]) -> bool:
+        """Push one synthesised piece into the room. True if it played out whole.
+
+        The return value is the honest one, and the reason this function exists
+        apart from `session.say`. A speech that is cut off at 10 ms still
+        resolves its handle normally and still forwarded its full transcript to
+        the room, so from the caller's side an interrupted question and a spoken
+        one were indistinguishable — which is exactly how a patient came to be
+        shown six questions they had never heard.
+
+        Takes `synthesise`'s result whole rather than unpacked, because
+        [speak_all] hands it straight back without looking inside it — which is
+        the only way that function can stay ignorant of what audio is.
+        """
+        frames, provider = audio
         await publish(
             "speak",
             {
+                "phase": "start",
                 "text": text,
                 "spoken": True,
                 "provider": provider,
@@ -463,26 +609,46 @@ async def entrypoint(ctx: JobContext) -> None:
         # asking "is barge-in even working" has no other evidence at all.
         expected = frames_duration(frames)
         started = time.monotonic()
-        await handle
+        try:
+            await handle
+        except asyncio.CancelledError:
+            # The turn was dropped under us — a newer answer arrived. Stop the
+            # audio rather than letting it play on into a conversation that has
+            # moved past it.
+            with contextlib.suppress(Exception):
+                handle.interrupt()
+            raise
         spoke = time.monotonic() - started
 
         # A 25% margin: playout starts slightly before the first frame lands and
         # the last frame drains after the handle resolves, so an uninterrupted
         # utterance does not finish at exactly `expected`.
+        complete = not (SETTINGS.allow_interruptions and spoke < expected * 0.75)
         timing.mark(
             "say.handle_done",
             spoke_ms=round(spoke * 1000.0, 1),
             expected_ms=round(expected * 1000.0, 1),
-            interrupted=bool(SETTINGS.allow_interruptions and spoke < expected * 0.75),
+            interrupted=not complete,
         )
-        if SETTINGS.allow_interruptions and spoke < expected * 0.75:
+        if not complete:
             STATUS.interruptions += 1
             logger.info(
                 "interrupted after %.2fs of %.2fs: %s", spoke, expected, text[:60]
             )
         else:
             logger.debug("spoke %.2fs of %.2fs", spoke, expected)
-        return True
+        await publish(
+            "speak",
+            {
+                "phase": "end",
+                "text": text,
+                "spoken": True,
+                "complete": complete,
+                "spokenMs": round(spoke * 1000.0),
+                "expectedMs": round(expected * 1000.0),
+            },
+        )
+        return complete
 
     async def report_stt_problem(kind: str, code: str, detail: str) -> None:
         """Tell the room that we heard the patient and could not use it.
@@ -519,17 +685,21 @@ async def entrypoint(ctx: JobContext) -> None:
 
     stt.on_problem = report_stt_problem
 
-    async def say_all(lines: list[str]) -> None:
-        """Speak the engine's lines, in the engine's order, one at a time.
+    async def say_all(lines: list[str]) -> bool:
+        """Speak the engine's lines, in the engine's order. True if heard whole.
 
-        Serialised behind a lock: two overlapping `say` calls put two voices in
-        the room at once. The lock is also what makes a cancelled turn stop
-        cleanly — the cancellation lands while waiting for it.
+        Serialised behind a lock: two overlapping speeches put two voices in the
+        room at once. The lock is also what makes a cancelled turn stop cleanly
+        — the cancellation lands while waiting for it.
+
+        The loop itself is [speak_all] in delivery.py, which synthesises one
+        piece ahead of playback and is explicit about which failures count as
+        the patient not receiving the question. Both are things this worker got
+        wrong and neither needs a room to be tested.
         """
+        pieces = [piece for line in lines for piece in split_for_speech(line)]
         async with speaking_lock:
-            for line in lines:
-                for piece in split_for_speech(line):
-                    await say(piece)
+            return await speak_all(pieces, synthesise, play)
 
     # ── The turn ────────────────────────────────────────────────────────────
 
@@ -625,9 +795,21 @@ async def entrypoint(ctx: JobContext) -> None:
         if not lines:
             logger.info("engine returned nothing to say (status=%s)", result.interview_status)
             return
-        await say_all(lines)
-        mark_pending_spoken()
-        timing.mark("turn.spoken")
+        heard = await say_all(lines)
+        timing.mark("turn.spoken", heard=heard)
+        if heard:
+            mark_pending_spoken()
+        else:
+            # Cut off. `pending_field_spoken` stays false, so the next thing the
+            # patient says goes up unattributed rather than being filed against
+            # a question they never heard — the same rule as an utterance that
+            # arrives mid-question, for the same reason.
+            STATUS.unheard_questions += 1
+            logger.warning(
+                "the question for %s did not finish playing; the next answer "
+                "will not be filed against it",
+                pending_field or "-",
+            )
 
     async def publish_error(
         stage: str, *, detail: str, status: int | None, final: bool
@@ -715,6 +897,21 @@ async def entrypoint(ctx: JobContext) -> None:
             current_turn.cancel()
         current_turn = asyncio.create_task(run_turn(text, confidence))
 
+    # ── The turn boundary ───────────────────────────────────────────────────
+    #
+    # Finals are *held*, not posted. See [CaseTakingAgent] for why the turn is
+    # started by the library's end-of-turn commit rather than by the transcript
+    # that triggers it, and [TurnBuffer] in delivery.py for the holding itself.
+
+    def _commit_lost(text: str) -> None:
+        STATUS.uncommitted_turns += 1
+
+    turns = TurnBuffer(
+        grace=SETTINGS.turn_commit_grace,
+        start=start_turn,
+        on_lost=_commit_lost,
+    )
+
     # ── Transcripts ─────────────────────────────────────────────────────────
 
     @session.on("agent_state_changed")
@@ -769,19 +966,18 @@ async def entrypoint(ctx: JobContext) -> None:
         # pain" posted at the word "chest" is a different medical record from
         # the one the patient dictated. Latency is not worth that, especially
         # when the engine answers in fifteen milliseconds anyway.
-        start_turn(text, confidence)
+        #
+        # Held rather than posted. A final is the end of one Silero segment, not
+        # the end of the patient's turn — a patient who pauses mid-sentence
+        # produces two of them — and posting on it is what raced the library
+        # into cutting our own question off. `TurnBuffer.commit` is called from
+        # [CaseTakingAgent] when the turn actually closes, and the watchdog
+        # armed here is what happens if that never comes.
+        turns.hold(text, confidence)
 
     # ── Join ────────────────────────────────────────────────────────────────
 
-    agent = Agent(
-        # Inert. There is no LLM in this session, so nothing ever reads these.
-        # `Agent` is required by `session.start`, and the string is here to tell
-        # the next reader that its absence is not an oversight.
-        instructions=(
-            "Transport only. Question selection, validation, red flags and "
-            "escalation belong to the deterministic case-taking engine."
-        )
-    )
+    agent = CaseTakingAgent(turns.commit)
 
     _t_start = timing.mark("join.session_start", room=ctx.room.name)
     await session.start(
@@ -860,8 +1056,16 @@ async def entrypoint(ctx: JobContext) -> None:
                 await publish_turn(current)
                 lines = utterances(current)
                 if lines:
-                    await say_all(lines)
-                    mark_pending_spoken()
+                    if await say_all(lines):
+                        mark_pending_spoken()
+                    else:
+                        STATUS.unheard_questions += 1
+                        logger.warning(
+                            "the opening question for %s did not finish playing",
+                            current.next_question.field_path
+                            if current.next_question
+                            else "-",
+                        )
                 else:
                     logger.info("session %s has no pending question", session_id)
         except EngineUnavailable as exc:
@@ -975,6 +1179,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def _cleanup() -> None:
         STATUS.connected = False
+        turns.cancel()
         if current_turn is not None and not current_turn.done():
             current_turn.cancel()
         await sidecar.aclose()

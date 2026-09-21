@@ -91,6 +91,9 @@ class Settings:
     barge_min_silence: float
     allow_interruptions: bool
 
+    # ── The turn boundary ───────────────────────────────────────────────────
+    turn_commit_grace: float
+
     # ── Interim transcripts ─────────────────────────────────────────────────
     interim_enabled: bool
     interim_every: float
@@ -148,6 +151,21 @@ class Settings:
             barge_min_sec=_float("BARGE_MIN_SEC", 0.2),
             barge_min_silence=_ms("BARGE_MIN_SILENCE_MS", 250.0),
             allow_interruptions=_bool("MEDIHIVE_ALLOW_INTERRUPTIONS", True),
+            # How long a final transcript may sit unclaimed before the worker
+            # posts it anyway.
+            #
+            # The turn is normally started by livekit-agents' own end-of-turn
+            # commit rather than by the raw STT final — see the note on
+            # [CaseTakingAgent] in agent.py. That commit is what stops the
+            # library cutting our own question off, and it is reliable: across
+            # every turn in agent.log it landed 0.13-0.84 s after the final.
+            #
+            # But it is now the *only* thing that starts a turn, so a commit
+            # that never comes is a patient who answers into silence forever.
+            # This is the backstop. It is set above the library's own
+            # `max_delay` of 3.0 s, so it only ever fires when the commit has
+            # genuinely been lost rather than merely been slow.
+            turn_commit_grace=_float("MEDIHIVE_TURN_COMMIT_GRACE_SEC", 3.5),
             # Interim transcripts cost a whole extra Whisper decode each.
             # On by default because partials on the way back are the point of
             # the design; the knob exists because this box has run at 1 GB free.
@@ -238,6 +256,8 @@ def describe(settings: Settings) -> list[tuple[str, str]]:
         ("SILERO_DEACTIVATION", f"{s.silero_deactivation}"),
         ("BARGE_MIN_SEC", f"{s.barge_min_sec}"),
         ("BARGE_MIN_SILENCE_MS", f"{s.barge_min_silence * 1000:.0f}"),
+        ("MEDIHIVE_ALLOW_INTERRUPTIONS", "1" if s.allow_interruptions else "0"),
+        ("MEDIHIVE_TURN_COMMIT_GRACE_SEC", f"{s.turn_commit_grace}"),
         ("MEDIHIVE_INTERIM_TRANSCRIPTS", "1" if s.interim_enabled else "0"),
         ("MEDIHIVE_INTERIM_EVERY_SEC", f"{s.interim_every}"),
         ("AGENT_HEALTH_PORT", str(s.health_port)),

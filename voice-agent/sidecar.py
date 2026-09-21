@@ -31,11 +31,16 @@ must not be retried and must not be turned into an auto-detect, which would
 return a fluent Hindi transcript labelled Odia at HTTP 200.
 
 `/tts` answers **503** for every language Piper has no voice for — which today
-is everything except `en` and `hi`. That must not be substituted with another
-language. The incident the sidecar's own comment records is a Tamil request
-served by the English voice. Here the correct behaviour when TTS refuses is to
-publish the question as text into the room and say nothing: the question is
-there to be read.
+is whatever has no voice file on disk. That must not be substituted with
+another language. The set is not fixed and is not this file's to know: Piper
+rescans its voices directory per request, so Tamil arrived by somebody copying
+`ta_IN-ValluvarNeural-medium.onnx` into it. `/health` names the current set;
+anything not in it 503s.
+
+The incident the sidecar's own comment records is a Tamil request served by the
+English voice, from before it had a Tamil one. The correct behaviour here when
+TTS refuses is to publish the question as text into the room and say nothing:
+the question is there to be read.
 """
 
 from __future__ import annotations
@@ -204,8 +209,9 @@ class SidecarClient:
         )
 
         if response.status_code == 503:
-            # No voice for this language. Piper serves `en` and `hi`; everything
-            # else lands here. NOT substituted — the caller displays the text.
+            # No voice for this language — see the note at the top of this
+            # file for why the set is asked for rather than listed here.
+            # NOT substituted; the caller displays the text instead.
             raise SidecarRefusal(503, _detail(response, "This voice is unavailable."))
         if response.status_code == 400:
             raise SidecarRefusal(400, _detail(response, "There was nothing to say."))
